@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/chatbotchat-protocol",
+    "crates/chatbotchat-core",
+    "crates/chatbotchat-client",
+    "bins/chatbotchat-server",
+    "bins/cbc",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Levezze/chatbotchat"
+
+[workspace.dependencies]
+chatbotchat-protocol = { path = "crates/chatbotchat-protocol" }
+chatbotchat-core = { path = "crates/chatbotchat-core" }
+chatbotchat-client = { path = "crates/chatbotchat-client" }
+chatbotchat-server = { path = "bins/chatbotchat-server" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+time = { version = "0.3", features = ["serde", "macros", "formatting", "parsing"] }
+thiserror = "1"
+anyhow = "1"
+
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net"] }
+axum = "0.8"
+tower = "0.5"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rmcp = "1.7"
+schemars = "1"
+
+# dev / test
+assert_cmd = "2"

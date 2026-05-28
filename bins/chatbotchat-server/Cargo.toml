@@ -1,0 +1,29 @@
+[package]
+name = "chatbotchat-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "chatbotchat_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "chatbotchat-server"
+path = "src/main.rs"
+
+[dependencies]
+chatbotchat-core = { workspace = true }
+chatbotchat-protocol = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+tempfile = "3"
