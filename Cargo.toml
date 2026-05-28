@@ -36,6 +36,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rmcp = "1.7"
 schemars = "1"
+rand = "0.8"
 
 # dev / test
 assert_cmd = "2"

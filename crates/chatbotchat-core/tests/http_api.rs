@@ -90,6 +90,110 @@ async fn open_subject(app: &axum::Router, subject: &str) -> (StatusCode, Value) 
     (status, body)
 }
 
+async fn open_room_id(app: &axum::Router, subject: &str) -> String {
+    let (status, body) = open_subject(app, subject).await;
+    assert_eq!(status, StatusCode::CREATED);
+    body["room_id"].as_str().expect("room_id").to_string()
+}
+
+async fn join(
+    app: &axum::Router,
+    room_id: &str,
+    repo: &str,
+    model: &str,
+    cwd: &str,
+) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/rooms/{room_id}/join"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({ "repo": repo, "model": model, "cwd": cwd }).to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = body_json(resp.into_body()).await;
+    (status, body)
+}
+
+#[tokio::test]
+async fn join_is_idempotent_per_tuple_and_distinct_otherwise() {
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "join flow").await;
+
+    // First join mints a fresh handle of the form <repo>-<model>-<sess4hex>.
+    let (s1, b1) = join(&app, &room_id, "mvp-engine", "opus47", "/work/a").await;
+    assert_eq!(s1, StatusCode::CREATED);
+    let h1 = b1["handle"].as_str().expect("handle").to_string();
+    assert_eq!(b1["resumed"].as_bool(), Some(false));
+    assert_eq!(b1["room_state"].as_str(), Some("active"));
+    assert!(
+        b1["recent_messages"].as_array().expect("array").is_empty(),
+        "no messages exist in slice 2"
+    );
+    assert!(
+        h1.starts_with("mvp-engine-opus47-"),
+        "handle should be <repo>-<model>-<sess>, got {h1}"
+    );
+
+    // Same tuple → same handle, resumed=true.
+    let (s2, b2) = join(&app, &room_id, "mvp-engine", "opus47", "/work/a").await;
+    assert_eq!(s2, StatusCode::CREATED);
+    assert_eq!(b2["handle"].as_str(), Some(h1.as_str()));
+    assert_eq!(b2["resumed"].as_bool(), Some(true));
+
+    // Different cwd → different handle.
+    let (_, b3) = join(&app, &room_id, "mvp-engine", "opus47", "/work/b").await;
+    assert_ne!(b3["handle"].as_str(), Some(h1.as_str()));
+    assert_eq!(b3["resumed"].as_bool(), Some(false));
+
+    // Different model → different handle.
+    let (_, b4) = join(&app, &room_id, "mvp-engine", "sonnet46", "/work/a").await;
+    assert_ne!(b4["handle"].as_str(), Some(h1.as_str()));
+    assert_eq!(b4["resumed"].as_bool(), Some(false));
+}
+
+#[tokio::test]
+async fn status_lists_participants_after_join() {
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "roster").await;
+
+    let (_, b1) = join(&app, &room_id, "mvp-engine", "opus47", "/work/a").await;
+    let (_, b2) = join(&app, &room_id, "mvp-engine", "sonnet46", "/work/a").await;
+    let h1 = b1["handle"].as_str().unwrap();
+    let h2 = b2["handle"].as_str().unwrap();
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/rooms/{room_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp.into_body()).await;
+
+    let roster = body["participants"].as_array().expect("participants array");
+    assert_eq!(roster.len(), 2, "both joins should be listed");
+    let handles: Vec<&str> = roster
+        .iter()
+        .map(|p| p["handle"].as_str().unwrap())
+        .collect();
+    assert!(handles.contains(&h1) && handles.contains(&h2));
+    // Participant view carries the self-reported tuple fields.
+    assert_eq!(roster[0]["repo"].as_str(), Some("mvp-engine"));
+    assert!(roster[0]["model"].as_str().is_some());
+    assert!(roster[0]["cwd"].as_str().is_some());
+    assert!(roster[0]["joined_at"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn join_missing_room_is_404() {
+    let app = test_router().await;
+    let (status, _) = join(&app, "nope-20260528-1500", "r", "m", "/c").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
 #[tokio::test]
 async fn repeated_open_same_subject_gets_distinct_ids() {
     let app = test_router().await;
