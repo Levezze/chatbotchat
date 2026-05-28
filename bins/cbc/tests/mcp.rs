@@ -37,17 +37,14 @@ async fn mcp_lists_and_calls_open_room() {
         .list_tools(Default::default())
         .await
         .expect("list tools");
+    let advertised: Vec<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
     assert!(
-        tools
-            .tools
-            .iter()
-            .any(|t| t.name.as_ref() == "cbc_open_room"),
-        "cbc_open_room should be advertised; got {:?}",
-        tools
-            .tools
-            .iter()
-            .map(|t| t.name.as_ref())
-            .collect::<Vec<_>>()
+        advertised.contains(&"cbc_open_room"),
+        "cbc_open_room should be advertised; got {advertised:?}"
+    );
+    assert!(
+        advertised.contains(&"cbc_status"),
+        "cbc_status should be advertised; got {advertised:?}"
     );
 
     let result = client
@@ -66,6 +63,32 @@ async fn mcp_lists_and_calls_open_room() {
     assert!(
         rendered.contains("mcp-smoke-"),
         "tool result should carry the new room id; got: {rendered}"
+    );
+
+    // Extract the room id (scan from the known prefix over id-legal chars) and
+    // confirm cbc_status returns the same room over MCP.
+    let start = rendered.find("mcp-smoke-").expect("room id prefix");
+    let room_id: String = rendered[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+
+    let status = client
+        .call_tool(
+            CallToolRequestParams::new("cbc_status").with_arguments(
+                serde_json::json!({ "room_id": room_id })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("call cbc_status");
+
+    let status_rendered = serde_json::to_string(&status).expect("serialize status");
+    assert!(
+        status_rendered.contains(&room_id) && status_rendered.contains("active"),
+        "cbc_status should report the active room; got: {status_rendered}"
     );
 
     client.cancel().await.ok();

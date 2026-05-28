@@ -29,7 +29,18 @@ impl Storage {
             .create_if_missing(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
 
-        let pool = SqlitePoolOptions::new().connect_with(options).await?;
+        // A bare `:memory:` database is private to a single connection — each
+        // pooled connection would otherwise be a *separate* empty database, so
+        // migrations and writes on one would be invisible to reads on another.
+        // Pin the pool to one connection in that case so in-memory use (tests)
+        // behaves like a single coherent database. File-backed databases keep
+        // the default pool and benefit from WAL concurrency.
+        let mut pool_options = SqlitePoolOptions::new();
+        if is_memory_url(url) {
+            pool_options = pool_options.max_connections(1);
+        }
+
+        let pool = pool_options.connect_with(options).await?;
         let storage = Storage { pool };
         storage.migrate().await?;
         Ok(storage)
@@ -78,6 +89,11 @@ impl Storage {
             Some(row) => Ok(Some(row_to_room(&row)?)),
         }
     }
+}
+
+/// True for SQLite URLs that map to a private in-memory database.
+fn is_memory_url(url: &str) -> bool {
+    url.contains(":memory:") || url.contains("mode=memory")
 }
 
 fn fmt_err(e: time::error::Format) -> StorageError {
