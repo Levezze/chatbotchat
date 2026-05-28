@@ -18,7 +18,9 @@ pub async fn app_state(db_url: &str) -> anyhow::Result<AppState> {
     Ok(AppState::new(storage))
 }
 
-/// Serve the router on an already-bound listener until shutdown.
+/// Serve the router on an already-bound listener until the process is
+/// terminated. Graceful shutdown (draining in-flight connections on SIGTERM)
+/// is not yet wired — deferred to the daemon-lifecycle hardening in slice #10.
 pub async fn serve(listener: TcpListener, state: AppState) -> anyhow::Result<()> {
     axum::serve(listener, router(state))
         .await

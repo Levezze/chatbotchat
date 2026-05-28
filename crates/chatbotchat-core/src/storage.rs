@@ -15,6 +15,15 @@ pub enum StorageError {
     Corrupt(String),
 }
 
+impl StorageError {
+    /// True when the underlying failure is a UNIQUE/primary-key violation —
+    /// e.g. inserting a room whose id already exists. Callers use this to
+    /// disambiguate and retry rather than surfacing a 500.
+    pub fn is_unique_violation(&self) -> bool {
+        matches!(self, StorageError::Sqlx(sqlx::Error::Database(e)) if e.is_unique_violation())
+    }
+}
+
 /// All database access goes through `Storage`. Callers never see SQL.
 #[derive(Clone)]
 pub struct Storage {

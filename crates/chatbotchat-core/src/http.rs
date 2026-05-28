@@ -37,23 +37,40 @@ async fn open_room(
     Json(req): Json<OpenRoomRequest>,
 ) -> Result<(StatusCode, Json<OpenRoomResponse>), ApiError> {
     let now = OffsetDateTime::now_utc();
-    let id = ids::room_id(&req.subject, now);
+    let base = ids::room_id(&req.subject, now);
 
-    let room = Room {
-        id: id.clone(),
-        subject: req.subject,
-        started_at: now,
-        last_activity_at: now,
-        state: RoomState::Active,
-        config: RoomConfig::default(),
-        prev_room_id: None,
+    // The base id is only minute-granular, so two opens of the same subject in
+    // one minute would collide on the primary key. Disambiguate by suffixing
+    // `-2`, `-3`, … and retrying; the DB UNIQUE constraint makes this race-free
+    // even under concurrent opens.
+    const MAX_ATTEMPTS: u32 = 64;
+    let mut attempt = 0u32;
+    let room_id = loop {
+        attempt += 1;
+        let candidate = if attempt == 1 {
+            base.clone()
+        } else {
+            format!("{base}-{attempt}")
+        };
+        let room = Room {
+            id: candidate.clone(),
+            subject: req.subject.clone(),
+            started_at: now,
+            last_activity_at: now,
+            state: RoomState::Active,
+            config: RoomConfig::default(),
+            prev_room_id: None,
+        };
+        match state.storage.create_room(&room).await {
+            Ok(()) => break candidate,
+            Err(e) if e.is_unique_violation() && attempt < MAX_ATTEMPTS => continue,
+            Err(e) => return Err(e.into()),
+        }
     };
 
-    state.storage.create_room(&room).await?;
-
     let resp = OpenRoomResponse {
-        share_line: ids::share_line(&id),
-        room_id: id,
+        share_line: ids::share_line(&room_id),
+        room_id,
     };
     Ok((StatusCode::CREATED, Json(resp)))
 }
@@ -104,7 +121,15 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "room not found".to_string()),
-            ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
+            ApiError::Internal(detail) => {
+                // Log the real cause server-side; never leak DB/internal text to
+                // the caller (table names, constraints, file paths, etc.).
+                tracing::error!(error = %detail, "internal server error");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".to_string(),
+                )
+            }
         };
         (status, Json(ErrorEnvelope::new(message))).into_response()
     }

@@ -64,6 +64,15 @@ async fn mcp_lists_and_calls_open_room() {
         rendered.contains("mcp-smoke-"),
         "tool result should carry the new room id; got: {rendered}"
     );
+    // Shape parity with cbc_open_room's JSON: both room_id and share_line fields.
+    assert!(
+        rendered.contains("room_id") && rendered.contains("share_line"),
+        "open result should carry the full OpenRoomResponse shape; got: {rendered}"
+    );
+    assert!(
+        rendered.contains("/cbc-join mcp-smoke-"),
+        "open result should carry the share line; got: {rendered}"
+    );
 
     // Extract the room id (scan from the known prefix over id-legal chars) and
     // confirm cbc_status returns the same room over MCP.
@@ -86,9 +95,12 @@ async fn mcp_lists_and_calls_open_room() {
         .expect("call cbc_status");
 
     let status_rendered = serde_json::to_string(&status).expect("serialize status");
+    // Full RoomStatus shape parity: id, the original subject, and active state.
     assert!(
-        status_rendered.contains(&room_id) && status_rendered.contains("active"),
-        "cbc_status should report the active room; got: {status_rendered}"
+        status_rendered.contains(&room_id)
+            && status_rendered.contains("mcp smoke")
+            && status_rendered.contains("active"),
+        "cbc_status should report the room's id, subject, and active state; got: {status_rendered}"
     );
 
     client.cancel().await.ok();
