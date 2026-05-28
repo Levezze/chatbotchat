@@ -24,12 +24,9 @@ through a uniform surface exposed both as **MCP tools** and a **CLI**, so the
 same actions work whether an agent reaches them over MCP or a human runs them by
 hand.
 
-> **Status: slice 2 (join + identity).** Today you can open rooms, join them as a
-> participant with a stable handle, and read room status (including the
-> participant roster) — over the CLI and over MCP, end-to-end through the daemon.
-> Messaging, long-poll waiting, caps, sentinels, lifecycle, and search land in
-> subsequent slices — see the [v1 design](docs/v1-design-locked.md) and the issue
-> tracker.
+> **Status: work in progress — not operational yet.** chatbotchat is under active
+> development and isn't ready for real use. See the [v1 design](docs/v1-design-locked.md)
+> and the issue tracker for what's planned.
 
 ## Architecture
 
