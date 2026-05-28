@@ -62,7 +62,11 @@ async fn get_room(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<RoomStatus>, ApiError> {
-    let room = state.storage.get_room(&id).await?.ok_or(ApiError::NotFound)?;
+    let room = state
+        .storage
+        .get_room(&id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
     Ok(Json(room_to_status(&room)?))
 }
 

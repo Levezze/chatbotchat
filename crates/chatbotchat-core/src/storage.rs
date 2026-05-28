@@ -85,7 +85,8 @@ fn fmt_err(e: time::error::Format) -> StorageError {
 }
 
 fn parse_ts(s: &str) -> Result<OffsetDateTime, StorageError> {
-    OffsetDateTime::parse(s, &Rfc3339).map_err(|e| StorageError::Corrupt(format!("timestamp parse: {e}")))
+    OffsetDateTime::parse(s, &Rfc3339)
+        .map_err(|e| StorageError::Corrupt(format!("timestamp parse: {e}")))
 }
 
 fn parse_state(s: &str) -> Result<RoomState, StorageError> {
@@ -96,7 +97,11 @@ fn parse_state(s: &str) -> Result<RoomState, StorageError> {
         "stale" => RoomState::Stale,
         "closed" => RoomState::Closed,
         "archived" => RoomState::Archived,
-        other => return Err(StorageError::Corrupt(format!("unknown room state: {other}"))),
+        other => {
+            return Err(StorageError::Corrupt(format!(
+                "unknown room state: {other}"
+            )))
+        }
     })
 }
 

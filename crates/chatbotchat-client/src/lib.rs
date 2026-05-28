@@ -8,10 +8,7 @@ pub enum ClientError {
     #[error("transport error: {0}")]
     Transport(#[from] reqwest::Error),
     #[error("server error ({status}): {message}")]
-    Server {
-        status: u16,
-        message: String,
-    },
+    Server { status: u16, message: String },
 }
 
 #[derive(Clone)]

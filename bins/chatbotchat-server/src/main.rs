@@ -21,8 +21,7 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -33,9 +32,9 @@ async fn main() -> anyhow::Result<()> {
     let state = app_state(&db_url).await?;
 
     let addr = format!("127.0.0.1:{}", args.port);
-    let listener = TcpListener::bind(&addr)
-        .await
-        .with_context(|| format!("could not bind {addr} (is another instance running? try --port)"))?;
+    let listener = TcpListener::bind(&addr).await.with_context(|| {
+        format!("could not bind {addr} (is another instance running? try --port)")
+    })?;
 
     tracing::info!(%addr, db = %db_path.display(), "chatbotchat-server listening");
     serve(listener, state).await
@@ -46,8 +45,7 @@ fn resolve_db_path(explicit: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     let path = match explicit {
         Some(p) => p,
         None => {
-            let home = std::env::var_os("HOME")
-                .context("HOME not set; pass --db explicitly")?;
+            let home = std::env::var_os("HOME").context("HOME not set; pass --db explicitly")?;
             PathBuf::from(home).join(".chatbotchat").join("state.db")
         }
     };

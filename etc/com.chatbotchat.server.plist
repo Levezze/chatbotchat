@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Minimal launchd agent for the chatbotchat daemon.
+
+  This is the slice-1 baseline; restart policy, log rotation, and graceful
+  shutdown are hardened in slice #10. Edit the absolute path to the binary to
+  match your install (`cargo install --path bins/chatbotchat-server` puts it in
+  ~/.cargo/bin), then:
+
+    cp etc/com.chatbotchat.server.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.chatbotchat.server.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.chatbotchat.server</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/CHANGE_ME/.cargo/bin/chatbotchat-server</string>
+        <string>--port</string>
+        <string>8484</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/chatbotchat-server.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/chatbotchat-server.err.log</string>
+</dict>
+</plist>

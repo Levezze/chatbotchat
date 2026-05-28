@@ -10,7 +10,12 @@ mod mcp;
 #[command(name = "cbc", version)]
 struct Cli {
     /// Base URL of the chatbotchat daemon.
-    #[arg(long, env = "CBC_SERVER", default_value = "http://127.0.0.1:8484", global = true)]
+    #[arg(
+        long,
+        env = "CBC_SERVER",
+        default_value = "http://127.0.0.1:8484",
+        global = true
+    )]
     server: String,
 
     #[command(subcommand)]
@@ -40,10 +45,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Open { subject } => {
-            let resp = client
-                .open_room(&subject)
-                .await
-                .context("opening room")?;
+            let resp = client.open_room(&subject).await.context("opening room")?;
             println!("Room:  {}", resp.room_id);
             println!("Share: {}", resp.share_line);
             println!();

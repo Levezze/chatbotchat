@@ -25,20 +25,29 @@ async fn mcp_lists_and_calls_open_room() {
     let base = spawn_daemon().await;
 
     // Spawn `cbc mcp` as an MCP server child process, pointed at our daemon.
-    let transport = TokioChildProcess::new(Command::new(env!("CARGO_BIN_EXE_cbc")).configure(
-        |cmd| {
+    let transport =
+        TokioChildProcess::new(Command::new(env!("CARGO_BIN_EXE_cbc")).configure(|cmd| {
             cmd.arg("mcp").env("CBC_SERVER", &base);
-        },
-    ))
-    .expect("spawn cbc mcp");
+        }))
+        .expect("spawn cbc mcp");
 
     let client = ().serve(transport).await.expect("connect mcp client");
 
-    let tools = client.list_tools(Default::default()).await.expect("list tools");
+    let tools = client
+        .list_tools(Default::default())
+        .await
+        .expect("list tools");
     assert!(
-        tools.tools.iter().any(|t| t.name.as_ref() == "cbc_open_room"),
+        tools
+            .tools
+            .iter()
+            .any(|t| t.name.as_ref() == "cbc_open_room"),
         "cbc_open_room should be advertised; got {:?}",
-        tools.tools.iter().map(|t| t.name.as_ref()).collect::<Vec<_>>()
+        tools
+            .tools
+            .iter()
+            .map(|t| t.name.as_ref())
+            .collect::<Vec<_>>()
     );
 
     let result = client

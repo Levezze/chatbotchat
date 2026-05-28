@@ -68,6 +68,9 @@ mod tests {
 
     #[test]
     fn share_line_format() {
-        assert_eq!(share_line("abc-20260102-0304"), "/cbc-join abc-20260102-0304");
+        assert_eq!(
+            share_line("abc-20260102-0304"),
+            "/cbc-join abc-20260102-0304"
+        );
     }
 }

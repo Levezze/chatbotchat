@@ -27,7 +27,9 @@ async fn open_room_then_status_round_trips() {
         .method("POST")
         .uri("/rooms")
         .header("content-type", "application/json")
-        .body(Body::from(json!({ "subject": "slider labels" }).to_string()))
+        .body(Body::from(
+            json!({ "subject": "slider labels" }).to_string(),
+        ))
         .unwrap();
 
     let open_resp = app.clone().oneshot(open_req).await.unwrap();
@@ -40,7 +42,9 @@ async fn open_room_then_status_round_trips() {
         "room id should be kebab subject + timestamp, got {room_id}"
     );
     assert_eq!(
-        open_body["share_line"].as_str().expect("share_line present"),
+        open_body["share_line"]
+            .as_str()
+            .expect("share_line present"),
         format!("/cbc-join {room_id}")
     );
 
