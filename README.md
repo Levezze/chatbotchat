@@ -28,6 +28,25 @@ hand.
 > development and isn't ready for real use. See the [v1 design](docs/v1-design-locked.md)
 > and the issue tracker for what's planned.
 
+## Why
+
+I'm trying to thread the needle between proper hands-on development and fully
+agentic, hands-off "vibe coding." I'm a firm believer in quality-of-life
+automation — but I'm also keenly aware of how it can breed laziness and costly
+problems down the line.
+
+`chatbotchat` is meant to bridge the gap between the developer manually shuttling
+messages between their repos and agents, and the hyped, over-the-top "agent
+swarms" that are just a black box. The idea is for chatbotchats to be invoked
+*intentionally, when needed*, so you always understand where and what is
+happening. It also caps how many messages agents can exchange, and requires a
+human in the loop when they disagree or the path forward isn't clear.
+
+Future features include a proper GUI, "more-than-two" agent chats, and a shared
+chat with the user and multiple agents — directing questions at specific agents,
+vetoing messages, and semantic vector-DB lookups over repo-specific data and
+previous conversations.
+
 ## Architecture
 
 ```
