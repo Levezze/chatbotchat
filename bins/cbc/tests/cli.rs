@@ -47,6 +47,78 @@ fn open_prints_room_id_and_share_line() {
     );
 }
 
+/// Open a room over the CLI and return its id.
+fn open_room(base: &str, subject: &str) -> String {
+    let open = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["open", subject])
+        .env("CBC_SERVER", base)
+        .assert()
+        .success();
+    let out = String::from_utf8(open.get_output().stdout.clone()).unwrap();
+    out.split_whitespace()
+        .find(|tok| tok.contains("-202"))
+        .expect("room id in open output")
+        .to_string()
+}
+
+fn join(base: &str, room_id: &str, model: &str) -> String {
+    let assert = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["join", room_id, "--model", model])
+        .env("CBC_SERVER", base)
+        .assert()
+        .success();
+    String::from_utf8(assert.get_output().stdout.clone()).unwrap()
+}
+
+#[test]
+fn join_prints_handle_and_is_idempotent() {
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "cli join");
+
+    // First join mints a fresh handle of the form <repo>-<model>-<sess4hex>.
+    let first = join(&base, &room_id, "opus47");
+    assert!(
+        first.contains("-opus47-"),
+        "join stdout should carry a <repo>-opus47-<sess> handle; got:\n{first}"
+    );
+    assert!(
+        first.contains("Resumed: false"),
+        "first join should report Resumed: false; got:\n{first}"
+    );
+    let handle = first
+        .lines()
+        .find_map(|l| l.strip_prefix("Handle:"))
+        .map(str::trim)
+        .expect("Handle line")
+        .to_string();
+
+    // Re-joining from the same repo/cwd/model resumes the same handle.
+    let second = join(&base, &room_id, "opus47");
+    assert!(
+        second.contains(&handle),
+        "second join should resume the same handle {handle}; got:\n{second}"
+    );
+    assert!(
+        second.contains("Resumed: true"),
+        "second join should report Resumed: true; got:\n{second}"
+    );
+
+    // status now lists the participant.
+    let status = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["status", &room_id])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let status_out = String::from_utf8(status.get_output().stdout.clone()).unwrap();
+    assert!(
+        status_out.contains("Participants:") && status_out.contains(&handle),
+        "status should list the joined participant {handle}; got:\n{status_out}"
+    );
+}
+
 #[test]
 fn status_reports_open_room() {
     let base = spawn_daemon();

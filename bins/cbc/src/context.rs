@@ -15,12 +15,18 @@ pub fn detect_cwd() -> String {
 /// Repository name: basename of `git rev-parse --show-toplevel`, falling back to
 /// the cwd basename when not inside a git work tree (per design § Identity).
 pub fn detect_repo() -> String {
-    if let Some(top) = git_toplevel() {
-        if let Some(name) = basename(&top) {
-            return name;
-        }
-    }
-    basename(&detect_cwd()).unwrap_or_else(|| "repo".to_string())
+    repo_from(git_toplevel(), &detect_cwd())
+}
+
+/// Pure resolution of the repo name from a (possibly absent) git toplevel and
+/// the cwd. Split out from `detect_repo` so the fallback chain — git basename →
+/// cwd basename → literal `"repo"` — is unit-testable without a real git tree.
+fn repo_from(git_toplevel: Option<String>, cwd: &str) -> String {
+    git_toplevel
+        .as_deref()
+        .and_then(basename)
+        .or_else(|| basename(cwd))
+        .unwrap_or_else(|| "repo".to_string())
 }
 
 fn git_toplevel() -> Option<String> {
@@ -44,4 +50,38 @@ fn basename(path: &str) -> Option<String> {
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repo_from_uses_git_toplevel_basename_when_present() {
+        let repo = repo_from(
+            Some("/Users/me/code/mvp-engine".to_string()),
+            "/tmp/elsewhere",
+        );
+        assert_eq!(repo, "mvp-engine");
+    }
+
+    #[test]
+    fn repo_from_falls_back_to_cwd_basename_outside_git() {
+        let repo = repo_from(None, "/Users/me/work/api-server");
+        assert_eq!(repo, "api-server");
+    }
+
+    #[test]
+    fn repo_from_falls_back_to_literal_repo_at_filesystem_root() {
+        // Neither a git toplevel nor a cwd with a basename (root has none).
+        let repo = repo_from(None, "/");
+        assert_eq!(repo, "repo");
+    }
+
+    #[test]
+    fn basename_trims_trailing_slash_and_rejects_empty() {
+        assert_eq!(basename("/a/b/c/"), Some("c".to_string()));
+        assert_eq!(basename("/"), None);
+        assert_eq!(basename(""), None);
+    }
 }
