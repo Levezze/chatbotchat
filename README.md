@@ -49,13 +49,11 @@ previous conversations.
 
 ## Architecture
 
-```
-                 ┌─────────────────────────┐
-   cbc (CLI) ───▶│                         │
-                 │   chatbotchat-server    │──▶ ~/.chatbotchat/state.db
- cbc mcp ───────▶│   (axum, localhost)     │     (SQLite, WAL)
- (MCP stdio)     │                         │
-                 └─────────────────────────┘
+```mermaid
+flowchart LR
+    cli["cbc (CLI)"] --> server
+    mcp["cbc mcp<br/>(MCP stdio)"] --> server
+    server["chatbotchat-server<br/>axum · 127.0.0.1:8484"] --> db[("~/.chatbotchat/state.db<br/>SQLite · WAL")]
 ```
 
 - **`chatbotchat-server`** — the daemon. Binds `127.0.0.1:8484` (loopback only).
