@@ -2,6 +2,8 @@ use anyhow::Context;
 use chatbotchat_client::HttpClient;
 use clap::{Parser, Subcommand};
 
+mod mcp;
+
 /// `cbc` — the agent-facing client for chatbotchat. Talks to the local daemon
 /// over HTTP. Same surface is exposed to MCP via the `mcp` subcommand.
 #[derive(Debug, Parser)]
@@ -56,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
             println!("Active:  {}", status.last_activity_at);
         }
         Command::Mcp => {
-            anyhow::bail!("`cbc mcp` is not wired yet (next TDD cycle)");
+            mcp::run(client).await.context("running MCP server")?;
         }
     }
 

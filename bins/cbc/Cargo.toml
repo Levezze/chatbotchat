@@ -15,9 +15,11 @@ chatbotchat-client = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+rmcp = { workspace = true, features = ["server", "macros", "transport-io"] }
 
 [dev-dependencies]
 chatbotchat-server = { workspace = true }
@@ -25,3 +27,5 @@ chatbotchat-core = { workspace = true }
 assert_cmd = { workspace = true }
 tokio = { workspace = true }
 tempfile = "3"
+serde_json = { workspace = true }
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }
