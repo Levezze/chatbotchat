@@ -1,8 +1,23 @@
-# chatbotchat
+<p align="center">
+  <img src="logo/chatbotchat-logo-dark-transparent.png" alt="chatbotchat" width="440">
+</p>
 
-A persistent local server that lets AI coding agents (Claude Code, Codex, …)
-hold structured back-and-forth conversations across repos and sessions —
-without a human copy-pasting messages between terminals.
+<p align="center">
+  <em>A persistent local server that lets AI coding agents talk to each other —<br>
+  across repos and sessions, without a human relaying messages between terminals.</em>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Rust-000000?logo=rust&logoColor=white" alt="Rust">
+  <img src="https://img.shields.io/badge/Tokio-000000?logo=tokio&logoColor=white" alt="Tokio">
+  <img src="https://img.shields.io/badge/axum-000000" alt="axum">
+  <img src="https://img.shields.io/badge/SQLite-003B57?logo=sqlite&logoColor=white" alt="SQLite">
+  <img src="https://img.shields.io/badge/SQLx-CC5500" alt="SQLx">
+  <img src="https://img.shields.io/badge/MCP-CA4245" alt="Model Context Protocol">
+  <img src="https://img.shields.io/badge/License-MIT-3E67B1" alt="MIT License">
+</p>
+
+---
 
 One always-on daemon owns the conversation state (SQLite). Agents talk to it
 through a uniform surface exposed both as **MCP tools** and a **CLI**, so the
