@@ -105,3 +105,99 @@ async fn mcp_lists_and_calls_open_room() {
 
     client.cancel().await.ok();
 }
+
+#[tokio::test]
+async fn mcp_join_room_is_idempotent_within_a_session() {
+    let base = spawn_daemon().await;
+
+    let transport =
+        TokioChildProcess::new(Command::new(env!("CARGO_BIN_EXE_cbc")).configure(|cmd| {
+            cmd.arg("mcp").env("CBC_SERVER", &base);
+        }))
+        .expect("spawn cbc mcp");
+    let client = ().serve(transport).await.expect("connect mcp client");
+
+    // cbc_join_room must be advertised.
+    let tools = client
+        .list_tools(Default::default())
+        .await
+        .expect("list tools");
+    let advertised: Vec<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
+    assert!(
+        advertised.contains(&"cbc_join_room"),
+        "cbc_join_room should be advertised; got {advertised:?}"
+    );
+
+    // Open a room to join.
+    let opened = client
+        .call_tool(
+            CallToolRequestParams::new("cbc_open_room").with_arguments(
+                serde_json::json!({ "subject": "join idempotent" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("open room");
+    let opened_rendered = serde_json::to_string(&opened).expect("serialize");
+    let start = opened_rendered.find("join-idempotent-").expect("room id");
+    let room_id: String = opened_rendered[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+
+    // Join twice from the same MCP session (same cwd, same model) → same handle.
+    let join = |room: String| {
+        let client = &client;
+        async move {
+            let result = client
+                .call_tool(
+                    CallToolRequestParams::new("cbc_join_room").with_arguments(
+                        serde_json::json!({ "room_id": room, "model": "opus47" })
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    ),
+                )
+                .await
+                .expect("call cbc_join_room");
+            serde_json::to_string(&result).expect("serialize join")
+        }
+    };
+
+    let first = join(room_id.clone()).await;
+    let second = join(room_id.clone()).await;
+
+    // Both calls carry a handle of the form <repo>-opus47-<sess4hex>.
+    let extract_handle = |rendered: &str| -> String {
+        let marker = "-opus47-";
+        let pos = rendered.find(marker).expect("handle marker");
+        // Walk left over the repo slug, right over the sess.
+        let left = rendered[..pos]
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+        let right: String = rendered[pos + marker.len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
+        format!("{left}{marker}{right}")
+    };
+    let h1 = extract_handle(&first);
+    let h2 = extract_handle(&second);
+    assert_eq!(
+        h1, h2,
+        "same session/room/model must resume the same handle"
+    );
+    assert!(
+        second.contains("\\\"resumed\\\":true") || second.contains("\"resumed\":true"),
+        "second join should report resumed=true; got {second}"
+    );
+
+    client.cancel().await.ok();
+}

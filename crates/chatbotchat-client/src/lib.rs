@@ -1,7 +1,9 @@
 //! HTTP client used by the `cbc` CLI and MCP wrapper. Thin typed wrapper over
 //! `reqwest` against the chatbotchat daemon.
 
-use chatbotchat_protocol::{ErrorEnvelope, OpenRoomRequest, OpenRoomResponse, RoomStatus};
+use chatbotchat_protocol::{
+    ErrorEnvelope, JoinRoomRequest, JoinRoomResponse, OpenRoomRequest, OpenRoomResponse, RoomStatus,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -34,6 +36,26 @@ impl HttpClient {
             .post(format!("{}/rooms", self.base_url))
             .json(&OpenRoomRequest {
                 subject: subject.to_string(),
+            })
+            .send()
+            .await?;
+        decode(resp).await
+    }
+
+    pub async fn join_room(
+        &self,
+        room_id: &str,
+        repo: &str,
+        model: &str,
+        cwd: &str,
+    ) -> Result<JoinRoomResponse, ClientError> {
+        let resp = self
+            .http
+            .post(format!("{}/rooms/{room_id}/join", self.base_url))
+            .json(&JoinRoomRequest {
+                repo: repo.to_string(),
+                model: model.to_string(),
+                cwd: cwd.to_string(),
             })
             .send()
             .await?;

@@ -2,6 +2,7 @@ use anyhow::Context;
 use chatbotchat_client::HttpClient;
 use clap::{Parser, Subcommand};
 
+mod context;
 mod mcp;
 
 /// `cbc` — the agent-facing client for chatbotchat. Talks to the local daemon
@@ -29,6 +30,14 @@ enum Command {
         /// Subject / topic of the room.
         subject: String,
     },
+    /// Join a room as a participant; repo and cwd are auto-detected.
+    Join {
+        /// Room id to join.
+        room_id: String,
+        /// Self-declared model name, e.g. opus47, sonnet46, codex53.
+        #[arg(long)]
+        model: String,
+    },
     /// Show the status of an existing room.
     Status {
         /// Room id.
@@ -51,6 +60,17 @@ async fn main() -> anyhow::Result<()> {
             println!();
             println!("Tell the other agent: {}", resp.share_line);
         }
+        Command::Join { room_id, model } => {
+            let repo = context::detect_repo();
+            let cwd = context::detect_cwd();
+            let resp = client
+                .join_room(&room_id, &repo, &model, &cwd)
+                .await
+                .context("joining room")?;
+            println!("Handle:  {}", resp.handle);
+            println!("Resumed: {}", resp.resumed);
+            println!("State:   {}", resp.room_state);
+        }
         Command::Status { room_id } => {
             let status = client.status(&room_id).await.context("fetching status")?;
             println!("Room:    {}", status.id);
@@ -58,6 +78,14 @@ async fn main() -> anyhow::Result<()> {
             println!("State:   {}", status.state);
             println!("Started: {}", status.started_at);
             println!("Active:  {}", status.last_activity_at);
+            if status.participants.is_empty() {
+                println!("Participants: (none)");
+            } else {
+                println!("Participants:");
+                for p in &status.participants {
+                    println!("  - {} ({} @ {})", p.handle, p.model, p.cwd);
+                }
+            }
         }
         Command::Mcp => {
             mcp::run(client).await.context("running MCP server")?;

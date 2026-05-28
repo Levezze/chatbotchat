@@ -1,4 +1,6 @@
+use crate::identity::{derive_handle, HandleOutcome, JoinIdentity};
 use crate::ids;
+use crate::participant::Participant;
 use crate::room::{Room, RoomConfig, RoomState};
 use crate::storage::{Storage, StorageError};
 use axum::extract::{Path, State};
@@ -6,7 +8,10 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chatbotchat_protocol::{ErrorEnvelope, OpenRoomRequest, OpenRoomResponse, RoomStatus};
+use chatbotchat_protocol::{
+    ErrorEnvelope, JoinRoomRequest, JoinRoomResponse, OpenRoomRequest, OpenRoomResponse,
+    ParticipantView, RoomStatus,
+};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -29,6 +34,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/rooms", post(open_room))
         .route("/rooms/{id}", get(get_room))
+        .route("/rooms/{id}/join", post(join_room))
         .with_state(state)
 }
 
@@ -84,10 +90,125 @@ async fn get_room(
         .get_room(&id)
         .await?
         .ok_or(ApiError::NotFound)?;
-    Ok(Json(room_to_status(&room)?))
+    let participants = state.storage.list_participants(&id).await?;
+    Ok(Json(room_to_status(&room, &participants)?))
 }
 
-fn room_to_status(room: &Room) -> Result<RoomStatus, ApiError> {
+/// Register the caller as a participant. Idempotent on `(room_id, repo, model,
+/// cwd)`: the same tuple always resolves to the same handle. A fresh tuple mints
+/// `<repo>-<model>-<sess4hex>`, retrying on the (astronomically rare) sess
+/// collision via the UNIQUE constraint, mirroring `open_room`'s retry.
+async fn join_room(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<JoinRoomRequest>,
+) -> Result<(StatusCode, Json<JoinRoomResponse>), ApiError> {
+    let room = state
+        .storage
+        .get_room(&id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    let ident = JoinIdentity {
+        repo: req.repo,
+        model: req.model,
+        cwd: req.cwd,
+    };
+
+    // Fast path: an existing matching participant resumes its handle.
+    if let Some(p) = state
+        .storage
+        .get_participant_by_tuple(&id, &ident.repo, &ident.model, &ident.cwd)
+        .await?
+    {
+        return Ok(join_response(p.handle, true, &room));
+    }
+
+    const MAX_ATTEMPTS: u32 = 64;
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        let existing = state.storage.list_participants(&id).await?;
+        let handle = match derive_handle(&ident, &existing, rand_sess_candidates()) {
+            // Reused shouldn't occur after the fast-path lookup, but if a
+            // concurrent join inserted the same tuple, honor it as resumed.
+            HandleOutcome::Reused(h) => return Ok(join_response(h, true, &room)),
+            HandleOutcome::Created(h) => h,
+        };
+
+        let now = OffsetDateTime::now_utc();
+        let participant = Participant {
+            handle: handle.clone(),
+            room_id: id.clone(),
+            repo: ident.repo.clone(),
+            model: ident.model.clone(),
+            cwd: ident.cwd.clone(),
+            joined_at: now,
+            last_poll_at: now,
+        };
+
+        match state.storage.create_participant(&participant).await {
+            Ok(()) => return Ok(join_response(handle, false, &room)),
+            Err(e) if e.is_unique_violation() && attempt < MAX_ATTEMPTS => {
+                // Either a concurrent join took our tuple (refetch → resume) or
+                // the random sess collided (refetch returns None → retry).
+                if let Some(p) = state
+                    .storage
+                    .get_participant_by_tuple(&id, &ident.repo, &ident.model, &ident.cwd)
+                    .await?
+                {
+                    return Ok(join_response(p.handle, true, &room));
+                }
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
+fn join_response(
+    handle: String,
+    resumed: bool,
+    room: &Room,
+) -> (StatusCode, Json<JoinRoomResponse>) {
+    (
+        StatusCode::CREATED,
+        Json(JoinRoomResponse {
+            handle,
+            resumed,
+            room_state: room.state.as_str().to_string(),
+            // Messages land in slice 3; until then the room has none.
+            recent_messages: Vec::new(),
+        }),
+    )
+}
+
+/// An effectively-infinite stream of 4-char lowercase hex sess candidates.
+fn rand_sess_candidates() -> impl Iterator<Item = String> {
+    use rand::Rng;
+    std::iter::repeat_with(|| {
+        let n: u16 = rand::thread_rng().gen();
+        format!("{n:04x}")
+    })
+}
+
+fn room_to_status(room: &Room, participants: &[Participant]) -> Result<RoomStatus, ApiError> {
+    let participants = participants
+        .iter()
+        .map(|p| {
+            Ok(ParticipantView {
+                handle: p.handle.clone(),
+                repo: p.repo.clone(),
+                model: p.model.clone(),
+                cwd: p.cwd.clone(),
+                joined_at: p
+                    .joined_at
+                    .format(&Rfc3339)
+                    .map_err(|e| ApiError::Internal(e.to_string()))?,
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+
     Ok(RoomStatus {
         id: room.id.clone(),
         subject: room.subject.clone(),
@@ -100,6 +221,7 @@ fn room_to_status(room: &Room) -> Result<RoomStatus, ApiError> {
             .last_activity_at
             .format(&Rfc3339)
             .map_err(|e| ApiError::Internal(e.to_string()))?,
+        participants,
     })
 }
 

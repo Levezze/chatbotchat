@@ -25,7 +25,9 @@ pub fn share_line(room_id: &str) -> String {
     format!("/cbc-join {room_id}")
 }
 
-fn kebab(input: &str) -> String {
+/// Lowercase, collapse non-alphanumeric runs to a single `-`, trim dashes.
+/// Shared by room-id derivation and participant-handle derivation.
+pub(crate) fn kebab(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut prev_dash = false;
     for ch in input.chars() {

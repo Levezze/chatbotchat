@@ -1,3 +1,4 @@
+use crate::participant::Participant;
 use crate::room::{Room, RoomConfig, RoomState};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -98,6 +99,65 @@ impl Storage {
             Some(row) => Ok(Some(row_to_room(&row)?)),
         }
     }
+
+    pub async fn create_participant(&self, p: &Participant) -> Result<(), StorageError> {
+        let joined_at = p.joined_at.format(&Rfc3339).map_err(fmt_err)?;
+        let last_poll_at = p.last_poll_at.format(&Rfc3339).map_err(fmt_err)?;
+
+        sqlx::query(
+            "INSERT INTO participants \
+             (handle, room_id, repo, model, cwd, joined_at, last_poll_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&p.handle)
+        .bind(&p.room_id)
+        .bind(&p.repo)
+        .bind(&p.model)
+        .bind(&p.cwd)
+        .bind(joined_at)
+        .bind(last_poll_at)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn get_participant_by_tuple(
+        &self,
+        room_id: &str,
+        repo: &str,
+        model: &str,
+        cwd: &str,
+    ) -> Result<Option<Participant>, StorageError> {
+        let row = sqlx::query(
+            "SELECT handle, room_id, repo, model, cwd, joined_at, last_poll_at \
+             FROM participants \
+             WHERE room_id = ? AND repo = ? AND model = ? AND cwd = ?",
+        )
+        .bind(room_id)
+        .bind(repo)
+        .bind(model)
+        .bind(cwd)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            None => Ok(None),
+            Some(row) => Ok(Some(row_to_participant(&row)?)),
+        }
+    }
+
+    pub async fn list_participants(&self, room_id: &str) -> Result<Vec<Participant>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT handle, room_id, repo, model, cwd, joined_at, last_poll_at \
+             FROM participants WHERE room_id = ? ORDER BY joined_at",
+        )
+        .bind(room_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.iter().map(row_to_participant).collect()
+    }
 }
 
 /// True for SQLite URLs that map to a private in-memory database.
@@ -127,6 +187,18 @@ fn parse_state(s: &str) -> Result<RoomState, StorageError> {
                 "unknown room state: {other}"
             )))
         }
+    })
+}
+
+fn row_to_participant(row: &sqlx::sqlite::SqliteRow) -> Result<Participant, StorageError> {
+    Ok(Participant {
+        handle: row.try_get("handle")?,
+        room_id: row.try_get("room_id")?,
+        repo: row.try_get("repo")?,
+        model: row.try_get("model")?,
+        cwd: row.try_get("cwd")?,
+        joined_at: parse_ts(&row.try_get::<String, _>("joined_at")?)?,
+        last_poll_at: parse_ts(&row.try_get::<String, _>("last_poll_at")?)?,
     })
 }
 

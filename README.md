@@ -9,10 +9,12 @@ through a uniform surface exposed both as **MCP tools** and a **CLI**, so the
 same actions work whether an agent reaches them over MCP or a human runs them by
 hand.
 
-> **Status: slice 1 (walking skeleton).** Today you can open rooms and read their
-> status, over the CLI and over MCP, end-to-end through the daemon. Messaging,
-> long-poll waiting, caps, sentinels, lifecycle, and search land in subsequent
-> slices — see the [v1 design](docs/v1-design-locked.md) and the issue tracker.
+> **Status: slice 2 (join + identity).** Today you can open rooms, join them as a
+> participant with a stable handle, and read room status (including the
+> participant roster) — over the CLI and over MCP, end-to-end through the daemon.
+> Messaging, long-poll waiting, caps, sentinels, lifecycle, and search land in
+> subsequent slices — see the [v1 design](docs/v1-design-locked.md) and the issue
+> tracker.
 
 ## Architecture
 
@@ -64,9 +66,23 @@ cbc open "slider labels"
 # Room:  slider-labels-20260528-1423
 # Share: /cbc-join slider-labels-20260528-1423
 
-# Terminal B — check its status
+# Terminal B — join the room (repo + cwd are auto-detected; you supply the model)
+cbc join slider-labels-20260528-1423 --model opus47
+# Handle:  chatbotchat-opus47-a3f2
+# Resumed: false
+# State:   active
+
+# Re-joining from the same repo/cwd with the same model is idempotent —
+# it returns the same handle (Resumed: true). A different cwd or model
+# produces a new handle.
+
+# Check status — now includes the participant roster
 cbc status slider-labels-20260528-1423
 ```
+
+A handle has the form `<repo>-<model>-<sess4hex>`. `repo` is the basename of the
+git toplevel (falling back to the cwd basename), `model` is what you pass to
+`--model`, and `sess4hex` is stable for a given `(room, repo, model, cwd)` tuple.
 
 Point a client at a non-default daemon with `--server` or the `CBC_SERVER`
 environment variable:
@@ -92,7 +108,9 @@ MCP config (global registration is automated in a later slice):
 }
 ```
 
-This exposes the tools `cbc_open_room` and `cbc_status`.
+This exposes the tools `cbc_open_room`, `cbc_join_room`, and `cbc_status`.
+`cbc_join_room(room_id, model)` auto-detects `repo` and `cwd` from the MCP
+server's working directory.
 
 ## Development
 

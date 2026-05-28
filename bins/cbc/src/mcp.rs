@@ -22,6 +22,14 @@ pub struct StatusArgs {
     pub room_id: String,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct JoinRoomArgs {
+    #[schemars(description = "Room id to join")]
+    pub room_id: String,
+    #[schemars(description = "Self-declared model name, e.g. opus47, sonnet46, codex53")]
+    pub model: String,
+}
+
 #[derive(Clone)]
 pub struct CbcMcp {
     client: HttpClient,
@@ -35,6 +43,21 @@ impl CbcMcp {
         Parameters(OpenRoomArgs { subject }): Parameters<OpenRoomArgs>,
     ) -> String {
         match self.client.open_room(&subject).await {
+            Ok(resp) => json_or_err(&resp),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Join a room as a participant; repo and cwd are auto-detected from the server's working directory. Returns {handle, resumed, room_state, recent_messages} as JSON"
+    )]
+    async fn cbc_join_room(
+        &self,
+        Parameters(JoinRoomArgs { room_id, model }): Parameters<JoinRoomArgs>,
+    ) -> String {
+        let repo = crate::context::detect_repo();
+        let cwd = crate::context::detect_cwd();
+        match self.client.join_room(&room_id, &repo, &model, &cwd).await {
             Ok(resp) => json_or_err(&resp),
             Err(e) => err_json(&e.to_string()),
         }
