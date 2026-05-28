@@ -18,3 +18,10 @@ clap = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+chatbotchat-server = { workspace = true }
+chatbotchat-core = { workspace = true }
+assert_cmd = { workspace = true }
+tokio = { workspace = true }
+tempfile = "3"
