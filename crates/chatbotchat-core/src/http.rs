@@ -73,6 +73,27 @@ async fn open_room(
     let now = OffsetDateTime::now_utc();
     let base = ids::room_id(&req.subject, now);
 
+    // Open-time cap overrides layer over the defaults; omitted opts keep them.
+    let defaults = RoomConfig::default();
+    let config = RoomConfig {
+        hard_cap: req.hard_cap.unwrap_or(defaults.hard_cap),
+        soft_cap: req.soft_cap.unwrap_or(defaults.soft_cap),
+    };
+
+    // Reject pathological caps rather than minting a degenerate room. A hard_cap
+    // of 0 would accept no messages; a soft_cap below 2 has no valid surface
+    // threshold (surface fires on the soft_cap-1 th consecutive autonomous turn,
+    // so it needs soft_cap >= 2). We deliberately do NOT require soft_cap <=
+    // hard_cap: a low hard_cap with the default soft_cap is a legitimate
+    // "soft cap effectively off" config, not an error.
+    if config.hard_cap < 1 || config.soft_cap < 2 {
+        return Err(ApiError::BadRequest(format!(
+            "invalid caps: hard_cap must be >= 1 and soft_cap >= 2 \
+             (got hard_cap={}, soft_cap={})",
+            config.hard_cap, config.soft_cap
+        )));
+    }
+
     // The base id is only minute-granular, so two opens of the same subject in
     // one minute would collide on the primary key. Disambiguate by suffixing
     // `-2`, `-3`, … and retrying; the DB UNIQUE constraint makes this race-free
@@ -92,7 +113,7 @@ async fn open_room(
             started_at: now,
             last_activity_at: now,
             state: RoomState::Active,
-            config: RoomConfig::default(),
+            config,
             prev_room_id: None,
         };
         match state.storage.create_room(&room).await {
@@ -281,6 +302,7 @@ async fn send_message(
             req.to.as_deref(),
             &req.body,
             now,
+            req.from_human,
             room.config.hard_cap as i64,
         )
         .await?
@@ -306,7 +328,7 @@ async fn wait_room(
     Path(id): Path<String>,
     Query(req): Query<WaitRequest>,
 ) -> Result<Json<WaitResponse>, ApiError> {
-    let _ = state
+    let room = state
         .storage
         .get_room(&id)
         .await?
@@ -328,9 +350,19 @@ async fn wait_room(
     .await?;
 
     Ok(Json(match outcome {
-        WaitOutcome::Message(m) => WaitResponse::Message {
-            message: message_view(&m)?,
-        },
+        WaitOutcome::Message(m) => {
+            // Soft-cap signal, computed on read: the count of consecutive
+            // autonomous turns at this delivery. Surface when it reaches the
+            // (soft_cap − 1)th — pull the user in before the agents circle. The
+            // count is read after the claim; rows are immutable and `seq`
+            // monotonic, so the count at delivery equals the count at send.
+            let consecutive = state.storage.consecutive_msg_count(&id, m.seq).await?;
+            let surface_to_user = consecutive == room.config.soft_cap as i64 - 1;
+            WaitResponse::Message {
+                message: message_view(&m)?,
+                surface_to_user,
+            }
+        }
         WaitOutcome::PausedByTimeout => WaitResponse::Timeout {
             status: "paused_by_timeout".to_string(),
         },

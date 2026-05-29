@@ -30,6 +30,12 @@ enum Command {
     Open {
         /// Subject / topic of the room.
         subject: String,
+        /// Hard cap: max messages before sends are refused (default 10).
+        #[arg(long)]
+        hard_cap: Option<u32>,
+        /// Soft cap: consecutive autonomous turns before the user is surfaced (default 4).
+        #[arg(long)]
+        soft_cap: Option<u32>,
     },
     /// Join a room as a participant; repo and cwd are auto-detected.
     Join {
@@ -51,6 +57,9 @@ enum Command {
         /// Optional recipient handle; omit to broadcast to all participants.
         #[arg(long)]
         to: Option<String>,
+        /// Fold your user's input into this turn; resets the soft-cap counter.
+        #[arg(long)]
+        human: bool,
     },
     /// Long-poll for the next message addressed to you (or broadcast).
     Wait {
@@ -75,8 +84,15 @@ async fn main() -> anyhow::Result<()> {
     let client = HttpClient::new(&cli.server);
 
     match cli.command {
-        Command::Open { subject } => {
-            let resp = client.open_room(&subject).await.context("opening room")?;
+        Command::Open {
+            subject,
+            hard_cap,
+            soft_cap,
+        } => {
+            let resp = client
+                .open_room(&subject, hard_cap, soft_cap)
+                .await
+                .context("opening room")?;
             println!("Room:  {}", resp.room_id);
             println!("Share: {}", resp.share_line);
             println!();
@@ -98,11 +114,12 @@ async fn main() -> anyhow::Result<()> {
             model,
             body,
             to,
+            human,
         } => {
             let repo = context::detect_repo();
             let cwd = context::detect_cwd();
             let resp = client
-                .send_message(&room_id, &repo, &model, &cwd, to.as_deref(), &body)
+                .send_message(&room_id, &repo, &model, &cwd, to.as_deref(), &body, human)
                 .await
                 .context("sending message")?;
             println!("Sent: seq {}", resp.seq);
@@ -115,10 +132,20 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .context("waiting for message")?;
             match resp {
-                WaitResponse::Message { message } => {
+                WaitResponse::Message {
+                    message,
+                    surface_to_user,
+                } => {
                     println!("From: {}", message.from);
                     println!("To:   {}", message.to.as_deref().unwrap_or("all"));
                     println!("Body: {}", message.body);
+                    if surface_to_user {
+                        println!();
+                        println!(
+                            "[soft cap] Consecutive autonomous turns hit the soft cap. \
+                             Consult your user and send the next turn with --human."
+                        );
+                    }
                 }
                 WaitResponse::Timeout { status } => {
                     println!("{status}");

@@ -156,6 +156,9 @@ impl Storage {
             body: body.to_string(),
             created_at,
             msg_type: MessageType::Msg,
+            // Bare `create_message` is the autonomous-turn path; the human-fed
+            // path is `create_message_capped`'s `from_human` arg. DB default is 0.
+            from_human: false,
         })
     }
 
@@ -194,6 +197,8 @@ impl Storage {
             body: body.to_string(),
             created_at,
             msg_type,
+            // Sentinels are agent-originated signals; DB default is 0.
+            from_human: false,
         })
     }
 
@@ -208,6 +213,7 @@ impl Storage {
     /// seams: both count `type = 'msg'` only, so sentinels never consume cap
     /// budget. They must move in lockstep, or the hard cap and the soft counter
     /// disagree about what counts.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_message_capped(
         &self,
         room_id: &str,
@@ -215,13 +221,14 @@ impl Storage {
         recipient: Option<&str>,
         body: &str,
         created_at: OffsetDateTime,
+        from_human: bool,
         hard_cap: i64,
     ) -> Result<Option<Message>, StorageError> {
         let created = created_at.format(&Rfc3339).map_err(fmt_err)?;
 
         let result = sqlx::query(
-            "INSERT INTO messages (room_id, sender, recipient, body, created_at, type) \
-             SELECT ?, ?, ?, ?, ?, 'msg' \
+            "INSERT INTO messages (room_id, sender, recipient, body, created_at, type, from_human) \
+             SELECT ?, ?, ?, ?, ?, 'msg', ? \
              WHERE (SELECT COUNT(*) FROM messages WHERE room_id = ? AND type = 'msg') < ?",
         )
         .bind(room_id)
@@ -229,6 +236,7 @@ impl Storage {
         .bind(recipient)
         .bind(body)
         .bind(created)
+        .bind(from_human)
         .bind(room_id)
         .bind(hard_cap)
         .execute(&self.pool)
@@ -248,6 +256,7 @@ impl Storage {
             body: body.to_string(),
             created_at,
             msg_type: MessageType::Msg,
+            from_human,
         }))
     }
 
@@ -262,7 +271,7 @@ impl Storage {
         after_seq: i64,
     ) -> Result<Option<Message>, StorageError> {
         let row = sqlx::query(
-            "SELECT seq, room_id, sender, recipient, body, created_at, type \
+            "SELECT seq, room_id, sender, recipient, body, created_at, type, from_human \
              FROM messages \
              WHERE room_id = ? AND seq > ? AND sender != ? \
                AND (recipient IS NULL OR recipient = ?) \
@@ -309,6 +318,38 @@ impl Storage {
         Ok(count)
     }
 
+    /// The soft-cap counter at the delivery of message `up_to_seq`: the number of
+    /// consecutive autonomous (`from_human = 0`) `msg` rows since the last human
+    /// input, counting up to and including `up_to_seq`. Advisory and read-only —
+    /// rows are immutable and `seq` monotonic, so the count at delivery equals the
+    /// count at send (no race, no atomicity needed). The wait handler compares
+    /// this to `soft_cap - 1` to decide whether to surface to the user.
+    ///
+    /// The reset boundary is the highest `from_human = 1` `msg` at or before
+    /// `up_to_seq` (seq 0 if none). Sentinels (`type != 'msg'`) neither count nor
+    /// reset — only `msg` rows do, in lockstep with the cap seams. Slice C will
+    /// OR `type = 'waiting_user'` into the reset subquery (consulting the user
+    /// also breaks a run); that is the one documented extension point here.
+    pub async fn consecutive_msg_count(
+        &self,
+        room_id: &str,
+        up_to_seq: i64,
+    ) -> Result<i64, StorageError> {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages \
+             WHERE room_id = ? AND type = 'msg' AND from_human = 0 AND seq <= ? \
+               AND seq > (SELECT COALESCE(MAX(seq), 0) FROM messages \
+                          WHERE room_id = ? AND type = 'msg' AND from_human = 1 AND seq <= ?)",
+        )
+        .bind(room_id)
+        .bind(up_to_seq)
+        .bind(room_id)
+        .bind(up_to_seq)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count)
+    }
+
     /// The most recent `limit` messages in a room, returned oldest-first. This
     /// is the log view (every sender), surfaced to a joining participant.
     pub async fn recent_messages(
@@ -317,7 +358,7 @@ impl Storage {
         limit: i64,
     ) -> Result<Vec<Message>, StorageError> {
         let rows = sqlx::query(
-            "SELECT seq, room_id, sender, recipient, body, created_at, type \
+            "SELECT seq, room_id, sender, recipient, body, created_at, type, from_human \
              FROM messages WHERE room_id = ? ORDER BY seq DESC LIMIT ?",
         )
         .bind(room_id)
@@ -488,6 +529,7 @@ fn row_to_message(row: &sqlx::sqlite::SqliteRow) -> Result<Message, StorageError
         body: row.try_get("body")?,
         created_at: parse_ts(&row.try_get::<String, _>("created_at")?)?,
         msg_type,
+        from_human: row.try_get("from_human")?,
     })
 }
 

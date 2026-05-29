@@ -105,6 +105,32 @@ async fn open_room_id(app: &axum::Router, subject: &str) -> String {
     body["room_id"].as_str().expect("room_id").to_string()
 }
 
+/// Open a room with optional open-time cap overrides, returning its id.
+async fn open_with_caps(
+    app: &axum::Router,
+    subject: &str,
+    hard_cap: Option<u32>,
+    soft_cap: Option<u32>,
+) -> String {
+    let mut payload = json!({ "subject": subject });
+    if let Some(h) = hard_cap {
+        payload["hard_cap"] = json!(h);
+    }
+    if let Some(s) = soft_cap {
+        payload["soft_cap"] = json!(s);
+    }
+    let req = Request::builder()
+        .method("POST")
+        .uri("/rooms")
+        .header("content-type", "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let body = body_json(resp.into_body()).await;
+    body["room_id"].as_str().expect("room_id").to_string()
+}
+
 async fn join(
     app: &axum::Router,
     room_id: &str,
@@ -139,6 +165,29 @@ async fn send(
     if let Some(to) = to {
         payload["to"] = json!(to);
     }
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/rooms/{room_id}/messages"))
+        .header("content-type", "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = body_json(resp.into_body()).await;
+    (status, body)
+}
+
+/// Send a `--human` turn: the sender folded its user's input into this message.
+async fn send_human(
+    app: &axum::Router,
+    room_id: &str,
+    repo: &str,
+    model: &str,
+    cwd: &str,
+    body: &str,
+) -> (StatusCode, Value) {
+    let payload =
+        json!({ "repo": repo, "model": model, "cwd": cwd, "body": body, "from_human": true });
     let req = Request::builder()
         .method("POST")
         .uri(format!("/rooms/{room_id}/messages"))
@@ -508,6 +557,121 @@ async fn repeated_open_same_subject_gets_distinct_ids() {
 }
 
 #[tokio::test]
+async fn wait_surfaces_to_user_at_the_soft_cap_threshold() {
+    // soft_cap = 3 → the conversation surfaces to the user on the (3 - 1) = 2nd
+    // consecutive autonomous msg, the loop-insurance that pulls a human in before
+    // agents talk in circles. A sends; B waits and reads the surface signal.
+    let app = test_router().await;
+    let room_id = open_with_caps(&app, "soft cap", None, Some(3)).await;
+    join(&app, &room_id, "mvp-engine", "opus47", "/work/a").await;
+    join(&app, &room_id, "mvp-engine", "sonnet46", "/work/b").await;
+
+    // 1st autonomous turn: below the threshold, no surface.
+    send(
+        &app,
+        &room_id,
+        "mvp-engine",
+        "opus47",
+        "/work/a",
+        None,
+        "m1",
+    )
+    .await;
+    let (s1, b1) = wait(&app, &room_id, "mvp-engine", "sonnet46", "/work/b").await;
+    assert_eq!(s1, StatusCode::OK);
+    assert_eq!(b1["message"]["body"], "m1");
+    assert_eq!(
+        b1["surface_to_user"],
+        json!(false),
+        "the 1st of 3 is below the soft cap; got {b1}"
+    );
+
+    // 2nd consecutive autonomous turn hits soft_cap - 1 → surface.
+    send(
+        &app,
+        &room_id,
+        "mvp-engine",
+        "opus47",
+        "/work/a",
+        None,
+        "m2",
+    )
+    .await;
+    let (s2, b2) = wait(&app, &room_id, "mvp-engine", "sonnet46", "/work/b").await;
+    assert_eq!(s2, StatusCode::OK);
+    assert_eq!(b2["message"]["body"], "m2");
+    assert_eq!(
+        b2["surface_to_user"],
+        json!(true),
+        "the 2nd consecutive msg hits soft_cap - 1 and must surface; got {b2}"
+    );
+}
+
+#[tokio::test]
+async fn human_send_resets_the_soft_cap_counter() {
+    // soft_cap = 2 → surface on each 1st consecutive autonomous turn. A `--human`
+    // send is the reset boundary, so the next autonomous turn restarts the run
+    // and surfaces again — without the reset the run would climb past the strict
+    // threshold and go quiet. That re-surface is the discriminating signal.
+    let app = test_router().await;
+    let room_id = open_with_caps(&app, "human reset", None, Some(2)).await;
+    join(&app, &room_id, "mvp-engine", "opus47", "/work/a").await;
+    join(&app, &room_id, "mvp-engine", "sonnet46", "/work/b").await;
+
+    // 1st autonomous turn → run length 1 == soft_cap - 1 → surface.
+    send(
+        &app,
+        &room_id,
+        "mvp-engine",
+        "opus47",
+        "/work/a",
+        None,
+        "m1",
+    )
+    .await;
+    let (_, b1) = wait(&app, &room_id, "mvp-engine", "sonnet46", "/work/b").await;
+    assert_eq!(b1["surface_to_user"], json!(true), "got {b1}");
+
+    // A folds the user in with a --human send → resets the run. The human turn is
+    // the reset boundary (count 0 at its own delivery), not itself a surface.
+    let (sh, _) = send_human(
+        &app,
+        &room_id,
+        "mvp-engine",
+        "opus47",
+        "/work/a",
+        "user weighs in",
+    )
+    .await;
+    assert_eq!(sh, StatusCode::CREATED);
+    let (_, bh) = wait(&app, &room_id, "mvp-engine", "sonnet46", "/work/b").await;
+    assert_eq!(bh["message"]["body"], "user weighs in");
+    assert_eq!(
+        bh["surface_to_user"],
+        json!(false),
+        "the human turn is the reset boundary, not a surface; got {bh}"
+    );
+
+    // The next autonomous turn restarts the run at 1 → surfaces again.
+    send(
+        &app,
+        &room_id,
+        "mvp-engine",
+        "opus47",
+        "/work/a",
+        None,
+        "m2",
+    )
+    .await;
+    let (_, b2) = wait(&app, &room_id, "mvp-engine", "sonnet46", "/work/b").await;
+    assert_eq!(
+        b2["surface_to_user"],
+        json!(true),
+        "after the human reset the run restarts and surfaces again; got {b2}"
+    );
+}
+
+#[tokio::test]
 async fn hard_cap_refuses_sends_once_the_room_is_full() {
     let app = test_router().await;
     let room_id = open_room_id(&app, "caps").await;
@@ -569,12 +733,93 @@ async fn hard_cap_refuses_sends_once_the_room_is_full() {
 }
 
 #[tokio::test]
+async fn open_rejects_pathological_cap_configs() {
+    // The open-time cap opts are a new input surface: a hard_cap of 0 would accept
+    // no messages at all, and a soft_cap below 2 has no valid surface threshold
+    // (surface fires on the soft_cap-1 th consecutive autonomous turn). Reject both
+    // with 400 rather than silently minting a degenerate room. (soft_cap > hard_cap
+    // is intentionally NOT rejected — a low hard_cap with the default soft_cap is a
+    // legitimate "soft cap effectively off" config.)
+    let app = test_router().await;
+
+    let bad: [(Option<u32>, Option<u32>, &str); 3] = [
+        (Some(0), None, "hard_cap 0 accepts no sends"),
+        (None, Some(0), "soft_cap 0 never surfaces"),
+        (None, Some(1), "soft_cap 1 has no valid threshold"),
+    ];
+    for (hard, soft, why) in bad {
+        let mut payload = json!({ "subject": "bad caps" });
+        if let Some(h) = hard {
+            payload["hard_cap"] = json!(h);
+        }
+        if let Some(s) = soft {
+            payload["soft_cap"] = json!(s);
+        }
+        let req = Request::builder()
+            .method("POST")
+            .uri("/rooms")
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{why}");
+    }
+
+    // A valid low-cap edge (hard_cap 1, soft_cap 2) is still accepted.
+    let ok = open_with_caps(&app, "ok caps", Some(1), Some(2)).await;
+    assert!(!ok.is_empty());
+}
+
+#[tokio::test]
+async fn open_time_hard_cap_is_honored_end_to_end() {
+    // Open with hard_cap = 2 via the open API (no storage seeding); the 3rd send
+    // is refused with 409 — proving open-time cap opts reach the enforcement gate.
+    let app = test_router().await;
+    let room_id = open_with_caps(&app, "open hard cap", Some(2), None).await;
+    join(&app, &room_id, "mvp-engine", "opus47", "/work/a").await;
+
+    for i in 0..2 {
+        let (s, _) = send(
+            &app,
+            &room_id,
+            "mvp-engine",
+            "opus47",
+            "/work/a",
+            None,
+            &format!("m{i}"),
+        )
+        .await;
+        assert_eq!(
+            s,
+            StatusCode::CREATED,
+            "send {i} under the open-time cap of 2"
+        );
+    }
+
+    let (s_over, _) = send(
+        &app,
+        &room_id,
+        "mvp-engine",
+        "opus47",
+        "/work/a",
+        None,
+        "over",
+    )
+    .await;
+    assert_eq!(
+        s_over,
+        StatusCode::CONFLICT,
+        "the 3rd send exceeds the open-time cap of 2"
+    );
+}
+
+#[tokio::test]
 async fn hard_cap_honors_a_non_default_persisted_room_config() {
     // Seed a room whose persisted config carries a non-default cap of 2, then
     // drive sends through the real HTTP path. Proves the gate reads the stored
-    // `RoomConfig.hard_cap`, not a hard-coded constant. (There is no open-time
-    // cap-override API yet — that is a later slice — so the room is seeded
-    // directly via storage.)
+    // `RoomConfig.hard_cap`, not a hard-coded constant — the persisted-config
+    // path, complementary to `open_time_hard_cap_is_honored_end_to_end` which
+    // covers authoring the cap at open time.
     let storage = Storage::connect("sqlite::memory:")
         .await
         .expect("connect in-memory sqlite");

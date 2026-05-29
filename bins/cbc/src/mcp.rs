@@ -14,6 +14,14 @@ use rmcp::{
 pub struct OpenRoomArgs {
     #[schemars(description = "Subject / topic of the room")]
     pub subject: String,
+    #[schemars(description = "Hard cap: max messages before sends are refused (default 10)")]
+    #[serde(default)]
+    pub hard_cap: Option<u32>,
+    #[schemars(
+        description = "Soft cap: consecutive autonomous turns before the user is surfaced (default 4)"
+    )]
+    #[serde(default)]
+    pub soft_cap: Option<u32>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -43,6 +51,11 @@ pub struct SendArgs {
     #[schemars(description = "Optional recipient handle; omit to broadcast to all participants")]
     #[serde(default)]
     pub to: Option<String>,
+    #[schemars(
+        description = "Set true when folding your user's input into this turn; resets the soft-cap counter"
+    )]
+    #[serde(default)]
+    pub human: bool,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -65,9 +78,13 @@ impl CbcMcp {
     #[tool(description = "Open a new chatbotchat room; returns {room_id, share_line} as JSON")]
     async fn cbc_open_room(
         &self,
-        Parameters(OpenRoomArgs { subject }): Parameters<OpenRoomArgs>,
+        Parameters(OpenRoomArgs {
+            subject,
+            hard_cap,
+            soft_cap,
+        }): Parameters<OpenRoomArgs>,
     ) -> String {
-        match self.client.open_room(&subject).await {
+        match self.client.open_room(&subject, hard_cap, soft_cap).await {
             Ok(resp) => json_or_err(&resp),
             Err(e) => err_json(&e.to_string()),
         }
@@ -98,13 +115,14 @@ impl CbcMcp {
             model,
             body,
             to,
+            human,
         }): Parameters<SendArgs>,
     ) -> String {
         let repo = crate::context::detect_repo();
         let cwd = crate::context::detect_cwd();
         match self
             .client
-            .send_message(&room_id, &repo, &model, &cwd, to.as_deref(), &body)
+            .send_message(&room_id, &repo, &model, &cwd, to.as_deref(), &body, human)
             .await
         {
             Ok(resp) => json_or_err(&resp),
@@ -113,7 +131,7 @@ impl CbcMcp {
     }
 
     #[tool(
-        description = "Long-poll for the next message addressed to you (or broadcast) in a room. Identity is (repo, model, cwd) — repo and cwd are auto-detected, you supply the model (slice-3 identity arg). Blocks up to the server cap (10 min); returns {\"status\":\"paused_by_timeout\"} on cap, otherwise {\"message\":{...}} as JSON"
+        description = "Long-poll for the next message addressed to you (or broadcast) in a room. Identity is (repo, model, cwd) — repo and cwd are auto-detected, you supply the model (slice-3 identity arg). Blocks up to the server cap (10 min); returns {\"status\":\"paused_by_timeout\"} on cap, otherwise {\"message\":{...},\"surface_to_user\":bool} as JSON. When surface_to_user is true the conversation has hit the soft cap — consult your user and send your next turn with human=true."
     )]
     async fn cbc_wait(
         &self,

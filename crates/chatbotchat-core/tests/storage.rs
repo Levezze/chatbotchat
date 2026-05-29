@@ -335,7 +335,7 @@ async fn create_message_capped_gate_ignores_sentinel_rows() {
 
     const CAP: i64 = 1;
     let admitted = storage
-        .create_message_capped(&room.id, "sender", None, "first msg", now, CAP)
+        .create_message_capped(&room.id, "sender", None, "first msg", now, false, CAP)
         .await
         .expect("capped insert ok");
     assert!(
@@ -345,12 +345,185 @@ async fn create_message_capped_gate_ignores_sentinel_rows() {
 
     // And now the cap is genuinely full for `msg` rows.
     let refused = storage
-        .create_message_capped(&room.id, "sender", None, "second msg", now, CAP)
+        .create_message_capped(&room.id, "sender", None, "second msg", now, false, CAP)
         .await
         .expect("capped insert ok");
     assert!(
         refused.is_none(),
         "the second msg is at the cap and must be refused"
+    );
+}
+
+#[tokio::test]
+async fn from_human_survives_the_write_read_round_trip() {
+    let storage = fresh_storage().await;
+    let room = sample_room();
+    storage.create_room(&room).await.expect("create_room ok");
+    let now = OffsetDateTime::now_utc();
+
+    // A human-tagged msg (the `--human` fold) then a plain agent msg. Reading them
+    // back must preserve each row's `from_human` flag — proves the column writes
+    // (capped insert binds it into the atomic statement) and `row_to_message`
+    // reads it back. The soft-cap reset boundary keys off this flag.
+    const CAP: i64 = 10;
+    storage
+        .create_message_capped(&room.id, "sender", None, "human says", now, true, CAP)
+        .await
+        .expect("capped insert ok")
+        .expect("under cap");
+    storage
+        .create_message_capped(&room.id, "sender", None, "agent says", now, false, CAP)
+        .await
+        .expect("capped insert ok")
+        .expect("under cap");
+
+    let recent = storage
+        .recent_messages(&room.id, 10)
+        .await
+        .expect("recent ok");
+    let flags: Vec<bool> = recent.iter().map(|m| m.from_human).collect();
+    assert_eq!(
+        flags,
+        vec![true, false],
+        "from_human must survive the storage round-trip in order"
+    );
+}
+
+#[tokio::test]
+async fn consecutive_msg_count_climbs_across_non_human_msgs() {
+    let storage = fresh_storage().await;
+    let room = sample_room();
+    storage.create_room(&room).await.expect("create_room ok");
+    let now = OffsetDateTime::now_utc();
+    const CAP: i64 = 10;
+
+    // Three autonomous (non-human) turns in a row. At delivery of each seq, the
+    // soft counter — consecutive `msg` rows since the last human input — is that
+    // turn's position in the run. This is what the wait response compares to
+    // `soft_cap - 1` to decide whether to surface the conversation to the user.
+    let mut seqs = Vec::new();
+    for i in 0..3 {
+        let m = storage
+            .create_message_capped(&room.id, "a", None, &format!("m{i}"), now, false, CAP)
+            .await
+            .expect("capped insert ok")
+            .expect("under cap");
+        seqs.push(m.seq);
+    }
+
+    for (i, seq) in seqs.iter().enumerate() {
+        assert_eq!(
+            storage
+                .consecutive_msg_count(&room.id, *seq)
+                .await
+                .expect("count ok"),
+            (i + 1) as i64,
+            "the run length at the {}th msg must be {}",
+            i + 1,
+            i + 1
+        );
+    }
+}
+
+#[tokio::test]
+async fn consecutive_msg_count_resets_at_a_human_msg() {
+    let storage = fresh_storage().await;
+    let room = sample_room();
+    storage.create_room(&room).await.expect("create_room ok");
+    let now = OffsetDateTime::now_utc();
+    const CAP: i64 = 10;
+
+    // Two autonomous turns, then a `--human` fold, then another autonomous turn.
+    storage
+        .create_message_capped(&room.id, "a", None, "m1", now, false, CAP)
+        .await
+        .expect("ok")
+        .expect("under cap");
+    let m2 = storage
+        .create_message_capped(&room.id, "a", None, "m2", now, false, CAP)
+        .await
+        .expect("ok")
+        .expect("under cap");
+    let human = storage
+        .create_message_capped(&room.id, "a", None, "user says", now, true, CAP)
+        .await
+        .expect("ok")
+        .expect("under cap");
+    let m4 = storage
+        .create_message_capped(&room.id, "a", None, "m4", now, false, CAP)
+        .await
+        .expect("ok")
+        .expect("under cap");
+
+    // Before the human fold the run is 2.
+    assert_eq!(
+        storage
+            .consecutive_msg_count(&room.id, m2.seq)
+            .await
+            .expect("count ok"),
+        2
+    );
+    // The human row IS the reset boundary — excluded from its own run, so the
+    // count at its delivery is 0 (no autonomous turns after the reset yet).
+    assert_eq!(
+        storage
+            .consecutive_msg_count(&room.id, human.seq)
+            .await
+            .expect("count ok"),
+        0,
+        "a from_human msg resets the run to 0"
+    );
+    // The next autonomous turn restarts the run at 1, not 3.
+    assert_eq!(
+        storage
+            .consecutive_msg_count(&room.id, m4.seq)
+            .await
+            .expect("count ok"),
+        1,
+        "the run restarts after the human fold"
+    );
+}
+
+#[tokio::test]
+async fn consecutive_msg_count_excludes_sentinels() {
+    let storage = fresh_storage().await;
+    let room = sample_room();
+    storage.create_room(&room).await.expect("create_room ok");
+    let now = OffsetDateTime::now_utc();
+    const CAP: i64 = 10;
+
+    // An autonomous turn, then a sentinel interleaved, then another turn. The
+    // sentinel (`type != 'msg'`) neither counts toward the run nor resets it —
+    // only `msg` rows do, in lockstep with the cap seams.
+    storage
+        .create_message_capped(&room.id, "a", None, "m1", now, false, CAP)
+        .await
+        .expect("ok")
+        .expect("under cap");
+    storage
+        .create_message_typed(
+            &room.id,
+            "a",
+            None,
+            "consulting my user",
+            now,
+            MessageType::WaitingUser,
+        )
+        .await
+        .expect("create sentinel");
+    let m2 = storage
+        .create_message_capped(&room.id, "a", None, "m2", now, false, CAP)
+        .await
+        .expect("ok")
+        .expect("under cap");
+
+    assert_eq!(
+        storage
+            .consecutive_msg_count(&room.id, m2.seq)
+            .await
+            .expect("count ok"),
+        2,
+        "the sentinel between m1 and m2 must not count toward the run"
     );
 }
 
@@ -366,7 +539,7 @@ async fn create_message_capped_enforces_the_cap_atomically_and_honors_the_config
     const CAP: i64 = 2;
     for i in 0..CAP {
         let inserted = storage
-            .create_message_capped(&room.id, "sender", None, &format!("m{i}"), now, CAP)
+            .create_message_capped(&room.id, "sender", None, &format!("m{i}"), now, false, CAP)
             .await
             .expect("capped insert ok");
         assert!(
@@ -378,7 +551,7 @@ async fn create_message_capped_enforces_the_cap_atomically_and_honors_the_config
     // The cap+1th is refused atomically (the count test + insert are one SQL
     // statement, so there is no read-then-write window) and nothing is written.
     let refused = storage
-        .create_message_capped(&room.id, "sender", None, "over", now, CAP)
+        .create_message_capped(&room.id, "sender", None, "over", now, false, CAP)
         .await
         .expect("capped insert ok");
     assert!(refused.is_none(), "a send at the cap must be refused");

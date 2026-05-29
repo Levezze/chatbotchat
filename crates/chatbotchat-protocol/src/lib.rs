@@ -1,9 +1,14 @@
 use serde::{Deserialize, Serialize};
 
-/// Request body for `POST /rooms`.
+/// Request body for `POST /rooms`. `hard_cap` / `soft_cap` are optional open-time
+/// overrides; omitted means the server's defaults (hard 10, soft 4).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenRoomRequest {
     pub subject: String,
+    #[serde(default)]
+    pub hard_cap: Option<u32>,
+    #[serde(default)]
+    pub soft_cap: Option<u32>,
 }
 
 /// Response body for `POST /rooms`.
@@ -47,6 +52,10 @@ pub struct SendMessageRequest {
     #[serde(default)]
     pub to: Option<String>,
     pub body: String,
+    /// `true` when the sender folded its user's input into this turn (`--human`).
+    /// Resets the soft-cap consecutive-autonomous-turn counter.
+    #[serde(default)]
+    pub from_human: bool,
 }
 
 /// Response body for `POST /rooms/:id/messages`: the assigned monotonic `seq`.
@@ -65,12 +74,21 @@ pub struct WaitRequest {
 
 /// Response body for `GET /rooms/:id/wait`: either the next message addressed to
 /// the caller, or a timeout sentinel when the server-side long-poll cap elapsed.
-/// Serializes as `{ "message": { … } }` or `{ "status": "paused_by_timeout" }`.
+/// Serializes as `{ "message": { … }, "surface_to_user": bool }` or
+/// `{ "status": "paused_by_timeout" }`. `surface_to_user` is the soft-cap signal:
+/// `true` when this delivery is the (soft_cap − 1)th consecutive autonomous turn,
+/// telling the receiving agent to fold its user in before replying.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum WaitResponse {
-    Message { message: MessageView },
-    Timeout { status: String },
+    Message {
+        message: MessageView,
+        #[serde(default)]
+        surface_to_user: bool,
+    },
+    Timeout {
+        status: String,
+    },
 }
 
 /// Response body for `POST /rooms/:id/join`.
