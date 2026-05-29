@@ -229,3 +229,41 @@ async fn claim_next_unread_for_unknown_handle_returns_none_without_hanging() {
         "an unknown handle has nothing to claim"
     );
 }
+
+#[tokio::test]
+async fn create_message_capped_enforces_the_cap_atomically_and_honors_the_configured_value() {
+    let storage = fresh_storage().await;
+    let room = sample_room();
+    storage.create_room(&room).await.expect("create_room ok");
+    let now = OffsetDateTime::now_utc();
+
+    // The enforcement reads an arbitrary cap value (not a hard-coded 10): a
+    // cap of 2 admits exactly two messages.
+    const CAP: i64 = 2;
+    for i in 0..CAP {
+        let inserted = storage
+            .create_message_capped(&room.id, "sender", None, &format!("m{i}"), now, CAP)
+            .await
+            .expect("capped insert ok");
+        assert!(
+            inserted.is_some(),
+            "send {i} is under the cap and must be inserted"
+        );
+    }
+
+    // The cap+1th is refused atomically (the count test + insert are one SQL
+    // statement, so there is no read-then-write window) and nothing is written.
+    let refused = storage
+        .create_message_capped(&room.id, "sender", None, "over", now, CAP)
+        .await
+        .expect("capped insert ok");
+    assert!(refused.is_none(), "a send at the cap must be refused");
+    assert_eq!(
+        storage
+            .count_capped_messages(&room.id)
+            .await
+            .expect("count ok"),
+        CAP,
+        "the refused message must not be persisted"
+    );
+}

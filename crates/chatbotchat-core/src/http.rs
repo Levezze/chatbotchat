@@ -268,22 +268,28 @@ async fn send_message(
 
     // Hard cap: once the room holds `hard_cap` cap-counting messages, refuse
     // further sends. Bounded agent talk with a human in the loop is the point —
-    // this is the runaway-token backstop. The escape hatch (raise the cap /
-    // close the room) is a later slice; here we only enforce-and-reject. The
-    // count is its own awaited query — no DB connection is held across it.
-    let count = state.storage.count_capped_messages(&id).await?;
-    if count >= room.config.hard_cap as i64 {
-        return Err(ApiError::Conflict(format!(
-            "hard cap reached ({} messages); raise the cap or close the room",
-            room.config.hard_cap
-        )));
-    }
-
+    // this is the runaway-token backstop. The gate is enforced inside the insert
+    // (one atomic SQL statement), so concurrent sends cannot slip past the cap.
+    // The escape hatch — raising the cap (#5) or closing the room (#7) — lands in
+    // a later slice; here we only enforce-and-reject, with no room-state change.
     let now = OffsetDateTime::now_utc();
     let msg = state
         .storage
-        .create_message(&id, &sender.handle, req.to.as_deref(), &req.body, now)
-        .await?;
+        .create_message_capped(
+            &id,
+            &sender.handle,
+            req.to.as_deref(),
+            &req.body,
+            now,
+            room.config.hard_cap as i64,
+        )
+        .await?
+        .ok_or_else(|| {
+            ApiError::Conflict(format!(
+                "hard cap reached ({} messages); raise the cap or close the room",
+                room.config.hard_cap
+            ))
+        })?;
     state.hub.notify(&id);
 
     Ok((
