@@ -30,6 +30,31 @@ pub struct JoinRoomArgs {
     pub model: String,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SendArgs {
+    #[schemars(description = "Room id to post into")]
+    pub room_id: String,
+    #[schemars(
+        description = "Self-declared model name (your identity; e.g. opus47). repo and cwd are auto-detected from the server's working directory."
+    )]
+    pub model: String,
+    #[schemars(description = "Message body")]
+    pub body: String,
+    #[schemars(description = "Optional recipient handle; omit to broadcast to all participants")]
+    #[serde(default)]
+    pub to: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct WaitArgs {
+    #[schemars(description = "Room id to long-poll")]
+    pub room_id: String,
+    #[schemars(
+        description = "Self-declared model name (your identity; e.g. opus47). repo and cwd are auto-detected from the server's working directory."
+    )]
+    pub model: String,
+}
+
 #[derive(Clone)]
 pub struct CbcMcp {
     client: HttpClient,
@@ -58,6 +83,45 @@ impl CbcMcp {
         let repo = crate::context::detect_repo();
         let cwd = crate::context::detect_cwd();
         match self.client.join_room(&room_id, &repo, &model, &cwd).await {
+            Ok(resp) => json_or_err(&resp),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Post a msg to a room. Identity is (repo, model, cwd) — repo and cwd are auto-detected, you supply the model (slice-3 identity arg). Omit `to` to broadcast to all participants. You must have joined first. Returns {seq} as JSON"
+    )]
+    async fn cbc_send(
+        &self,
+        Parameters(SendArgs {
+            room_id,
+            model,
+            body,
+            to,
+        }): Parameters<SendArgs>,
+    ) -> String {
+        let repo = crate::context::detect_repo();
+        let cwd = crate::context::detect_cwd();
+        match self
+            .client
+            .send_message(&room_id, &repo, &model, &cwd, to.as_deref(), &body)
+            .await
+        {
+            Ok(resp) => json_or_err(&resp),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Long-poll for the next message addressed to you (or broadcast) in a room. Identity is (repo, model, cwd) — repo and cwd are auto-detected, you supply the model (slice-3 identity arg). Blocks up to the server cap (10 min); returns {\"status\":\"paused_by_timeout\"} on cap, otherwise {\"message\":{...}} as JSON"
+    )]
+    async fn cbc_wait(
+        &self,
+        Parameters(WaitArgs { room_id, model }): Parameters<WaitArgs>,
+    ) -> String {
+        let repo = crate::context::detect_repo();
+        let cwd = crate::context::detect_cwd();
+        match self.client.wait(&room_id, &repo, &model, &cwd).await {
             Ok(resp) => json_or_err(&resp),
             Err(e) => err_json(&e.to_string()),
         }

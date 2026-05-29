@@ -120,6 +120,38 @@ fn join_prints_handle_and_is_idempotent() {
 }
 
 #[test]
+fn send_then_wait_round_trips_over_cli() {
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "cli send wait");
+
+    // Two participants distinguished by model (same cwd).
+    join(&base, &room_id, "opus47");
+    join(&base, &room_id, "sonnet46");
+
+    // opus47 posts a broadcast BEFORE the wait so the wait returns immediately
+    // (the real daemon's cap is 10 minutes — a test must never park on it).
+    Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["send", &room_id, "--model", "opus47", "hello over cli"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+
+    // sonnet46 waits and receives the message.
+    let waited = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["wait", &room_id, "--model", "sonnet46"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(waited.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("hello over cli"),
+        "wait stdout should carry the delivered message body; got:\n{out}"
+    );
+}
+
+#[test]
 fn status_reports_open_room() {
     let base = spawn_daemon();
 

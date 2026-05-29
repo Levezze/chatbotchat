@@ -1,3 +1,4 @@
+use crate::message::Message;
 use crate::participant::Participant;
 use crate::room::{Room, RoomConfig, RoomState};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -106,8 +107,8 @@ impl Storage {
 
         sqlx::query(
             "INSERT INTO participants \
-             (handle, room_id, repo, model, cwd, joined_at, last_poll_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+             (handle, room_id, repo, model, cwd, joined_at, last_poll_at, last_read_seq) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&p.handle)
         .bind(&p.room_id)
@@ -116,9 +117,103 @@ impl Storage {
         .bind(&p.cwd)
         .bind(joined_at)
         .bind(last_poll_at)
+        .bind(p.last_read_seq)
         .execute(&self.pool)
         .await?;
 
+        Ok(())
+    }
+
+    /// Append a `msg` to a room. Returns the persisted message with its assigned
+    /// monotonic `seq`.
+    pub async fn create_message(
+        &self,
+        room_id: &str,
+        sender: &str,
+        recipient: Option<&str>,
+        body: &str,
+        created_at: OffsetDateTime,
+    ) -> Result<Message, StorageError> {
+        let created = created_at.format(&Rfc3339).map_err(fmt_err)?;
+
+        let result = sqlx::query(
+            "INSERT INTO messages (room_id, sender, recipient, body, created_at) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(room_id)
+        .bind(sender)
+        .bind(recipient)
+        .bind(body)
+        .bind(created)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(Message {
+            seq: result.last_insert_rowid(),
+            room_id: room_id.to_string(),
+            sender: sender.to_string(),
+            recipient: recipient.map(str::to_string),
+            body: body.to_string(),
+            created_at,
+        })
+    }
+
+    /// The oldest message in `room_id` with `seq > after_seq` that is addressed
+    /// to `handle` or broadcast to all (`recipient IS NULL`), excluding the
+    /// caller's own messages (`wait` is an inbox, not a log). `None` when the
+    /// caller is caught up.
+    pub async fn next_unread(
+        &self,
+        room_id: &str,
+        handle: &str,
+        after_seq: i64,
+    ) -> Result<Option<Message>, StorageError> {
+        let row = sqlx::query(
+            "SELECT seq, room_id, sender, recipient, body, created_at \
+             FROM messages \
+             WHERE room_id = ? AND seq > ? AND sender != ? \
+               AND (recipient IS NULL OR recipient = ?) \
+             ORDER BY seq LIMIT 1",
+        )
+        .bind(room_id)
+        .bind(after_seq)
+        .bind(handle)
+        .bind(handle)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            None => Ok(None),
+            Some(row) => Ok(Some(row_to_message(&row)?)),
+        }
+    }
+
+    /// The most recent `limit` messages in a room, returned oldest-first. This
+    /// is the log view (every sender), surfaced to a joining participant.
+    pub async fn recent_messages(
+        &self,
+        room_id: &str,
+        limit: i64,
+    ) -> Result<Vec<Message>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT seq, room_id, sender, recipient, body, created_at \
+             FROM messages WHERE room_id = ? ORDER BY seq DESC LIMIT ?",
+        )
+        .bind(room_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        // Fetched newest-first for the LIMIT; hand back chronological.
+        rows.iter().rev().map(row_to_message).collect()
+    }
+
+    /// Advance a participant's long-poll read cursor to `seq`.
+    pub async fn advance_read_cursor(&self, handle: &str, seq: i64) -> Result<(), StorageError> {
+        sqlx::query("UPDATE participants SET last_read_seq = ? WHERE handle = ?")
+            .bind(seq)
+            .bind(handle)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -130,7 +225,7 @@ impl Storage {
         cwd: &str,
     ) -> Result<Option<Participant>, StorageError> {
         let row = sqlx::query(
-            "SELECT handle, room_id, repo, model, cwd, joined_at, last_poll_at \
+            "SELECT handle, room_id, repo, model, cwd, joined_at, last_poll_at, last_read_seq \
              FROM participants \
              WHERE room_id = ? AND repo = ? AND model = ? AND cwd = ?",
         )
@@ -149,7 +244,7 @@ impl Storage {
 
     pub async fn list_participants(&self, room_id: &str) -> Result<Vec<Participant>, StorageError> {
         let rows = sqlx::query(
-            "SELECT handle, room_id, repo, model, cwd, joined_at, last_poll_at \
+            "SELECT handle, room_id, repo, model, cwd, joined_at, last_poll_at, last_read_seq \
              FROM participants WHERE room_id = ? ORDER BY joined_at",
         )
         .bind(room_id)
@@ -199,6 +294,18 @@ fn row_to_participant(row: &sqlx::sqlite::SqliteRow) -> Result<Participant, Stor
         cwd: row.try_get("cwd")?,
         joined_at: parse_ts(&row.try_get::<String, _>("joined_at")?)?,
         last_poll_at: parse_ts(&row.try_get::<String, _>("last_poll_at")?)?,
+        last_read_seq: row.try_get("last_read_seq")?,
+    })
+}
+
+fn row_to_message(row: &sqlx::sqlite::SqliteRow) -> Result<Message, StorageError> {
+    Ok(Message {
+        seq: row.try_get("seq")?,
+        room_id: row.try_get("room_id")?,
+        sender: row.try_get("sender")?,
+        recipient: row.try_get("recipient")?,
+        body: row.try_get("body")?,
+        created_at: parse_ts(&row.try_get::<String, _>("created_at")?)?,
     })
 }
 

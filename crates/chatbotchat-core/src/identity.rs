@@ -85,6 +85,7 @@ mod tests {
             cwd: cwd.into(),
             joined_at: now,
             last_poll_at: now,
+            last_read_seq: 0,
         }
     }
 

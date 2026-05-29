@@ -4,6 +4,8 @@
 pub mod http;
 pub mod identity;
 pub mod ids;
+pub mod message;
 pub mod participant;
 pub mod room;
 pub mod storage;
+pub mod waiter;

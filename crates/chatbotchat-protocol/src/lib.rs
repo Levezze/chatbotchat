@@ -24,11 +24,54 @@ pub struct JoinRoomRequest {
     pub cwd: String,
 }
 
-/// Wire view of a single message. Placeholder in slice 2 — messages land in
-/// slice 3, where this gains fields additively without re-touching
-/// `JoinRoomResponse`. Until then `recent_messages` is always empty.
+/// Wire view of a single message. `from`/`to` are participant handles; `to` is
+/// `None` for a broadcast to all. `seq` is the monotonic ordering key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessageView {}
+pub struct MessageView {
+    pub seq: i64,
+    pub from: String,
+    pub to: Option<String>,
+    pub body: String,
+    pub created_at: String,
+}
+
+/// Request body for `POST /rooms/:id/messages`. Identity is the
+/// `(repo, model, cwd)` tuple (resolved server-side to the sender's handle,
+/// same as join); the caller must already be a participant. `to` omitted means
+/// broadcast to all.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendMessageRequest {
+    pub repo: String,
+    pub model: String,
+    pub cwd: String,
+    #[serde(default)]
+    pub to: Option<String>,
+    pub body: String,
+}
+
+/// Response body for `POST /rooms/:id/messages`: the assigned monotonic `seq`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SendMessageResponse {
+    pub seq: i64,
+}
+
+/// Query parameters for `GET /rooms/:id/wait`. Same tuple identity as send.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WaitRequest {
+    pub repo: String,
+    pub model: String,
+    pub cwd: String,
+}
+
+/// Response body for `GET /rooms/:id/wait`: either the next message addressed to
+/// the caller, or a timeout sentinel when the server-side long-poll cap elapsed.
+/// Serializes as `{ "message": { … } }` or `{ "status": "paused_by_timeout" }`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WaitResponse {
+    Message { message: MessageView },
+    Timeout { status: String },
+}
 
 /// Response body for `POST /rooms/:id/join`.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -2,7 +2,8 @@
 //! `reqwest` against the chatbotchat daemon.
 
 use chatbotchat_protocol::{
-    ErrorEnvelope, JoinRoomRequest, JoinRoomResponse, OpenRoomRequest, OpenRoomResponse, RoomStatus,
+    ErrorEnvelope, JoinRoomRequest, JoinRoomResponse, OpenRoomRequest, OpenRoomResponse,
+    RoomStatus, SendMessageRequest, SendMessageResponse, WaitRequest, WaitResponse,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -57,6 +58,56 @@ impl HttpClient {
                 model: model.to_string(),
                 cwd: cwd.to_string(),
             })
+            .send()
+            .await?;
+        decode(resp).await
+    }
+
+    /// Post a `msg` to a room. `to == None` broadcasts to all participants.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_message(
+        &self,
+        room_id: &str,
+        repo: &str,
+        model: &str,
+        cwd: &str,
+        to: Option<&str>,
+        body: &str,
+    ) -> Result<SendMessageResponse, ClientError> {
+        let resp = self
+            .http
+            .post(format!("{}/rooms/{room_id}/messages", self.base_url))
+            .json(&SendMessageRequest {
+                repo: repo.to_string(),
+                model: model.to_string(),
+                cwd: cwd.to_string(),
+                to: to.map(str::to_string),
+                body: body.to_string(),
+            })
+            .send()
+            .await?;
+        decode(resp).await
+    }
+
+    /// Long-poll for the next message addressed to the caller (or broadcast).
+    /// The per-request timeout sits just above the server's 10-minute cap so the
+    /// client never abandons the call before the server returns.
+    pub async fn wait(
+        &self,
+        room_id: &str,
+        repo: &str,
+        model: &str,
+        cwd: &str,
+    ) -> Result<WaitResponse, ClientError> {
+        let resp = self
+            .http
+            .get(format!("{}/rooms/{room_id}/wait", self.base_url))
+            .query(&WaitRequest {
+                repo: repo.to_string(),
+                model: model.to_string(),
+                cwd: cwd.to_string(),
+            })
+            .timeout(std::time::Duration::from_secs(660))
             .send()
             .await?;
         decode(resp).await
