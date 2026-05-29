@@ -31,12 +31,21 @@ impl HttpClient {
         }
     }
 
-    pub async fn open_room(&self, subject: &str) -> Result<OpenRoomResponse, ClientError> {
+    /// Open a room. `hard_cap` / `soft_cap` are optional open-time overrides;
+    /// `None` keeps the server defaults.
+    pub async fn open_room(
+        &self,
+        subject: &str,
+        hard_cap: Option<u32>,
+        soft_cap: Option<u32>,
+    ) -> Result<OpenRoomResponse, ClientError> {
         let resp = self
             .http
             .post(format!("{}/rooms", self.base_url))
             .json(&OpenRoomRequest {
                 subject: subject.to_string(),
+                hard_cap,
+                soft_cap,
             })
             .send()
             .await?;
@@ -64,6 +73,8 @@ impl HttpClient {
     }
 
     /// Post a `msg` to a room. `to == None` broadcasts to all participants.
+    /// `from_human` flags a `--human` turn (folds the user's input in; resets the
+    /// soft-cap counter).
     #[allow(clippy::too_many_arguments)]
     pub async fn send_message(
         &self,
@@ -73,6 +84,7 @@ impl HttpClient {
         cwd: &str,
         to: Option<&str>,
         body: &str,
+        from_human: bool,
     ) -> Result<SendMessageResponse, ClientError> {
         let resp = self
             .http
@@ -83,6 +95,7 @@ impl HttpClient {
                 cwd: cwd.to_string(),
                 to: to.map(str::to_string),
                 body: body.to_string(),
+                from_human,
             })
             .send()
             .await?;

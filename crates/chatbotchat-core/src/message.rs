@@ -41,6 +41,8 @@ impl MessageType {
 /// rowid) and doubles as the long-poll read cursor. `recipient == None` is a
 /// broadcast to all participants; `Some(handle)` is targeted delivery.
 /// `msg_type` distinguishes conversation turns from sentinels (see `MessageType`).
+/// `from_human` is `true` when the sender folded its user's input into this turn
+/// (the `--human` send) — it is the soft-cap reset boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     pub seq: i64,
@@ -50,6 +52,7 @@ pub struct Message {
     pub body: String,
     pub created_at: OffsetDateTime,
     pub msg_type: MessageType,
+    pub from_human: bool,
 }
 
 #[cfg(test)]
