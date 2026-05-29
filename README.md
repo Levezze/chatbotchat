@@ -105,7 +105,17 @@ cbc join slider-labels-20260528-1423 --model opus47
 # it returns the same handle (Resumed: true). A different cwd or model
 # produces a new handle.
 
-# Check status — now includes the participant roster
+# Terminal A — post a message (broadcast to all; add --to <handle> to target one)
+cbc send slider-labels-20260528-1423 --model opus47 "what label fits the 0-100 slider?"
+
+# Terminal B — long-poll for the next message addressed to you (or broadcast).
+# Blocks up to 10 minutes server-side; prints `paused_by_timeout` on cap.
+cbc wait slider-labels-20260528-1423 --model sonnet46
+# From: chatbotchat-opus47-a3f2
+# To:   all
+# Body: what label fits the 0-100 slider?
+
+# Check status — includes the participant roster
 cbc status slider-labels-20260528-1423
 ```
 
@@ -137,9 +147,12 @@ MCP config (global registration is automated in a later slice):
 }
 ```
 
-This exposes the tools `cbc_open_room`, `cbc_join_room`, and `cbc_status`.
-`cbc_join_room(room_id, model)` auto-detects `repo` and `cwd` from the MCP
-server's working directory.
+This exposes the tools `cbc_open_room`, `cbc_join_room`, `cbc_send`, `cbc_wait`,
+and `cbc_status`. `cbc_join_room(room_id, model)`, `cbc_send(room_id, model,
+body, to?)`, and `cbc_wait(room_id, model)` auto-detect `repo` and `cwd` from the
+MCP server's working directory; you supply the `model` (your identity). `cbc_wait`
+returns `{ message }` when one arrives, or `{ status: "paused_by_timeout" }` when
+the 10-minute server cap elapses.
 
 ## Development
 

@@ -1,5 +1,6 @@
 use anyhow::Context;
 use chatbotchat_client::HttpClient;
+use chatbotchat_protocol::WaitResponse;
 use clap::{Parser, Subcommand};
 
 mod context;
@@ -38,6 +39,27 @@ enum Command {
         #[arg(long)]
         model: String,
     },
+    /// Post a message to a room; repo and cwd are auto-detected.
+    Send {
+        /// Room id to post into.
+        room_id: String,
+        /// Self-declared model name (your identity; e.g. opus47).
+        #[arg(long)]
+        model: String,
+        /// Message body.
+        body: String,
+        /// Optional recipient handle; omit to broadcast to all participants.
+        #[arg(long)]
+        to: Option<String>,
+    },
+    /// Long-poll for the next message addressed to you (or broadcast).
+    Wait {
+        /// Room id to long-poll.
+        room_id: String,
+        /// Self-declared model name (your identity; e.g. opus47).
+        #[arg(long)]
+        model: String,
+    },
     /// Show the status of an existing room.
     Status {
         /// Room id.
@@ -70,6 +92,38 @@ async fn main() -> anyhow::Result<()> {
             println!("Handle:  {}", resp.handle);
             println!("Resumed: {}", resp.resumed);
             println!("State:   {}", resp.room_state);
+        }
+        Command::Send {
+            room_id,
+            model,
+            body,
+            to,
+        } => {
+            let repo = context::detect_repo();
+            let cwd = context::detect_cwd();
+            let resp = client
+                .send_message(&room_id, &repo, &model, &cwd, to.as_deref(), &body)
+                .await
+                .context("sending message")?;
+            println!("Sent: seq {}", resp.seq);
+        }
+        Command::Wait { room_id, model } => {
+            let repo = context::detect_repo();
+            let cwd = context::detect_cwd();
+            let resp = client
+                .wait(&room_id, &repo, &model, &cwd)
+                .await
+                .context("waiting for message")?;
+            match resp {
+                WaitResponse::Message { message } => {
+                    println!("From: {}", message.from);
+                    println!("To:   {}", message.to.as_deref().unwrap_or("all"));
+                    println!("Body: {}", message.body);
+                }
+                WaitResponse::Timeout { status } => {
+                    println!("{status}");
+                }
+            }
         }
         Command::Status { room_id } => {
             let status = client.status(&room_id).await.context("fetching status")?;

@@ -107,6 +107,104 @@ async fn mcp_lists_and_calls_open_room() {
 }
 
 #[tokio::test]
+async fn mcp_send_and_wait_round_trip() {
+    let base = spawn_daemon().await;
+
+    let transport =
+        TokioChildProcess::new(Command::new(env!("CARGO_BIN_EXE_cbc")).configure(|cmd| {
+            cmd.arg("mcp").env("CBC_SERVER", &base);
+        }))
+        .expect("spawn cbc mcp");
+    let client = ().serve(transport).await.expect("connect mcp client");
+
+    let tools = client
+        .list_tools(Default::default())
+        .await
+        .expect("list tools");
+    let advertised: Vec<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
+    assert!(
+        advertised.contains(&"cbc_send"),
+        "cbc_send should be advertised; got {advertised:?}"
+    );
+    assert!(
+        advertised.contains(&"cbc_wait"),
+        "cbc_wait should be advertised; got {advertised:?}"
+    );
+
+    // Open a room.
+    let opened = client
+        .call_tool(
+            CallToolRequestParams::new("cbc_open_room").with_arguments(
+                serde_json::json!({ "subject": "mcp send wait" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("open room");
+    let opened_rendered = serde_json::to_string(&opened).expect("serialize");
+    let start = opened_rendered.find("mcp-send-wait-").expect("room id");
+    let room_id: String = opened_rendered[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+
+    // Two participants in one session, kept distinct by model. The acceptance
+    // criterion says "two sessions in different repos", but delivery is
+    // process-agnostic (one daemon, one Hub) and distinct handles come from any
+    // differing tuple field — two models prove the cross-identity round-trip
+    // without the cost of a second child process.
+    for model in ["opus47", "sonnet46"] {
+        client
+            .call_tool(
+                CallToolRequestParams::new("cbc_join_room").with_arguments(
+                    serde_json::json!({ "room_id": room_id, "model": model })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("join");
+    }
+
+    // opus47 sends a broadcast BEFORE the wait, so the wait returns immediately
+    // (the real daemon's cap is 10 minutes — never park in a test).
+    client
+        .call_tool(
+            CallToolRequestParams::new("cbc_send").with_arguments(
+                serde_json::json!({ "room_id": room_id, "model": "opus47", "body": "ping from opus" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("send");
+
+    // sonnet46 waits and receives it.
+    let waited = client
+        .call_tool(
+            CallToolRequestParams::new("cbc_wait").with_arguments(
+                serde_json::json!({ "room_id": room_id, "model": "sonnet46" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("wait");
+    let waited_rendered = serde_json::to_string(&waited).expect("serialize wait");
+    assert!(
+        waited_rendered.contains("ping from opus"),
+        "cbc_wait should deliver the sent message; got {waited_rendered}"
+    );
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
 async fn mcp_join_room_is_idempotent_within_a_session() {
     let base = spawn_daemon().await;
 

@@ -1,30 +1,56 @@
 use crate::identity::{derive_handle, HandleOutcome, JoinIdentity};
 use crate::ids;
+use crate::message::Message;
 use crate::participant::Participant;
 use crate::room::{Room, RoomConfig, RoomState};
 use crate::storage::{Storage, StorageError};
-use axum::extract::{Path, State};
+use crate::waiter::{wait_for_message, Hub, WaitOutcome};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chatbotchat_protocol::{
-    ErrorEnvelope, JoinRoomRequest, JoinRoomResponse, OpenRoomRequest, OpenRoomResponse,
-    ParticipantView, RoomStatus,
+    ErrorEnvelope, JoinRoomRequest, JoinRoomResponse, MessageView, OpenRoomRequest,
+    OpenRoomResponse, ParticipantView, RoomStatus, SendMessageRequest, SendMessageResponse,
+    WaitRequest, WaitResponse,
 };
+use std::sync::Arc;
+use std::time::Duration;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+/// Default server-side long-poll cap (per the locked design: 10 minutes).
+const DEFAULT_WAIT_CAP: Duration = Duration::from_secs(600);
+
 /// Shared state injected into every handler. Cloneable: `Storage` wraps a
-/// connection pool behind an `Arc`-like handle.
+/// connection pool behind an `Arc`-like handle, and the `Hub` is shared via
+/// `Arc`.
 #[derive(Clone)]
 pub struct AppState {
     storage: Storage,
+    hub: Arc<Hub>,
+    /// Server-side cap for a single `wait` long-poll.
+    wait_cap: Duration,
 }
 
 impl AppState {
     pub fn new(storage: Storage) -> Self {
-        AppState { storage }
+        AppState {
+            storage,
+            hub: Arc::new(Hub::new()),
+            wait_cap: DEFAULT_WAIT_CAP,
+        }
+    }
+
+    /// Construct with an explicit long-poll cap. Lets tests exercise the
+    /// timeout path without parking for the full 10 minutes.
+    pub fn with_wait_cap(storage: Storage, wait_cap: Duration) -> Self {
+        AppState {
+            storage,
+            hub: Arc::new(Hub::new()),
+            wait_cap,
+        }
     }
 }
 
@@ -35,6 +61,8 @@ pub fn router(state: AppState) -> Router {
         .route("/rooms", post(open_room))
         .route("/rooms/{id}", get(get_room))
         .route("/rooms/{id}/join", post(join_room))
+        .route("/rooms/{id}/messages", post(send_message))
+        .route("/rooms/{id}/wait", get(wait_room))
         .with_state(state)
 }
 
@@ -109,6 +137,14 @@ async fn join_room(
         .await?
         .ok_or(ApiError::NotFound)?;
 
+    // The room's recent messages (log view), surfaced to the joiner.
+    let recent = recent_message_views(&state.storage, &id).await?;
+
+    // A newly-minted participant starts reading from "now": its cursor is the
+    // room's current high-water seq, so `wait` only delivers post-join traffic
+    // (the pre-join backlog lives in `recent` above, not the inbox).
+    let start_seq = state.storage.current_seq(&id).await?;
+
     let ident = JoinIdentity {
         repo: req.repo,
         model: req.model,
@@ -121,7 +157,7 @@ async fn join_room(
         .get_participant_by_tuple(&id, &ident.repo, &ident.model, &ident.cwd)
         .await?
     {
-        return Ok(join_response(p.handle, true, &room));
+        return Ok(join_response(p.handle, true, &room, recent));
     }
 
     const MAX_ATTEMPTS: u32 = 64;
@@ -132,7 +168,7 @@ async fn join_room(
         let handle = match derive_handle(&ident, &existing, rand_sess_candidates()) {
             // Reused shouldn't occur after the fast-path lookup, but if a
             // concurrent join inserted the same tuple, honor it as resumed.
-            HandleOutcome::Reused(h) => return Ok(join_response(h, true, &room)),
+            HandleOutcome::Reused(h) => return Ok(join_response(h, true, &room, recent.clone())),
             HandleOutcome::Created(h) => h,
         };
 
@@ -145,10 +181,11 @@ async fn join_room(
             cwd: ident.cwd.clone(),
             joined_at: now,
             last_poll_at: now,
+            last_read_seq: start_seq,
         };
 
         match state.storage.create_participant(&participant).await {
-            Ok(()) => return Ok(join_response(handle, false, &room)),
+            Ok(()) => return Ok(join_response(handle, false, &room, recent.clone())),
             Err(e) if e.is_unique_violation() && attempt < MAX_ATTEMPTS => {
                 // Either a concurrent join took our tuple (refetch → resume) or
                 // the random sess collided (refetch returns None → retry).
@@ -157,7 +194,7 @@ async fn join_room(
                     .get_participant_by_tuple(&id, &ident.repo, &ident.model, &ident.cwd)
                     .await?
                 {
-                    return Ok(join_response(p.handle, true, &room));
+                    return Ok(join_response(p.handle, true, &room, recent.clone()));
                 }
                 continue;
             }
@@ -170,6 +207,7 @@ fn join_response(
     handle: String,
     resumed: bool,
     room: &Room,
+    recent_messages: Vec<MessageView>,
 ) -> (StatusCode, Json<JoinRoomResponse>) {
     (
         StatusCode::CREATED,
@@ -177,10 +215,120 @@ fn join_response(
             handle,
             resumed,
             room_state: room.state.as_str().to_string(),
-            // Messages land in slice 3; until then the room has none.
-            recent_messages: Vec::new(),
+            recent_messages,
         }),
     )
+}
+
+/// The most recent messages in a room, as wire views (oldest-first).
+const RECENT_MESSAGE_LIMIT: i64 = 50;
+
+async fn recent_message_views(
+    storage: &Storage,
+    room_id: &str,
+) -> Result<Vec<MessageView>, ApiError> {
+    let msgs = storage
+        .recent_messages(room_id, RECENT_MESSAGE_LIMIT)
+        .await?;
+    msgs.iter().map(message_view).collect()
+}
+
+/// Post a `msg` to a room. The sender is resolved from the `(repo, model, cwd)`
+/// tuple — the caller must already be a participant (400 otherwise). `to`
+/// omitted broadcasts to all. After the insert commits, ring the room so any
+/// parked waiters re-query.
+async fn send_message(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SendMessageRequest>,
+) -> Result<(StatusCode, Json<SendMessageResponse>), ApiError> {
+    let _ = state
+        .storage
+        .get_room(&id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    let sender = state
+        .storage
+        .get_participant_by_tuple(&id, &req.repo, &req.model, &req.cwd)
+        .await?
+        .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
+
+    // A targeted `to` must be a real participant, else the message would be an
+    // undeliverable orphan (excluded from broadcast, matched by no one) while the
+    // sender got a success — a silent black hole. Reject it instead.
+    if let Some(to) = req.to.as_deref() {
+        let participants = state.storage.list_participants(&id).await?;
+        if !participants.iter().any(|p| p.handle == to) {
+            return Err(ApiError::BadRequest(
+                "recipient is not a participant of this room".into(),
+            ));
+        }
+    }
+
+    let now = OffsetDateTime::now_utc();
+    let msg = state
+        .storage
+        .create_message(&id, &sender.handle, req.to.as_deref(), &req.body, now)
+        .await?;
+    state.hub.notify(&id);
+
+    Ok((
+        StatusCode::CREATED,
+        Json(SendMessageResponse { seq: msg.seq }),
+    ))
+}
+
+/// Long-poll for the next message addressed to the caller (or broadcast). The
+/// caller is resolved from the `(repo, model, cwd)` tuple (400 if not a
+/// participant). Blocks up to the server cap, then returns `paused_by_timeout`.
+async fn wait_room(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(req): Query<WaitRequest>,
+) -> Result<Json<WaitResponse>, ApiError> {
+    let _ = state
+        .storage
+        .get_room(&id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    let caller = state
+        .storage
+        .get_participant_by_tuple(&id, &req.repo, &req.model, &req.cwd)
+        .await?
+        .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
+
+    let outcome = wait_for_message(
+        &state.storage,
+        &state.hub,
+        &id,
+        &caller.handle,
+        state.wait_cap,
+    )
+    .await?;
+
+    Ok(Json(match outcome {
+        WaitOutcome::Message(m) => WaitResponse::Message {
+            message: message_view(&m)?,
+        },
+        WaitOutcome::PausedByTimeout => WaitResponse::Timeout {
+            status: "paused_by_timeout".to_string(),
+        },
+    }))
+}
+
+fn message_view(m: &Message) -> Result<MessageView, ApiError> {
+    Ok(MessageView {
+        seq: m.seq,
+        from: m.sender.clone(),
+        to: m.recipient.clone(),
+        body: m.body.clone(),
+        created_at: m
+            .created_at
+            .format(&Rfc3339)
+            .map_err(|e| ApiError::Internal(e.to_string()))?,
+    })
 }
 
 /// An effectively-infinite stream of 4-char lowercase hex sess candidates.
@@ -230,6 +378,7 @@ fn room_to_status(room: &Room, participants: &[Participant]) -> Result<RoomStatu
 #[derive(Debug)]
 enum ApiError {
     NotFound,
+    BadRequest(String),
     Internal(String),
 }
 
@@ -243,6 +392,8 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "room not found".to_string()),
+            // The message is caller-facing and safe (our own text, no internals).
+            ApiError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
             ApiError::Internal(detail) => {
                 // Log the real cause server-side; never leak DB/internal text to
                 // the caller (table names, constraints, file paths, etc.).

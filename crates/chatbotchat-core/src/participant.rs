@@ -12,4 +12,7 @@ pub struct Participant {
     pub cwd: String,
     pub joined_at: OffsetDateTime,
     pub last_poll_at: OffsetDateTime,
+    /// Long-poll read cursor: the `seq` of the highest message this participant
+    /// has consumed via `wait`. Starts at 0 (no messages read).
+    pub last_read_seq: i64,
 }
