@@ -1,4 +1,4 @@
-use crate::message::Message;
+use crate::message::{Message, MessageType};
 use crate::participant::Participant;
 use crate::room::{Room, RoomConfig, RoomState};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -137,8 +137,8 @@ impl Storage {
         let created = created_at.format(&Rfc3339).map_err(fmt_err)?;
 
         let result = sqlx::query(
-            "INSERT INTO messages (room_id, sender, recipient, body, created_at) \
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO messages (room_id, sender, recipient, body, created_at, type) \
+             VALUES (?, ?, ?, ?, ?, 'msg')",
         )
         .bind(room_id)
         .bind(sender)
@@ -155,6 +155,45 @@ impl Storage {
             recipient: recipient.map(str::to_string),
             body: body.to_string(),
             created_at,
+            msg_type: MessageType::Msg,
+        })
+    }
+
+    /// Append a message of an arbitrary `msg_type` (uncapped). Sentinels are
+    /// written through here; the bare `create_message` is the `msg`-only path.
+    /// Cap enforcement lives in `create_message_capped`, so this never gates.
+    pub async fn create_message_typed(
+        &self,
+        room_id: &str,
+        sender: &str,
+        recipient: Option<&str>,
+        body: &str,
+        created_at: OffsetDateTime,
+        msg_type: MessageType,
+    ) -> Result<Message, StorageError> {
+        let created = created_at.format(&Rfc3339).map_err(fmt_err)?;
+
+        let result = sqlx::query(
+            "INSERT INTO messages (room_id, sender, recipient, body, created_at, type) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(room_id)
+        .bind(sender)
+        .bind(recipient)
+        .bind(body)
+        .bind(created)
+        .bind(msg_type.as_str())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(Message {
+            seq: result.last_insert_rowid(),
+            room_id: room_id.to_string(),
+            sender: sender.to_string(),
+            recipient: recipient.map(str::to_string),
+            body: body.to_string(),
+            created_at,
+            msg_type,
         })
     }
 
@@ -165,9 +204,10 @@ impl Storage {
     /// cannot both observe `count < cap` and both insert past it. This is the
     /// enforcement path; the bare `create_message` stays for uncapped inserts.
     ///
-    /// The `COUNT(*)` here and `count_capped_messages` are the two seams where
-    /// slice 5 (#6) will add `AND type = 'msg'` so sentinels stop counting once a
-    /// message `type` column exists.
+    /// The `COUNT(*)` here and `count_capped_messages` are the two cap-count
+    /// seams: both count `type = 'msg'` only, so sentinels never consume cap
+    /// budget. They must move in lockstep, or the hard cap and the soft counter
+    /// disagree about what counts.
     pub async fn create_message_capped(
         &self,
         room_id: &str,
@@ -180,9 +220,9 @@ impl Storage {
         let created = created_at.format(&Rfc3339).map_err(fmt_err)?;
 
         let result = sqlx::query(
-            "INSERT INTO messages (room_id, sender, recipient, body, created_at) \
-             SELECT ?, ?, ?, ?, ? \
-             WHERE (SELECT COUNT(*) FROM messages WHERE room_id = ?) < ?",
+            "INSERT INTO messages (room_id, sender, recipient, body, created_at, type) \
+             SELECT ?, ?, ?, ?, ?, 'msg' \
+             WHERE (SELECT COUNT(*) FROM messages WHERE room_id = ? AND type = 'msg') < ?",
         )
         .bind(room_id)
         .bind(sender)
@@ -207,6 +247,7 @@ impl Storage {
             recipient: recipient.map(str::to_string),
             body: body.to_string(),
             created_at,
+            msg_type: MessageType::Msg,
         }))
     }
 
@@ -221,7 +262,7 @@ impl Storage {
         after_seq: i64,
     ) -> Result<Option<Message>, StorageError> {
         let row = sqlx::query(
-            "SELECT seq, room_id, sender, recipient, body, created_at \
+            "SELECT seq, room_id, sender, recipient, body, created_at, type \
              FROM messages \
              WHERE room_id = ? AND seq > ? AND sender != ? \
                AND (recipient IS NULL OR recipient = ?) \
@@ -255,14 +296,16 @@ impl Storage {
 
     /// The number of cap-counting messages in a room. Read-only view of the same
     /// count `create_message_capped` enforces against (used by tests and, later,
-    /// the room status/summary cap counters). Today every message counts; slice 5
-    /// (#6) will add `AND type = 'msg'` here and in `create_message_capped` so
-    /// sentinels stop counting once a message `type` column exists.
+    /// the room status/summary cap counters). Only `type = 'msg'` rows count —
+    /// sentinels are signals, not conversation turns. This filter and the
+    /// `COUNT(*)` subquery in `create_message_capped` are the two cap-count seams
+    /// and must stay in lockstep, or the hard cap and the soft counter disagree.
     pub async fn count_capped_messages(&self, room_id: &str) -> Result<i64, StorageError> {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE room_id = ?")
-            .bind(room_id)
-            .fetch_one(&self.pool)
-            .await?;
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE room_id = ? AND type = 'msg'")
+                .bind(room_id)
+                .fetch_one(&self.pool)
+                .await?;
         Ok(count)
     }
 
@@ -274,7 +317,7 @@ impl Storage {
         limit: i64,
     ) -> Result<Vec<Message>, StorageError> {
         let rows = sqlx::query(
-            "SELECT seq, room_id, sender, recipient, body, created_at \
+            "SELECT seq, room_id, sender, recipient, body, created_at, type \
              FROM messages WHERE room_id = ? ORDER BY seq DESC LIMIT ?",
         )
         .bind(room_id)
@@ -434,6 +477,9 @@ fn row_to_participant(row: &sqlx::sqlite::SqliteRow) -> Result<Participant, Stor
 }
 
 fn row_to_message(row: &sqlx::sqlite::SqliteRow) -> Result<Message, StorageError> {
+    let type_str: String = row.try_get("type")?;
+    let msg_type = MessageType::parse(&type_str)
+        .ok_or_else(|| StorageError::Corrupt(format!("unknown message type: {type_str}")))?;
     Ok(Message {
         seq: row.try_get("seq")?,
         room_id: row.try_get("room_id")?,
@@ -441,6 +487,7 @@ fn row_to_message(row: &sqlx::sqlite::SqliteRow) -> Result<Message, StorageError
         recipient: row.try_get("recipient")?,
         body: row.try_get("body")?,
         created_at: parse_ts(&row.try_get::<String, _>("created_at")?)?,
+        msg_type,
     })
 }
 

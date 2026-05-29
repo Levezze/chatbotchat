@@ -1,3 +1,4 @@
+use chatbotchat_core::message::MessageType;
 use chatbotchat_core::participant::Participant;
 use chatbotchat_core::room::{Room, RoomConfig, RoomState};
 use chatbotchat_core::storage::Storage;
@@ -227,6 +228,90 @@ async fn claim_next_unread_for_unknown_handle_returns_none_without_hanging() {
     assert!(
         result.unwrap().expect("claim ok").is_none(),
         "an unknown handle has nothing to claim"
+    );
+}
+
+#[tokio::test]
+async fn sentinel_rows_do_not_count_toward_the_cap() {
+    let storage = fresh_storage().await;
+    let room = sample_room();
+    storage.create_room(&room).await.expect("create_room ok");
+    let now = OffsetDateTime::now_utc();
+
+    // Two real `msg` rows...
+    storage
+        .create_message(&room.id, "sender", None, "m0", now)
+        .await
+        .expect("create m0");
+    storage
+        .create_message(&room.id, "sender", None, "m1", now)
+        .await
+        .expect("create m1");
+
+    // ...and a sentinel row interleaved. Sentinels (`type != 'msg'`) are signals,
+    // not conversation turns, so they must not inflate the cap count.
+    storage
+        .create_message_typed(
+            &room.id,
+            "sender",
+            None,
+            "consulting my user",
+            now,
+            MessageType::WaitingUser,
+        )
+        .await
+        .expect("create sentinel");
+
+    assert_eq!(
+        storage
+            .count_capped_messages(&room.id)
+            .await
+            .expect("count ok"),
+        2,
+        "only `msg` rows count toward the cap; the sentinel must be excluded"
+    );
+}
+
+#[tokio::test]
+async fn create_message_capped_gate_ignores_sentinel_rows() {
+    let storage = fresh_storage().await;
+    let room = sample_room();
+    storage.create_room(&room).await.expect("create_room ok");
+    let now = OffsetDateTime::now_utc();
+
+    // A sentinel sits in the room before any `msg` is sent. With a cap of 1, the
+    // enforcement gate must still admit the first real `msg`: the sentinel does
+    // not occupy cap budget. (Both seams count `type = 'msg'` only — in lockstep.)
+    storage
+        .create_message_typed(
+            &room.id,
+            "sender",
+            None,
+            "consulting my user",
+            now,
+            MessageType::WaitingUser,
+        )
+        .await
+        .expect("create sentinel");
+
+    const CAP: i64 = 1;
+    let admitted = storage
+        .create_message_capped(&room.id, "sender", None, "first msg", now, CAP)
+        .await
+        .expect("capped insert ok");
+    assert!(
+        admitted.is_some(),
+        "a sentinel must not consume cap budget; the first msg is under cap"
+    );
+
+    // And now the cap is genuinely full for `msg` rows.
+    let refused = storage
+        .create_message_capped(&room.id, "sender", None, "second msg", now, CAP)
+        .await
+        .expect("capped insert ok");
+    assert!(
+        refused.is_none(),
+        "the second msg is at the cap and must be refused"
     );
 }
 
