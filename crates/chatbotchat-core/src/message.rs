@@ -51,3 +51,33 @@ pub struct Message {
     pub created_at: OffsetDateTime,
     pub msg_type: MessageType,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `as_str` and `parse` must be exact inverses for every variant — the wire
+    /// form is what lands in the DB `type` column, so a typo in either arm would
+    /// silently mislabel a sentinel (or fail to read it back). Total coverage.
+    #[test]
+    fn message_type_str_round_trips_all_variants() {
+        for t in [
+            MessageType::Msg,
+            MessageType::WaitingUser,
+            MessageType::BlockerRealWork,
+            MessageType::Fold,
+            MessageType::Close,
+        ] {
+            assert_eq!(
+                MessageType::parse(t.as_str()),
+                Some(t),
+                "round-trip failed for {t:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn message_type_parse_rejects_unknown() {
+        assert_eq!(MessageType::parse("not-a-type"), None);
+    }
+}

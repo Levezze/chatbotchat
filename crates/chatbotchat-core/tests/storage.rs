@@ -273,6 +273,45 @@ async fn sentinel_rows_do_not_count_toward_the_cap() {
 }
 
 #[tokio::test]
+async fn msg_type_survives_the_write_read_round_trip() {
+    let storage = fresh_storage().await;
+    let room = sample_room();
+    storage.create_room(&room).await.expect("create_room ok");
+    let now = OffsetDateTime::now_utc();
+
+    // A sentinel, then a plain msg. Reading them back must preserve each row's
+    // type — proves `create_message_typed` writes and `row_to_message` reads the
+    // `type` column correctly (not just that the count seam excludes sentinels).
+    storage
+        .create_message_typed(
+            &room.id,
+            "sender",
+            None,
+            "consulting my user",
+            now,
+            MessageType::WaitingUser,
+        )
+        .await
+        .expect("create sentinel");
+    storage
+        .create_message(&room.id, "sender", None, "a turn", now)
+        .await
+        .expect("create msg");
+
+    // recent_messages is oldest-first.
+    let recent = storage
+        .recent_messages(&room.id, 10)
+        .await
+        .expect("recent ok");
+    let types: Vec<MessageType> = recent.iter().map(|m| m.msg_type).collect();
+    assert_eq!(
+        types,
+        vec![MessageType::WaitingUser, MessageType::Msg],
+        "each row's msg_type must survive the storage round-trip in order"
+    );
+}
+
+#[tokio::test]
 async fn create_message_capped_gate_ignores_sentinel_rows() {
     let storage = fresh_storage().await;
     let room = sample_room();
