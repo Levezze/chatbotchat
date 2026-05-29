@@ -159,11 +159,16 @@ async fn messages_seq_is_monotonic_and_filtered_by_recipient_and_cursor() {
         .expect("alice has an unread");
     assert_eq!(next.seq, m1.seq);
 
-    // After consuming past m1, alice's next unread is the targeted m2.
-    storage
-        .advance_read_cursor(&alice.handle, m1.seq)
+    // Claiming consumes the broadcast m1 and atomically advances alice's cursor
+    // (the real wait path — no cursor mutator that bypasses the atomic claim).
+    let claimed = storage
+        .claim_next_unread(&room.id, &alice.handle)
         .await
-        .expect("advance ok");
+        .expect("claim ok")
+        .expect("alice has an unread to claim");
+    assert_eq!(claimed.seq, m1.seq);
+
+    // After consuming past m1, alice's next unread is the targeted m2.
     let next2 = storage
         .next_unread(&room.id, &alice.handle, m1.seq)
         .await
@@ -181,7 +186,7 @@ async fn messages_seq_is_monotonic_and_filtered_by_recipient_and_cursor() {
         "a message addressed to alice must not surface for bob"
     );
 
-    // advance_read_cursor persisted onto the participant row.
+    // The claim persisted the advanced cursor onto the participant row.
     let alice_row = storage
         .get_participant_by_tuple(&room.id, &alice.repo, &alice.model, &alice.cwd)
         .await

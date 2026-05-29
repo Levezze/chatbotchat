@@ -504,3 +504,51 @@ async fn repeated_open_same_subject_gets_distinct_ids() {
         );
     }
 }
+
+#[tokio::test]
+async fn hard_cap_refuses_sends_once_the_room_is_full() {
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "caps").await;
+    join(&app, &room_id, "mvp-engine", "opus47", "/work/a").await;
+
+    // The default hard cap is 10 (RoomConfig::default). A room-wide count, so a
+    // single sender filling the budget exercises the gate.
+    const HARD_CAP: usize = 10;
+    for i in 0..HARD_CAP {
+        let (s, _) = send(
+            &app,
+            &room_id,
+            "mvp-engine",
+            "opus47",
+            "/work/a",
+            None,
+            &format!("msg {i}"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED, "send {i} should be accepted");
+    }
+
+    // The cap+1th send is refused with 409 Conflict — retrying won't clear it,
+    // the user must raise the cap or close the room.
+    let (s_over, body_over) = send(
+        &app,
+        &room_id,
+        "mvp-engine",
+        "opus47",
+        "/work/a",
+        None,
+        "over the cap",
+    )
+    .await;
+    assert_eq!(s_over, StatusCode::CONFLICT);
+
+    // The rejection is recognizable and actionable: a human-readable message
+    // that names the cap.
+    let err = body_over["error"]
+        .as_str()
+        .expect("409 carries an error message");
+    assert!(
+        err.contains("hard cap"),
+        "rejection should name the hard cap; got {body_over}"
+    );
+}

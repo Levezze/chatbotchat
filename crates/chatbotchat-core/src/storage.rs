@@ -201,6 +201,18 @@ impl Storage {
         Ok(seq)
     }
 
+    /// The number of cap-counting messages in a room. The hard cap is enforced
+    /// against this count. Today every message counts; this is the single seam
+    /// where slice 5/6 will add `AND type = 'msg'` (sentinels do not count
+    /// toward caps) once a message `type` exists.
+    pub async fn count_capped_messages(&self, room_id: &str) -> Result<i64, StorageError> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE room_id = ?")
+            .bind(room_id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count)
+    }
+
     /// The most recent `limit` messages in a room, returned oldest-first. This
     /// is the log view (every sender), surfaced to a joining participant.
     pub async fn recent_messages(
@@ -285,16 +297,6 @@ impl Storage {
                 .fetch_optional(&self.pool)
                 .await?;
         Ok(cursor)
-    }
-
-    /// Advance a participant's long-poll read cursor to `seq`.
-    pub async fn advance_read_cursor(&self, handle: &str, seq: i64) -> Result<(), StorageError> {
-        sqlx::query("UPDATE participants SET last_read_seq = ? WHERE handle = ?")
-            .bind(seq)
-            .bind(handle)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
     }
 
     pub async fn get_participant_by_tuple(
