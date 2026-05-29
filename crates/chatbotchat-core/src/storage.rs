@@ -188,6 +188,19 @@ impl Storage {
         }
     }
 
+    /// The highest message `seq` in a room, or 0 if it has none. Used to seed a
+    /// new participant's read cursor at join, so `wait` only delivers messages
+    /// that arrive *after* they joined — the pre-join backlog is the log view
+    /// (`recent_messages`), not unread inbox traffic.
+    pub async fn current_seq(&self, room_id: &str) -> Result<i64, StorageError> {
+        let seq: i64 =
+            sqlx::query_scalar("SELECT COALESCE(MAX(seq), 0) FROM messages WHERE room_id = ?")
+                .bind(room_id)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(seq)
+    }
+
     /// The most recent `limit` messages in a room, returned oldest-first. This
     /// is the log view (every sender), surfaced to a joining participant.
     pub async fn recent_messages(
@@ -205,6 +218,69 @@ impl Storage {
         .await?;
         // Fetched newest-first for the LIMIT; hand back chronological.
         rows.iter().rev().map(row_to_message).collect()
+    }
+
+    /// Refresh a participant's `last_poll_at` (liveness). Called on every `wait`;
+    /// consumed by stale-counterpart detection in a later slice.
+    pub async fn touch_last_poll(
+        &self,
+        handle: &str,
+        now: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        let ts = now.format(&Rfc3339).map_err(fmt_err)?;
+        sqlx::query("UPDATE participants SET last_poll_at = ? WHERE handle = ?")
+            .bind(ts)
+            .bind(handle)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Atomically claim the next message addressed to `handle` (or broadcast)
+    /// that it has not yet read, advancing its cursor in the same step. Returns
+    /// `None` when the caller is caught up. Safe under concurrent `wait` calls
+    /// for the same handle: the cursor advance is a compare-and-swap, so a
+    /// message is delivered to at most one claimant.
+    pub async fn claim_next_unread(
+        &self,
+        room_id: &str,
+        handle: &str,
+    ) -> Result<Option<Message>, StorageError> {
+        loop {
+            let cursor = self.read_cursor(handle).await?;
+            let Some(m) = self.next_unread(room_id, handle, cursor).await? else {
+                return Ok(None);
+            };
+
+            // Compare-and-swap the cursor from the value we read to this seq. If a
+            // concurrent claim moved it first, we affect 0 rows and retry from the
+            // new cursor — so the message is delivered to at most one claimant.
+            let claimed = sqlx::query(
+                "UPDATE participants SET last_read_seq = ? WHERE handle = ? AND last_read_seq = ?",
+            )
+            .bind(m.seq)
+            .bind(handle)
+            .bind(cursor)
+            .execute(&self.pool)
+            .await?
+            .rows_affected()
+                == 1;
+
+            if claimed {
+                return Ok(Some(m));
+            }
+        }
+    }
+
+    /// A participant's current long-poll read cursor (0 if the handle is
+    /// unknown — defensive; callers resolve the handle from a real participant).
+    pub async fn read_cursor(&self, handle: &str) -> Result<i64, StorageError> {
+        let cursor: Option<i64> =
+            sqlx::query_scalar("SELECT last_read_seq FROM participants WHERE handle = ?")
+                .bind(handle)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(cursor.unwrap_or(0))
     }
 
     /// Advance a participant's long-poll read cursor to `seq`.

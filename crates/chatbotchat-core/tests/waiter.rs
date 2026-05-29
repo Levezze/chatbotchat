@@ -55,7 +55,7 @@ async fn wait_returns_existing_unread_immediately() {
         .expect("create message");
 
     let hub = Hub::new();
-    let outcome = wait_for_message(&storage, &hub, &room_id, handle, 0, Duration::from_secs(5))
+    let outcome = wait_for_message(&storage, &hub, &room_id, handle, Duration::from_secs(5))
         .await
         .expect("wait ok");
 
@@ -91,7 +91,7 @@ async fn wait_parks_then_returns_when_a_message_arrives() {
         let room_id = room_id.clone();
         let handle = handle.to_string();
         tokio::spawn(async move {
-            wait_for_message(&storage, &hub, &room_id, &handle, 0, Duration::from_secs(5)).await
+            wait_for_message(&storage, &hub, &room_id, &handle, Duration::from_secs(5)).await
         })
     };
 
@@ -125,7 +125,7 @@ async fn wait_times_out_when_no_message_arrives() {
     let hub = Hub::new();
     let cap = Duration::from_millis(80);
     let start = tokio::time::Instant::now();
-    let outcome = wait_for_message(&storage, &hub, &room_id, handle, 0, cap)
+    let outcome = wait_for_message(&storage, &hub, &room_id, handle, cap)
         .await
         .expect("wait ok");
     let elapsed = start.elapsed();
@@ -157,7 +157,7 @@ async fn wait_ignores_a_message_addressed_to_another_handle() {
     hub.notify(&room_id);
 
     // `me` polling with a short cap must NOT receive a message addressed to `other`.
-    let outcome = wait_for_message(&storage, &hub, &room_id, me, 0, Duration::from_millis(80))
+    let outcome = wait_for_message(&storage, &hub, &room_id, me, Duration::from_millis(80))
         .await
         .expect("wait ok");
     assert!(
@@ -183,19 +183,91 @@ async fn wait_does_not_return_the_callers_own_message() {
 
     // `wait` is the inbox, not the log: it must not echo the sender's own message
     // back, or A's wait-for-B's-reply would return A's own post and break the loop.
-    let outcome = wait_for_message(
-        &storage,
-        &hub,
-        &room_id,
-        handle,
-        0,
-        Duration::from_millis(80),
-    )
-    .await
-    .expect("wait ok");
+    let outcome = wait_for_message(&storage, &hub, &room_id, handle, Duration::from_millis(80))
+        .await
+        .expect("wait ok");
     assert!(
         matches!(outcome, WaitOutcome::PausedByTimeout),
         "a participant must not receive its own message"
+    );
+}
+
+#[tokio::test]
+async fn wait_refreshes_last_poll_at() {
+    let handle = "wait-test-opus47-aaaa";
+    let (storage, room_id) = storage_with_room().await;
+    join(&storage, &room_id, handle, "/work/a").await;
+
+    let before = storage
+        .get_participant_by_tuple(&room_id, "wait-test", "opus47", "/work/a")
+        .await
+        .expect("get ok")
+        .expect("exists")
+        .last_poll_at;
+
+    // A wait that times out (no message) must still bump liveness.
+    let hub = Hub::new();
+    wait_for_message(&storage, &hub, &room_id, handle, Duration::from_millis(60))
+        .await
+        .expect("wait ok");
+
+    let after = storage
+        .get_participant_by_tuple(&room_id, "wait-test", "opus47", "/work/a")
+        .await
+        .expect("get ok")
+        .expect("exists")
+        .last_poll_at;
+
+    assert!(
+        after > before,
+        "wait should refresh last_poll_at: {after:?} !> {before:?}"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_waits_for_same_handle_deliver_a_message_at_most_once() {
+    let me = "wait-test-opus47-aaaa";
+    let other = "wait-test-opus47-bbbb";
+    let (storage, room_id) = storage_with_room().await;
+    join(&storage, &room_id, me, "/work/a").await;
+    join(&storage, &room_id, other, "/work/b").await;
+
+    let now = OffsetDateTime::now_utc();
+    storage
+        .create_message(&room_id, other, None, "only once", now)
+        .await
+        .expect("create message");
+
+    // Two concurrent waits for the SAME handle must not both claim the one
+    // message: the read-cursor advance has to be atomic.
+    let hub = Arc::new(Hub::new());
+    let spawn = || {
+        let storage = storage.clone();
+        let hub = hub.clone();
+        let room_id = room_id.clone();
+        let me = me.to_string();
+        tokio::spawn(async move {
+            wait_for_message(&storage, &hub, &room_id, &me, Duration::from_millis(150)).await
+        })
+    };
+    let w1 = spawn();
+    let w2 = spawn();
+
+    let mut bodies = Vec::new();
+    for w in [w1, w2] {
+        let outcome = tokio::time::timeout(Duration::from_secs(2), w)
+            .await
+            .expect("waiter resolved")
+            .expect("waiter task did not panic")
+            .expect("wait ok");
+        if let WaitOutcome::Message(m) = outcome {
+            bodies.push(m.body);
+        }
+    }
+    assert_eq!(
+        bodies,
+        vec!["only once".to_string()],
+        "the message must reach exactly one of two concurrent same-handle waiters; got {bodies:?}"
     );
 }
 
@@ -214,7 +286,7 @@ async fn broadcast_wakes_concurrent_waiters_for_distinct_handles() {
         let room_id = room_id.clone();
         let handle = handle.to_string();
         tokio::spawn(async move {
-            wait_for_message(&storage, &hub, &room_id, &handle, 0, Duration::from_secs(5)).await
+            wait_for_message(&storage, &hub, &room_id, &handle, Duration::from_secs(5)).await
         })
     };
     let wa = spawn_waiter(a);

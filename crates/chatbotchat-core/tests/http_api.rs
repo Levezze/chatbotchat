@@ -222,6 +222,119 @@ async fn send_then_wait_round_trips_a_message() {
 }
 
 #[tokio::test]
+async fn send_to_unknown_recipient_is_rejected_and_targeted_delivery_works() {
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "targeted").await;
+    join(&app, &room_id, "mvp-engine", "opus47", "/work/a").await;
+    let (_, b) = join(&app, &room_id, "mvp-engine", "sonnet46", "/work/b").await;
+    let b_handle = b["handle"].as_str().expect("b handle").to_string();
+
+    // A `to` that is not a participant of the room is rejected (no silent orphan).
+    let (s_bad, _) = send(
+        &app,
+        &room_id,
+        "mvp-engine",
+        "opus47",
+        "/work/a",
+        Some("no-such-handle"),
+        "hi?",
+    )
+    .await;
+    assert_eq!(s_bad, StatusCode::BAD_REQUEST);
+
+    // A valid targeted message is delivered to that participant.
+    let (s_ok, _) = send(
+        &app,
+        &room_id,
+        "mvp-engine",
+        "opus47",
+        "/work/a",
+        Some(&b_handle),
+        "hi B",
+    )
+    .await;
+    assert_eq!(s_ok, StatusCode::CREATED);
+
+    let (sw, w) = wait(&app, &room_id, "mvp-engine", "sonnet46", "/work/b").await;
+    assert_eq!(sw, StatusCode::OK);
+    assert_eq!(w["message"]["body"].as_str(), Some("hi B"));
+    assert_eq!(w["message"]["to"].as_str(), Some(b_handle.as_str()));
+}
+
+#[tokio::test]
+async fn send_missing_room_is_404() {
+    let app = test_router().await;
+    let (s, _) = send(&app, "nope-20260529-0000", "r", "m", "/c", None, "x").await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn wait_missing_room_is_404() {
+    let app = test_router().await;
+    let (s, _) = wait(&app, "nope-20260529-0000", "r", "m", "/c").await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn late_joiner_does_not_replay_backlog_via_wait() {
+    let app = test_router_with_cap(std::time::Duration::from_millis(80)).await;
+    let room_id = open_room_id(&app, "late join").await;
+
+    // A joins and posts BEFORE B exists.
+    join(&app, &room_id, "mvp-engine", "opus47", "/work/a").await;
+    send(
+        &app,
+        &room_id,
+        "mvp-engine",
+        "opus47",
+        "/work/a",
+        None,
+        "before B",
+    )
+    .await;
+
+    // B joins later — it sees the backlog via recent_messages (the log view) ...
+    let (_, b) = join(&app, &room_id, "mvp-engine", "sonnet46", "/work/b").await;
+    let recent = b["recent_messages"]
+        .as_array()
+        .expect("recent_messages array");
+    assert!(
+        recent
+            .iter()
+            .any(|m| m["body"].as_str() == Some("before B")),
+        "B's join should surface the backlog; got {b}"
+    );
+
+    // ... but B's wait must NOT replay that pre-join message — it should time out.
+    let (s1, w1) = wait(&app, &room_id, "mvp-engine", "sonnet46", "/work/b").await;
+    assert_eq!(s1, StatusCode::OK);
+    assert_eq!(
+        w1["status"].as_str(),
+        Some("paused_by_timeout"),
+        "pre-join backlog must not replay through wait; got {w1}"
+    );
+
+    // A message sent AFTER B joined is delivered to B's wait.
+    send(
+        &app,
+        &room_id,
+        "mvp-engine",
+        "opus47",
+        "/work/a",
+        None,
+        "after B",
+    )
+    .await;
+    let (s2, w2) = wait(&app, &room_id, "mvp-engine", "sonnet46", "/work/b").await;
+    assert_eq!(s2, StatusCode::OK);
+    assert_eq!(
+        w2["message"]["body"].as_str(),
+        Some("after B"),
+        "post-join message should reach B; got {w2}"
+    );
+}
+
+#[tokio::test]
 async fn join_returns_recent_messages() {
     let app = test_router().await;
     let room_id = open_room_id(&app, "history").await;

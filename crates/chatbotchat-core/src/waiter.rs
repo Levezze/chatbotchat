@@ -7,6 +7,7 @@ use crate::storage::{Storage, StorageError};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
+use time::OffsetDateTime;
 use tokio::sync::broadcast;
 
 /// Per-room wakeup registry. Each room maps to a `broadcast` sender carrying a
@@ -66,9 +67,14 @@ pub async fn wait_for_message(
     hub: &Hub,
     room_id: &str,
     handle: &str,
-    last_read_seq: i64,
     timeout: Duration,
 ) -> Result<WaitOutcome, StorageError> {
+    // Refresh liveness: this poll proves the participant is alive (consumed by
+    // stale-counterpart detection in a later slice).
+    storage
+        .touch_last_poll(handle, OffsetDateTime::now_utc())
+        .await?;
+
     // Subscribe BEFORE the first read: a message inserted (and notified) between
     // the read and the park is still observed on `recv`, so there is no lost
     // wakeup. The ping carries no payload — the DB is the source of truth and we
@@ -77,8 +83,7 @@ pub async fn wait_for_message(
     let deadline = tokio::time::Instant::now() + timeout;
 
     loop {
-        if let Some(m) = storage.next_unread(room_id, handle, last_read_seq).await? {
-            storage.advance_read_cursor(handle, m.seq).await?;
+        if let Some(m) = storage.claim_next_unread(room_id, handle).await? {
             return Ok(WaitOutcome::Message(m));
         }
 
@@ -92,13 +97,10 @@ pub async fn wait_for_message(
             Ok(Ok(())) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
             // Sender dropped (Hub holds it, so this is defensive): one last read.
             Ok(Err(broadcast::error::RecvError::Closed)) => {
-                return match storage.next_unread(room_id, handle, last_read_seq).await? {
-                    Some(m) => {
-                        storage.advance_read_cursor(handle, m.seq).await?;
-                        Ok(WaitOutcome::Message(m))
-                    }
-                    None => Ok(WaitOutcome::PausedByTimeout),
-                };
+                return Ok(match storage.claim_next_unread(room_id, handle).await? {
+                    Some(m) => WaitOutcome::Message(m),
+                    None => WaitOutcome::PausedByTimeout,
+                });
             }
             // Cap elapsed.
             Err(_elapsed) => return Ok(WaitOutcome::PausedByTimeout),

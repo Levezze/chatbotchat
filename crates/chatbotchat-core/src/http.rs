@@ -140,6 +140,11 @@ async fn join_room(
     // The room's recent messages (log view), surfaced to the joiner.
     let recent = recent_message_views(&state.storage, &id).await?;
 
+    // A newly-minted participant starts reading from "now": its cursor is the
+    // room's current high-water seq, so `wait` only delivers post-join traffic
+    // (the pre-join backlog lives in `recent` above, not the inbox).
+    let start_seq = state.storage.current_seq(&id).await?;
+
     let ident = JoinIdentity {
         repo: req.repo,
         model: req.model,
@@ -176,7 +181,7 @@ async fn join_room(
             cwd: ident.cwd.clone(),
             joined_at: now,
             last_poll_at: now,
-            last_read_seq: 0,
+            last_read_seq: start_seq,
         };
 
         match state.storage.create_participant(&participant).await {
@@ -249,6 +254,18 @@ async fn send_message(
         .await?
         .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
 
+    // A targeted `to` must be a real participant, else the message would be an
+    // undeliverable orphan (excluded from broadcast, matched by no one) while the
+    // sender got a success — a silent black hole. Reject it instead.
+    if let Some(to) = req.to.as_deref() {
+        let participants = state.storage.list_participants(&id).await?;
+        if !participants.iter().any(|p| p.handle == to) {
+            return Err(ApiError::BadRequest(
+                "recipient is not a participant of this room".into(),
+            ));
+        }
+    }
+
     let now = OffsetDateTime::now_utc();
     let msg = state
         .storage
@@ -287,7 +304,6 @@ async fn wait_room(
         &state.hub,
         &id,
         &caller.handle,
-        caller.last_read_seq,
         state.wait_cap,
     )
     .await?;
