@@ -189,3 +189,38 @@ async fn messages_seq_is_monotonic_and_filtered_by_recipient_and_cursor() {
         .expect("alice exists");
     assert_eq!(alice_row.last_read_seq, m1.seq);
 }
+
+#[tokio::test]
+async fn claim_next_unread_for_unknown_handle_returns_none_without_hanging() {
+    let storage = fresh_storage().await;
+    let room = sample_room();
+    storage.create_room(&room).await.expect("create_room ok");
+
+    // A real participant posts a broadcast (seq > 0, recipient = all).
+    let p = participant_with_handle(&room.id, "smoke-test-opus47-aaaa", "/work/a");
+    storage
+        .create_participant(&p)
+        .await
+        .expect("create participant");
+    let now = OffsetDateTime::now_utc();
+    storage
+        .create_message(&room.id, &p.handle, None, "hi all", now)
+        .await
+        .expect("create message");
+
+    // Claiming for a handle that is not a participant must return None — not spin
+    // forever on a CAS that can never match a non-existent row.
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        storage.claim_next_unread(&room.id, "ghost-handle-not-a-participant"),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "claim_next_unread must not hang for an unknown handle"
+    );
+    assert!(
+        result.unwrap().expect("claim ok").is_none(),
+        "an unknown handle has nothing to claim"
+    );
+}

@@ -247,7 +247,11 @@ impl Storage {
         handle: &str,
     ) -> Result<Option<Message>, StorageError> {
         loop {
-            let cursor = self.read_cursor(handle).await?;
+            // An absent participant has nothing to claim. Without this guard the
+            // CAS below could never match a row, spinning the loop forever.
+            let Some(cursor) = self.read_cursor(handle).await? else {
+                return Ok(None);
+            };
             let Some(m) = self.next_unread(room_id, handle, cursor).await? else {
                 return Ok(None);
             };
@@ -272,15 +276,15 @@ impl Storage {
         }
     }
 
-    /// A participant's current long-poll read cursor (0 if the handle is
-    /// unknown — defensive; callers resolve the handle from a real participant).
-    pub async fn read_cursor(&self, handle: &str) -> Result<i64, StorageError> {
+    /// A participant's current long-poll read cursor, or `None` if the handle is
+    /// not a participant of any room (distinguishing "absent" from "cursor 0").
+    pub async fn read_cursor(&self, handle: &str) -> Result<Option<i64>, StorageError> {
         let cursor: Option<i64> =
             sqlx::query_scalar("SELECT last_read_seq FROM participants WHERE handle = ?")
                 .bind(handle)
                 .fetch_optional(&self.pool)
                 .await?;
-        Ok(cursor.unwrap_or(0))
+        Ok(cursor)
     }
 
     /// Advance a participant's long-poll read cursor to `seq`.
