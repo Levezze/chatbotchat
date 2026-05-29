@@ -1,9 +1,11 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chatbotchat_core::http::{router, AppState};
+use chatbotchat_core::room::{Room, RoomConfig, RoomState};
 use chatbotchat_core::storage::Storage;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
+use time::OffsetDateTime;
 use tower::ServiceExt; // for `oneshot`
 
 async fn test_router() -> axum::Router {
@@ -503,4 +505,181 @@ async fn repeated_open_same_subject_gets_distinct_ids() {
             "room {id} should be retrievable"
         );
     }
+}
+
+#[tokio::test]
+async fn hard_cap_refuses_sends_once_the_room_is_full() {
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "caps").await;
+    join(&app, &room_id, "mvp-engine", "opus47", "/work/a").await;
+
+    // The default hard cap is 10 (RoomConfig::default). A room-wide count, so a
+    // single sender filling the budget exercises the gate.
+    const HARD_CAP: usize = 10;
+    for i in 0..HARD_CAP {
+        let (s, _) = send(
+            &app,
+            &room_id,
+            "mvp-engine",
+            "opus47",
+            "/work/a",
+            None,
+            &format!("msg {i}"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED, "send {i} should be accepted");
+    }
+
+    // The cap+1th send is refused with 409 Conflict — retrying won't clear it,
+    // the user must raise the cap or close the room.
+    let (s_over, body_over) = send(
+        &app,
+        &room_id,
+        "mvp-engine",
+        "opus47",
+        "/work/a",
+        None,
+        "over the cap",
+    )
+    .await;
+    assert_eq!(s_over, StatusCode::CONFLICT);
+
+    // The rejection is recognizable and actionable: a human-readable message
+    // that names the cap.
+    let err = body_over["error"]
+        .as_str()
+        .expect("409 carries an error message");
+    assert!(
+        err.contains("hard cap"),
+        "rejection should name the hard cap; got {body_over}"
+    );
+
+    // The refused message must NOT be persisted — a fresh joiner sees exactly the
+    // capped 10 in the room log, not 11.
+    let (_, joiner) = join(&app, &room_id, "mvp-engine", "sonnet46", "/work/b").await;
+    let recent = joiner["recent_messages"]
+        .as_array()
+        .expect("recent_messages array");
+    assert_eq!(
+        recent.len(),
+        HARD_CAP,
+        "the rejected send must not have been written; got {} messages",
+        recent.len()
+    );
+}
+
+#[tokio::test]
+async fn hard_cap_honors_a_non_default_persisted_room_config() {
+    // Seed a room whose persisted config carries a non-default cap of 2, then
+    // drive sends through the real HTTP path. Proves the gate reads the stored
+    // `RoomConfig.hard_cap`, not a hard-coded constant. (There is no open-time
+    // cap-override API yet — that is a later slice — so the room is seeded
+    // directly via storage.)
+    let storage = Storage::connect("sqlite::memory:")
+        .await
+        .expect("connect in-memory sqlite");
+    let now = OffsetDateTime::now_utc();
+    let room = Room {
+        id: "caps-custom-20260529-0000".into(),
+        subject: "custom cap".into(),
+        started_at: now,
+        last_activity_at: now,
+        state: RoomState::Active,
+        config: RoomConfig {
+            hard_cap: 2,
+            soft_cap: 4,
+        },
+        prev_room_id: None,
+    };
+    storage.create_room(&room).await.expect("seed room");
+    let app = router(AppState::new(storage));
+
+    join(&app, &room.id, "mvp-engine", "opus47", "/work/a").await;
+
+    for i in 0..2 {
+        let (s, _) = send(
+            &app,
+            &room.id,
+            "mvp-engine",
+            "opus47",
+            "/work/a",
+            None,
+            &format!("msg {i}"),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED, "send {i} under the cap of 2");
+    }
+
+    let (s_over, _) = send(
+        &app,
+        &room.id,
+        "mvp-engine",
+        "opus47",
+        "/work/a",
+        None,
+        "third",
+    )
+    .await;
+    assert_eq!(
+        s_over,
+        StatusCode::CONFLICT,
+        "the 3rd send exceeds the persisted cap of 2"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hard_cap_holds_under_concurrent_sends() {
+    // Fire many sends at a default-capped (10) room without waiting between them.
+    // Because the gate is enforced inside a single atomic INSERT statement, the
+    // count-then-write race cannot let an 11th slip through: exactly 10 succeed,
+    // the rest are refused — no matter how the requests interleave.
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "concurrent caps").await;
+    join(&app, &room_id, "mvp-engine", "opus47", "/work/a").await;
+
+    const ATTEMPTS: usize = 30;
+    const HARD_CAP: usize = 10;
+
+    let mut set = tokio::task::JoinSet::new();
+    for i in 0..ATTEMPTS {
+        let app = app.clone();
+        let room_id = room_id.clone();
+        set.spawn(async move {
+            let payload = json!({
+                "repo": "mvp-engine", "model": "opus47", "cwd": "/work/a",
+                "body": format!("concurrent {i}")
+            });
+            let req = Request::builder()
+                .method("POST")
+                .uri(format!("/rooms/{room_id}/messages"))
+                .header("content-type", "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap();
+            app.oneshot(req).await.unwrap().status()
+        });
+    }
+
+    let mut created = 0usize;
+    let mut conflict = 0usize;
+    while let Some(res) = set.join_next().await {
+        match res.expect("task ok") {
+            StatusCode::CREATED => created += 1,
+            StatusCode::CONFLICT => conflict += 1,
+            other => panic!("unexpected status under concurrency: {other}"),
+        }
+    }
+
+    assert_eq!(created, HARD_CAP, "exactly the cap may be admitted");
+    assert_eq!(
+        conflict,
+        ATTEMPTS - HARD_CAP,
+        "every send past the cap must be refused"
+    );
+
+    // And the room genuinely holds exactly the cap — no over-commit.
+    let (_, joiner) = join(&app, &room_id, "mvp-engine", "sonnet46", "/work/b").await;
+    let recent = joiner["recent_messages"]
+        .as_array()
+        .expect("recent_messages array");
+    assert_eq!(recent.len(), HARD_CAP, "the room must not exceed the cap");
 }

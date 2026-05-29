@@ -158,6 +158,58 @@ impl Storage {
         })
     }
 
+    /// Append a `msg` only if the room is below `hard_cap` cap-counting messages,
+    /// returning `None` (nothing written) when the cap is already reached. The
+    /// count and the insert are a single SQL statement (`INSERT … SELECT … WHERE
+    /// (SELECT COUNT(*) …) < ?`), so the gate is atomic: concurrent senders
+    /// cannot both observe `count < cap` and both insert past it. This is the
+    /// enforcement path; the bare `create_message` stays for uncapped inserts.
+    ///
+    /// The `COUNT(*)` here and `count_capped_messages` are the two seams where
+    /// slice 5 (#6) will add `AND type = 'msg'` so sentinels stop counting once a
+    /// message `type` column exists.
+    pub async fn create_message_capped(
+        &self,
+        room_id: &str,
+        sender: &str,
+        recipient: Option<&str>,
+        body: &str,
+        created_at: OffsetDateTime,
+        hard_cap: i64,
+    ) -> Result<Option<Message>, StorageError> {
+        let created = created_at.format(&Rfc3339).map_err(fmt_err)?;
+
+        let result = sqlx::query(
+            "INSERT INTO messages (room_id, sender, recipient, body, created_at) \
+             SELECT ?, ?, ?, ?, ? \
+             WHERE (SELECT COUNT(*) FROM messages WHERE room_id = ?) < ?",
+        )
+        .bind(room_id)
+        .bind(sender)
+        .bind(recipient)
+        .bind(body)
+        .bind(created)
+        .bind(room_id)
+        .bind(hard_cap)
+        .execute(&self.pool)
+        .await?;
+
+        // Zero rows means the `WHERE` filtered the insert out — the room was at
+        // the cap. `last_insert_rowid()` would be stale here, so guard first.
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+
+        Ok(Some(Message {
+            seq: result.last_insert_rowid(),
+            room_id: room_id.to_string(),
+            sender: sender.to_string(),
+            recipient: recipient.map(str::to_string),
+            body: body.to_string(),
+            created_at,
+        }))
+    }
+
     /// The oldest message in `room_id` with `seq > after_seq` that is addressed
     /// to `handle` or broadcast to all (`recipient IS NULL`), excluding the
     /// caller's own messages (`wait` is an inbox, not a log). `None` when the
@@ -199,6 +251,19 @@ impl Storage {
                 .fetch_one(&self.pool)
                 .await?;
         Ok(seq)
+    }
+
+    /// The number of cap-counting messages in a room. Read-only view of the same
+    /// count `create_message_capped` enforces against (used by tests and, later,
+    /// the room status/summary cap counters). Today every message counts; slice 5
+    /// (#6) will add `AND type = 'msg'` here and in `create_message_capped` so
+    /// sentinels stop counting once a message `type` column exists.
+    pub async fn count_capped_messages(&self, room_id: &str) -> Result<i64, StorageError> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE room_id = ?")
+            .bind(room_id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count)
     }
 
     /// The most recent `limit` messages in a room, returned oldest-first. This
@@ -285,16 +350,6 @@ impl Storage {
                 .fetch_optional(&self.pool)
                 .await?;
         Ok(cursor)
-    }
-
-    /// Advance a participant's long-poll read cursor to `seq`.
-    pub async fn advance_read_cursor(&self, handle: &str, seq: i64) -> Result<(), StorageError> {
-        sqlx::query("UPDATE participants SET last_read_seq = ? WHERE handle = ?")
-            .bind(seq)
-            .bind(handle)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
     }
 
     pub async fn get_participant_by_tuple(

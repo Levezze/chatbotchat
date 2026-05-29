@@ -242,7 +242,7 @@ async fn send_message(
     Path(id): Path<String>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), ApiError> {
-    let _ = state
+    let room = state
         .storage
         .get_room(&id)
         .await?
@@ -266,11 +266,30 @@ async fn send_message(
         }
     }
 
+    // Hard cap: once the room holds `hard_cap` cap-counting messages, refuse
+    // further sends. Bounded agent talk with a human in the loop is the point —
+    // this is the runaway-token backstop. The gate is enforced inside the insert
+    // (one atomic SQL statement), so concurrent sends cannot slip past the cap.
+    // The escape hatch — raising the cap (#5) or closing the room (#7) — lands in
+    // a later slice; here we only enforce-and-reject, with no room-state change.
     let now = OffsetDateTime::now_utc();
     let msg = state
         .storage
-        .create_message(&id, &sender.handle, req.to.as_deref(), &req.body, now)
-        .await?;
+        .create_message_capped(
+            &id,
+            &sender.handle,
+            req.to.as_deref(),
+            &req.body,
+            now,
+            room.config.hard_cap as i64,
+        )
+        .await?
+        .ok_or_else(|| {
+            ApiError::Conflict(format!(
+                "hard cap reached ({} messages); raise the cap or close the room",
+                room.config.hard_cap
+            ))
+        })?;
     state.hub.notify(&id);
 
     Ok((
@@ -379,6 +398,10 @@ fn room_to_status(room: &Room, participants: &[Participant]) -> Result<RoomStatu
 enum ApiError {
     NotFound,
     BadRequest(String),
+    /// The request conflicts with the room's current state and retrying won't
+    /// clear it — e.g. the hard cap is reached (the user must raise the cap or
+    /// close the room). Maps to 409, not 429: it is not a transient rate limit.
+    Conflict(String),
     Internal(String),
 }
 
@@ -394,6 +417,8 @@ impl IntoResponse for ApiError {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "room not found".to_string()),
             // The message is caller-facing and safe (our own text, no internals).
             ApiError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
+            // Likewise caller-facing and safe.
+            ApiError::Conflict(message) => (StatusCode::CONFLICT, message),
             ApiError::Internal(detail) => {
                 // Log the real cause server-side; never leak DB/internal text to
                 // the caller (table names, constraints, file paths, etc.).

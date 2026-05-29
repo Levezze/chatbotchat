@@ -159,11 +159,16 @@ async fn messages_seq_is_monotonic_and_filtered_by_recipient_and_cursor() {
         .expect("alice has an unread");
     assert_eq!(next.seq, m1.seq);
 
-    // After consuming past m1, alice's next unread is the targeted m2.
-    storage
-        .advance_read_cursor(&alice.handle, m1.seq)
+    // Claiming consumes the broadcast m1 and atomically advances alice's cursor
+    // (the real wait path — no cursor mutator that bypasses the atomic claim).
+    let claimed = storage
+        .claim_next_unread(&room.id, &alice.handle)
         .await
-        .expect("advance ok");
+        .expect("claim ok")
+        .expect("alice has an unread to claim");
+    assert_eq!(claimed.seq, m1.seq);
+
+    // After consuming past m1, alice's next unread is the targeted m2.
     let next2 = storage
         .next_unread(&room.id, &alice.handle, m1.seq)
         .await
@@ -181,7 +186,7 @@ async fn messages_seq_is_monotonic_and_filtered_by_recipient_and_cursor() {
         "a message addressed to alice must not surface for bob"
     );
 
-    // advance_read_cursor persisted onto the participant row.
+    // The claim persisted the advanced cursor onto the participant row.
     let alice_row = storage
         .get_participant_by_tuple(&room.id, &alice.repo, &alice.model, &alice.cwd)
         .await
@@ -222,5 +227,43 @@ async fn claim_next_unread_for_unknown_handle_returns_none_without_hanging() {
     assert!(
         result.unwrap().expect("claim ok").is_none(),
         "an unknown handle has nothing to claim"
+    );
+}
+
+#[tokio::test]
+async fn create_message_capped_enforces_the_cap_atomically_and_honors_the_configured_value() {
+    let storage = fresh_storage().await;
+    let room = sample_room();
+    storage.create_room(&room).await.expect("create_room ok");
+    let now = OffsetDateTime::now_utc();
+
+    // The enforcement reads an arbitrary cap value (not a hard-coded 10): a
+    // cap of 2 admits exactly two messages.
+    const CAP: i64 = 2;
+    for i in 0..CAP {
+        let inserted = storage
+            .create_message_capped(&room.id, "sender", None, &format!("m{i}"), now, CAP)
+            .await
+            .expect("capped insert ok");
+        assert!(
+            inserted.is_some(),
+            "send {i} is under the cap and must be inserted"
+        );
+    }
+
+    // The cap+1th is refused atomically (the count test + insert are one SQL
+    // statement, so there is no read-then-write window) and nothing is written.
+    let refused = storage
+        .create_message_capped(&room.id, "sender", None, "over", now, CAP)
+        .await
+        .expect("capped insert ok");
+    assert!(refused.is_none(), "a send at the cap must be refused");
+    assert_eq!(
+        storage
+            .count_capped_messages(&room.id)
+            .await
+            .expect("count ok"),
+        CAP,
+        "the refused message must not be persisted"
     );
 }
