@@ -80,6 +80,20 @@ async fn open_room(
         soft_cap: req.soft_cap.unwrap_or(defaults.soft_cap),
     };
 
+    // Reject pathological caps rather than minting a degenerate room. A hard_cap
+    // of 0 would accept no messages; a soft_cap below 2 has no valid surface
+    // threshold (surface fires on the soft_cap-1 th consecutive autonomous turn,
+    // so it needs soft_cap >= 2). We deliberately do NOT require soft_cap <=
+    // hard_cap: a low hard_cap with the default soft_cap is a legitimate
+    // "soft cap effectively off" config, not an error.
+    if config.hard_cap < 1 || config.soft_cap < 2 {
+        return Err(ApiError::BadRequest(format!(
+            "invalid caps: hard_cap must be >= 1 and soft_cap >= 2 \
+             (got hard_cap={}, soft_cap={})",
+            config.hard_cap, config.soft_cap
+        )));
+    }
+
     // The base id is only minute-granular, so two opens of the same subject in
     // one minute would collide on the primary key. Disambiguate by suffixing
     // `-2`, `-3`, … and retrying; the DB UNIQUE constraint makes this race-free

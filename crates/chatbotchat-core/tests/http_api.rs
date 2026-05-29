@@ -733,6 +733,44 @@ async fn hard_cap_refuses_sends_once_the_room_is_full() {
 }
 
 #[tokio::test]
+async fn open_rejects_pathological_cap_configs() {
+    // The open-time cap opts are a new input surface: a hard_cap of 0 would accept
+    // no messages at all, and a soft_cap below 2 has no valid surface threshold
+    // (surface fires on the soft_cap-1 th consecutive autonomous turn). Reject both
+    // with 400 rather than silently minting a degenerate room. (soft_cap > hard_cap
+    // is intentionally NOT rejected — a low hard_cap with the default soft_cap is a
+    // legitimate "soft cap effectively off" config.)
+    let app = test_router().await;
+
+    let bad: [(Option<u32>, Option<u32>, &str); 3] = [
+        (Some(0), None, "hard_cap 0 accepts no sends"),
+        (None, Some(0), "soft_cap 0 never surfaces"),
+        (None, Some(1), "soft_cap 1 has no valid threshold"),
+    ];
+    for (hard, soft, why) in bad {
+        let mut payload = json!({ "subject": "bad caps" });
+        if let Some(h) = hard {
+            payload["hard_cap"] = json!(h);
+        }
+        if let Some(s) = soft {
+            payload["soft_cap"] = json!(s);
+        }
+        let req = Request::builder()
+            .method("POST")
+            .uri("/rooms")
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{why}");
+    }
+
+    // A valid low-cap edge (hard_cap 1, soft_cap 2) is still accepted.
+    let ok = open_with_caps(&app, "ok caps", Some(1), Some(2)).await;
+    assert!(!ok.is_empty());
+}
+
+#[tokio::test]
 async fn open_time_hard_cap_is_honored_end_to_end() {
     // Open with hard_cap = 2 via the open API (no storage seeding); the 3rd send
     // is refused with 409 — proving open-time cap opts reach the enforcement gate.
