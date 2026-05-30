@@ -154,7 +154,7 @@ impl CbcMcp {
     }
 
     #[tool(
-        description = "Long-poll for the next message addressed to you (or broadcast) in a room. Identity is (repo, model, cwd) — repo and cwd are auto-detected, you supply the model (slice-3 identity arg). Blocks up to the server cap (10 min); returns {\"status\":\"paused_by_timeout\"} on cap, otherwise {\"message\":{...},\"surface_to_user\":bool} as JSON. When surface_to_user is true the conversation has hit the soft cap — consult your user and send your next turn with human=true."
+        description = "Long-poll for the next message addressed to you (or broadcast) in a room. Identity is (repo, model, cwd) — repo and cwd are auto-detected, you supply the model (slice-3 identity arg). Blocks up to the server cap (10 min); returns {\"status\":\"paused_by_timeout\"} on cap, otherwise {\"message\":{...},\"surface_to_user\":bool} as JSON. When surface_to_user is true the conversation has hit the soft cap — consult your user and send your next turn with human=true. When the counterpart is paused consulting its user, the response also carries \"retry_after\" (seconds): the server already shortened this poll to that, so stay quiet — don't re-poll in a tight loop while it backs off; the field grows the longer the pause persists."
     )]
     async fn cbc_wait(
         &self,

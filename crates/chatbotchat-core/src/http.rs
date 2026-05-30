@@ -4,7 +4,7 @@ use crate::message::{Message, MessageType, Severity};
 use crate::participant::Participant;
 use crate::room::{Room, RoomConfig, RoomState};
 use crate::storage::{Storage, StorageError};
-use crate::waiter::{wait_for_message, Hub, WaitOutcome};
+use crate::waiter::{backoff_secs, wait_for_message, Hub, WaitOutcome};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -428,12 +428,41 @@ async fn wait_room(
         .await?
         .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
 
+    // Polling backoff (slice 5b). If the counterpart is parked behind an active
+    // `waiting_user` sentinel, shorten this long-poll to the severity-scaled,
+    // time-decayed backoff and hand that hint back so the LLM consumer — which
+    // has no `sleep()` of its own — stays quiet. The active-sentinel check is the
+    // latest row from anyone but the caller (two-agent v1); a later `msg` from
+    // that sender self-supersedes the pause, so only `WaitingUser` counts. A
+    // corrupt sentinel missing its severity simply yields no backoff (never a
+    // panic on the wait path).
+    let retry_after = match state
+        .storage
+        .latest_message_from_other(&id, &caller.handle)
+        .await?
+    {
+        Some(m) if m.msg_type == MessageType::WaitingUser => m.severity.map(|sev| {
+            let elapsed = (OffsetDateTime::now_utc() - m.created_at).whole_seconds();
+            backoff_secs(sev, elapsed)
+        }),
+        _ => None,
+    };
+
+    // `wait_cap` is the absolute ceiling; an active sentinel only ever *shortens*
+    // it. In prod (wait_cap = 600s ≥ backoff ≤ 60s) the min is always the
+    // backoff; the min exists so the `with_wait_cap` test seam keeps parking
+    // tests fast (a millisecond cap wins).
+    let effective_cap = match retry_after {
+        Some(secs) => state.wait_cap.min(Duration::from_secs(secs as u64)),
+        None => state.wait_cap,
+    };
+
     let outcome = wait_for_message(
         &state.storage,
         &state.hub,
         &id,
         &caller.handle,
-        state.wait_cap,
+        effective_cap,
     )
     .await?;
 
@@ -449,10 +478,12 @@ async fn wait_room(
             WaitResponse::Message {
                 message: message_view(&m)?,
                 surface_to_user,
+                retry_after,
             }
         }
         WaitOutcome::PausedByTimeout => WaitResponse::Timeout {
             status: "paused_by_timeout".to_string(),
+            retry_after,
         },
     }))
 }

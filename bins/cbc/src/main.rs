@@ -175,6 +175,7 @@ async fn main() -> anyhow::Result<()> {
                 WaitResponse::Message {
                     message,
                     surface_to_user,
+                    retry_after,
                 } => {
                     println!("From: {}", message.from);
                     println!("To:   {}", message.to.as_deref().unwrap_or("all"));
@@ -198,9 +199,14 @@ async fn main() -> anyhow::Result<()> {
                              Consult your user and send the next turn with --human."
                         );
                     }
+                    print_backoff(retry_after);
                 }
-                WaitResponse::Timeout { status } => {
+                WaitResponse::Timeout {
+                    status,
+                    retry_after,
+                } => {
                     println!("{status}");
+                    print_backoff(retry_after);
                 }
             }
         }
@@ -226,4 +232,14 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Surface the slice 5b polling backoff hint, when present. The server already
+/// held this poll for `secs` because the counterpart is parked behind a
+/// `waiting_user` sentinel; tell the agent so it stays quiet rather than
+/// hammering the room while the other side consults its user.
+fn print_backoff(retry_after: Option<u32>) {
+    if let Some(secs) = retry_after {
+        println!("[backoff] Counterpart is paused; server held this poll ~{secs}s.");
+    }
 }

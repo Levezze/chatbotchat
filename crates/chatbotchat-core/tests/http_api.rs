@@ -335,6 +335,108 @@ async fn wait_delivers_a_waiting_user_sentinel_with_its_question() {
 }
 
 #[tokio::test]
+async fn wait_delivering_a_fresh_sentinel_carries_the_backoff_hint() {
+    // Slice 5b deliver path: A pauses (high). B's very next wait returns the
+    // sentinel itself, and that delivery rides the freshly-computed backoff —
+    // `high` at n = 0 is the base 45 — so B knows how long to stay quiet.
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "backoff deliver").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    join(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+
+    signal(
+        &app,
+        &room_id,
+        "repo-a",
+        "opus47",
+        "/work/a",
+        "waiting_user",
+        Some("high"),
+        Some("merge?"),
+    )
+    .await;
+
+    let (status, body) = wait(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["message"]["type"].as_str(),
+        Some("waiting_user"),
+        "got {body}"
+    );
+    assert_eq!(
+        body["retry_after"].as_u64(),
+        Some(45),
+        "fresh high sentinel ⇒ base backoff 45, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn an_active_sentinel_shortens_a_parked_wait_and_returns_the_hint() {
+    // Slice 5b park path. B has already consumed the sentinel, so its next wait
+    // has nothing unread and parks — but the counterpart is still paused, so the
+    // long-poll is shortened to the backoff and the timeout still carries the
+    // hint. We prove the shortening via the `retry_after` field, not wall-clock:
+    // `effective_cap = min(wait_cap, backoff)`, so at an 80ms test cap both a
+    // sentinel-active and a plain wait return at ~80ms — the field is the only
+    // observable difference (see the control test below).
+    let app = test_router_with_cap(std::time::Duration::from_millis(80)).await;
+    let room_id = open_room_id(&app, "backoff park").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    join(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+
+    signal(
+        &app,
+        &room_id,
+        "repo-a",
+        "opus47",
+        "/work/a",
+        "waiting_user",
+        Some("high"),
+        Some("merge?"),
+    )
+    .await;
+
+    // First wait consumes the sentinel (cursor advances past it).
+    let (_, first) = wait(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+    assert_eq!(first["message"]["type"].as_str(), Some("waiting_user"));
+
+    // Second wait: nothing new to read, but the pause is still active, so it
+    // parks the shortened cap and times out carrying the backoff hint.
+    let (status, body) = wait(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["status"].as_str(),
+        Some("paused_by_timeout"),
+        "got {body}"
+    );
+    assert_eq!(
+        body["retry_after"].as_u64(),
+        Some(45),
+        "an active sentinel keeps handing back the hint on timeout, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn wait_without_an_active_sentinel_omits_retry_after() {
+    // The control for the park test: with no counterpart pause, a parked wait
+    // times out with no `retry_after` key at all (omitted, not null). This field
+    // difference — present vs absent — is what distinguishes a backed-off wait
+    // from an ordinary one at the same short test cap.
+    let app = test_router_with_cap(std::time::Duration::from_millis(80)).await;
+    let room_id = open_room_id(&app, "no backoff").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    join(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+
+    let (status, body) = wait(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"].as_str(), Some("paused_by_timeout"));
+    assert!(
+        body.get("retry_after").is_none(),
+        "no active sentinel ⇒ retry_after omitted, got {body}"
+    );
+}
+
+#[tokio::test]
 async fn signal_validation_rejects_malformed_sentinels() {
     let app = test_router().await;
     let room_id = open_room_id(&app, "signal validation").await;

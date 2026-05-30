@@ -307,6 +307,40 @@ impl Storage {
         }
     }
 
+    /// The single most-recent message in `room_id` sent by anyone *other than*
+    /// `handle` — cursor-independent, regardless of read state. Drives slice 5b's
+    /// polling backoff: a `waiting_user` here means the counterpart is paused, and
+    /// its `severity`/`created_at` feed [`crate::waiter::backoff_secs`].
+    ///
+    /// Returns the latest row of *any* type on purpose: a later plain `msg` from
+    /// the same sender self-supersedes an earlier sentinel, so the caller clears
+    /// the backoff by checking `msg_type == WaitingUser`. Filtering to
+    /// `type = 'waiting_user'` in SQL would miss that clearing and back off
+    /// forever. Correct for a single counterpart (v1 two-agent) only — a third
+    /// party's later `msg` would mask another's active sentinel.
+    pub async fn latest_message_from_other(
+        &self,
+        room_id: &str,
+        handle: &str,
+    ) -> Result<Option<Message>, StorageError> {
+        let row = sqlx::query(
+            "SELECT seq, room_id, sender, recipient, body, created_at, type, from_human, \
+                    severity, question_text \
+             FROM messages \
+             WHERE room_id = ? AND sender != ? \
+             ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(room_id)
+        .bind(handle)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            None => Ok(None),
+            Some(row) => Ok(Some(row_to_message(&row)?)),
+        }
+    }
+
     /// The highest message `seq` in a room, or 0 if it has none. Used to seed a
     /// new participant's read cursor at join, so `wait` only delivers messages
     /// that arrive *after* they joined — the pre-join backlog is the log view
