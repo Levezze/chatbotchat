@@ -356,41 +356,38 @@ async fn signal_room(
         }
     };
 
-    let severity = match req.severity.as_deref() {
-        Some(s) => Some(
-            Severity::parse(s)
-                .ok_or_else(|| ApiError::BadRequest(format!("invalid severity '{s}'")))?,
-        ),
-        None => None,
-    };
-
-    // Per-type field rules. `waiting_user` is the question-carrying sentinel, so
-    // it needs both a severity and the question; `fold` is a bare marker and must
-    // carry neither.
-    let has_question = req.question_text.as_deref().is_some_and(|q| !q.is_empty());
-    match msg_type {
+    // Per-type field rules, checked on field *presence* (not emptiness) so a
+    // stray empty string can't slip a non-NULL value past the invariant. Done
+    // before parsing the severity value, so a `fold` carrying any severity is
+    // rejected as "fold takes no severity" rather than "invalid severity".
+    // `waiting_user` is the question-carrying sentinel (needs both severity and a
+    // non-empty question); `fold` is a bare marker (carries neither).
+    let severity = match msg_type {
         MessageType::WaitingUser => {
-            if severity.is_none() {
-                return Err(ApiError::BadRequest(
-                    "waiting_user requires a severity (low|med|high)".into(),
-                ));
-            }
-            if !has_question {
+            let s = req.severity.as_deref().ok_or_else(|| {
+                ApiError::BadRequest("waiting_user requires a severity (low|med|high)".into())
+            })?;
+            let severity = Severity::parse(s)
+                .ok_or_else(|| ApiError::BadRequest(format!("invalid severity '{s}'")))?;
+            if req.question_text.as_deref().is_none_or(|q| q.is_empty()) {
                 return Err(ApiError::BadRequest(
                     "waiting_user requires a non-empty question_text".into(),
                 ));
             }
+            Some(severity)
         }
         MessageType::Fold => {
-            if severity.is_some() || has_question {
-                return Err(ApiError::BadRequest(
-                    "fold takes no severity or question_text".into(),
-                ));
+            if req.severity.is_some() {
+                return Err(ApiError::BadRequest("fold takes no severity".into()));
             }
+            if req.question_text.is_some() {
+                return Err(ApiError::BadRequest("fold takes no question_text".into()));
+            }
+            None
         }
         // The match above only admits WaitingUser/Fold.
         _ => unreachable!("signal type already gated to waiting_user|fold"),
-    }
+    };
 
     let now = OffsetDateTime::now_utc();
     let msg = state

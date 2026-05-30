@@ -373,6 +373,16 @@ async fn signal_validation_rejects_malformed_sentinels() {
         );
     }
 
+    // fold rejects an *empty-string* question too — "carries neither" is about
+    // presence, not non-emptiness; an empty string must not slip through and
+    // persist a non-NULL question_text on a fold row.
+    let (s, _) = sig("fold", None, Some("")).await;
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "fold must reject question_text even when empty"
+    );
+
     // The happy paths still work: waiting_user with both, fold with neither.
     let (s, _) = sig("waiting_user", Some("high"), Some("q?")).await;
     assert_eq!(
@@ -382,6 +392,43 @@ async fn signal_validation_rejects_malformed_sentinels() {
     );
     let (s, _) = sig("fold", None, None).await;
     assert_eq!(s, StatusCode::CREATED, "a bare fold is accepted");
+}
+
+#[tokio::test]
+async fn signal_to_missing_room_is_404() {
+    let app = test_router().await;
+    let (status, _) = signal(
+        &app,
+        "nope-20260528-1500",
+        "repo-a",
+        "opus47",
+        "/work/a",
+        "waiting_user",
+        Some("high"),
+        Some("q?"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn signal_from_non_participant_is_rejected() {
+    // The room exists but the caller never joined — signalling must be refused,
+    // mirroring the send path. (Identity is the (repo, model, cwd) tuple.)
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "signal non participant").await;
+    let (status, _) = signal(
+        &app,
+        &room_id,
+        "repo-ghost",
+        "opus47",
+        "/work/ghost",
+        "waiting_user",
+        Some("high"),
+        Some("q?"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
