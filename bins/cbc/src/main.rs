@@ -61,6 +61,23 @@ enum Command {
         #[arg(long)]
         human: bool,
     },
+    /// Emit a sentinel (out-of-band signal) to a room; repo and cwd are auto-detected.
+    Signal {
+        /// Room id to signal.
+        room_id: String,
+        /// Self-declared model name (your identity; e.g. opus47).
+        #[arg(long)]
+        model: String,
+        /// Signal type: waiting_user or fold.
+        #[arg(long = "type")]
+        signal_type: String,
+        /// Severity for waiting_user: low, med, or high.
+        #[arg(long)]
+        severity: Option<String>,
+        /// The question you are asking your user (waiting_user only).
+        #[arg(long)]
+        question: Option<String>,
+    },
     /// Long-poll for the next message addressed to you (or broadcast).
     Wait {
         /// Room id to long-poll.
@@ -124,6 +141,29 @@ async fn main() -> anyhow::Result<()> {
                 .context("sending message")?;
             println!("Sent: seq {}", resp.seq);
         }
+        Command::Signal {
+            room_id,
+            model,
+            signal_type,
+            severity,
+            question,
+        } => {
+            let repo = context::detect_repo();
+            let cwd = context::detect_cwd();
+            let resp = client
+                .signal(
+                    &room_id,
+                    &repo,
+                    &model,
+                    &cwd,
+                    &signal_type,
+                    severity.as_deref(),
+                    question.as_deref(),
+                )
+                .await
+                .context("sending signal")?;
+            println!("Signal sent: seq {}", resp.seq);
+        }
         Command::Wait { room_id, model } => {
             let repo = context::detect_repo();
             let cwd = context::detect_cwd();
@@ -138,7 +178,19 @@ async fn main() -> anyhow::Result<()> {
                 } => {
                     println!("From: {}", message.from);
                     println!("To:   {}", message.to.as_deref().unwrap_or("all"));
-                    println!("Body: {}", message.body);
+                    // A sentinel (type != "msg") carries no body; surface its type
+                    // and the question the other agent is asking its user instead.
+                    if message.msg_type != "msg" {
+                        match &message.severity {
+                            Some(sev) => println!("Signal: {} ({sev})", message.msg_type),
+                            None => println!("Signal: {}", message.msg_type),
+                        }
+                        if let Some(q) = &message.question_text {
+                            println!("Asking its user: {q}");
+                        }
+                    } else {
+                        println!("Body: {}", message.body);
+                    }
                     if surface_to_user {
                         println!();
                         println!(
