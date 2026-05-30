@@ -152,6 +152,51 @@ fn send_then_wait_round_trips_over_cli() {
 }
 
 #[test]
+fn signal_then_wait_surfaces_the_question_over_cli() {
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "cli signal wait");
+
+    join(&base, &room_id, "opus47");
+    join(&base, &room_id, "sonnet46");
+
+    // opus47 signals that it is consulting its user, carrying the question.
+    Command::cargo_bin("cbc")
+        .unwrap()
+        .args([
+            "signal",
+            &room_id,
+            "--model",
+            "opus47",
+            "--type",
+            "waiting_user",
+            "--severity",
+            "high",
+            "--question",
+            "should I merge to production?",
+        ])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+
+    // sonnet46 waits and sees the sentinel + its question.
+    let waited = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["wait", &room_id, "--model", "sonnet46"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(waited.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("should I merge to production?"),
+        "wait stdout should surface the sentinel's question; got:\n{out}"
+    );
+    assert!(
+        out.contains("waiting_user"),
+        "wait stdout should name the sentinel type; got:\n{out}"
+    );
+}
+
+#[test]
 fn status_reports_open_room() {
     let base = spawn_daemon();
 

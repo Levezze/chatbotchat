@@ -205,6 +205,103 @@ async fn mcp_send_and_wait_round_trip() {
 }
 
 #[tokio::test]
+async fn mcp_signal_and_wait_round_trip() {
+    let base = spawn_daemon().await;
+
+    let transport =
+        TokioChildProcess::new(Command::new(env!("CARGO_BIN_EXE_cbc")).configure(|cmd| {
+            cmd.arg("mcp").env("CBC_SERVER", &base);
+        }))
+        .expect("spawn cbc mcp");
+    let client = ().serve(transport).await.expect("connect mcp client");
+
+    let tools = client
+        .list_tools(Default::default())
+        .await
+        .expect("list tools");
+    let advertised: Vec<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
+    assert!(
+        advertised.contains(&"cbc_signal"),
+        "cbc_signal should be advertised; got {advertised:?}"
+    );
+
+    let opened = client
+        .call_tool(
+            CallToolRequestParams::new("cbc_open_room").with_arguments(
+                serde_json::json!({ "subject": "mcp signal wait" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("open room");
+    let opened_rendered = serde_json::to_string(&opened).expect("serialize");
+    let start = opened_rendered.find("mcp-signal-wait-").expect("room id");
+    let room_id: String = opened_rendered[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+
+    for model in ["opus47", "sonnet46"] {
+        client
+            .call_tool(
+                CallToolRequestParams::new("cbc_join_room").with_arguments(
+                    serde_json::json!({ "room_id": room_id, "model": model })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("join");
+    }
+
+    // opus47 signals it is consulting its user, carrying the question.
+    client
+        .call_tool(
+            CallToolRequestParams::new("cbc_signal").with_arguments(
+                serde_json::json!({
+                    "room_id": room_id,
+                    "model": "opus47",
+                    "type": "waiting_user",
+                    "severity": "high",
+                    "question_text": "should I merge to production?"
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .expect("signal");
+
+    // sonnet46 waits and receives the sentinel + its question.
+    let waited = client
+        .call_tool(
+            CallToolRequestParams::new("cbc_wait").with_arguments(
+                serde_json::json!({ "room_id": room_id, "model": "sonnet46" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("wait");
+    let waited_rendered = serde_json::to_string(&waited).expect("serialize wait");
+    assert!(
+        waited_rendered.contains("should I merge to production?"),
+        "cbc_wait should deliver the sentinel's question; got {waited_rendered}"
+    );
+    assert!(
+        waited_rendered.contains("waiting_user"),
+        "cbc_wait should carry the sentinel type; got {waited_rendered}"
+    );
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
 async fn mcp_join_room_is_idempotent_within_a_session() {
     let base = spawn_daemon().await;
 

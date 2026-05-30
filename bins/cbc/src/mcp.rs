@@ -59,6 +59,29 @@ pub struct SendArgs {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SignalArgs {
+    #[schemars(description = "Room id to signal")]
+    pub room_id: String,
+    #[schemars(
+        description = "Self-declared model name (your identity; e.g. opus47). repo and cwd are auto-detected from the server's working directory."
+    )]
+    pub model: String,
+    #[serde(rename = "type")]
+    #[schemars(description = "Signal type: waiting_user or fold")]
+    pub signal_type: String,
+    #[schemars(
+        description = "Severity for waiting_user: low, med, or high (required for waiting_user)"
+    )]
+    #[serde(default)]
+    pub severity: Option<String>,
+    #[schemars(
+        description = "The question you are asking your user (required for waiting_user, omit for fold)"
+    )]
+    #[serde(default)]
+    pub question_text: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct WaitArgs {
     #[schemars(description = "Room id to long-poll")]
     pub room_id: String,
@@ -140,6 +163,39 @@ impl CbcMcp {
         let repo = crate::context::detect_repo();
         let cwd = crate::context::detect_cwd();
         match self.client.wait(&room_id, &repo, &model, &cwd).await {
+            Ok(resp) => json_or_err(&resp),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Emit a sentinel (out-of-band signal) to a room. `type` is waiting_user (you are consulting your user) or fold. waiting_user requires `severity` (low|med|high) and `question_text` (the question you are asking your user); fold takes neither. Identity is (repo, model, cwd) — repo and cwd auto-detected, you supply the model. You must have joined first. Sentinels do not count toward the caps. Returns {seq} as JSON"
+    )]
+    async fn cbc_signal(
+        &self,
+        Parameters(SignalArgs {
+            room_id,
+            model,
+            signal_type,
+            severity,
+            question_text,
+        }): Parameters<SignalArgs>,
+    ) -> String {
+        let repo = crate::context::detect_repo();
+        let cwd = crate::context::detect_cwd();
+        match self
+            .client
+            .signal(
+                &room_id,
+                &repo,
+                &model,
+                &cwd,
+                &signal_type,
+                severity.as_deref(),
+                question_text.as_deref(),
+            )
+            .await
+        {
             Ok(resp) => json_or_err(&resp),
             Err(e) => err_json(&e.to_string()),
         }

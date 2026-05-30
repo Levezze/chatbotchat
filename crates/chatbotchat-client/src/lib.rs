@@ -3,7 +3,8 @@
 
 use chatbotchat_protocol::{
     ErrorEnvelope, JoinRoomRequest, JoinRoomResponse, OpenRoomRequest, OpenRoomResponse,
-    RoomStatus, SendMessageRequest, SendMessageResponse, WaitRequest, WaitResponse,
+    RoomStatus, SendMessageRequest, SendMessageResponse, SignalRequest, SignalResponse,
+    WaitRequest, WaitResponse,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -121,6 +122,37 @@ impl HttpClient {
                 cwd: cwd.to_string(),
             })
             .timeout(std::time::Duration::from_secs(660))
+            .send()
+            .await?;
+        decode(resp).await
+    }
+
+    /// Post a sentinel (out-of-band signal) to a room. `signal_type` is
+    /// `waiting_user` or `fold`; `severity` + `question_text` are required for
+    /// `waiting_user` and omitted for `fold`. Identity is the `(repo, model, cwd)`
+    /// tuple, same as send; the caller must already be a participant.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn signal(
+        &self,
+        room_id: &str,
+        repo: &str,
+        model: &str,
+        cwd: &str,
+        signal_type: &str,
+        severity: Option<&str>,
+        question_text: Option<&str>,
+    ) -> Result<SignalResponse, ClientError> {
+        let resp = self
+            .http
+            .post(format!("{}/rooms/{room_id}/signals", self.base_url))
+            .json(&SignalRequest {
+                repo: repo.to_string(),
+                model: model.to_string(),
+                cwd: cwd.to_string(),
+                signal_type: signal_type.to_string(),
+                severity: severity.map(str::to_string),
+                question_text: question_text.map(str::to_string),
+            })
             .send()
             .await?;
         decode(resp).await

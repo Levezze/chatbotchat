@@ -1,4 +1,4 @@
-use crate::message::{Message, MessageType};
+use crate::message::{Message, MessageType, Severity};
 use crate::participant::Participant;
 use crate::room::{Room, RoomConfig, RoomState};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -159,12 +159,18 @@ impl Storage {
             // Bare `create_message` is the autonomous-turn path; the human-fed
             // path is `create_message_capped`'s `from_human` arg. DB default is 0.
             from_human: false,
+            // A plain `msg` carries no sentinel metadata.
+            severity: None,
+            question_text: None,
         })
     }
 
     /// Append a message of an arbitrary `msg_type` (uncapped). Sentinels are
     /// written through here; the bare `create_message` is the `msg`-only path.
     /// Cap enforcement lives in `create_message_capped`, so this never gates.
+    /// `severity` and `question_text` carry the `waiting_user` sentinel's payload
+    /// (the question the agent is asking its user); both are `None` for `fold`.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_message_typed(
         &self,
         room_id: &str,
@@ -173,12 +179,15 @@ impl Storage {
         body: &str,
         created_at: OffsetDateTime,
         msg_type: MessageType,
+        severity: Option<Severity>,
+        question_text: Option<&str>,
     ) -> Result<Message, StorageError> {
         let created = created_at.format(&Rfc3339).map_err(fmt_err)?;
 
         let result = sqlx::query(
-            "INSERT INTO messages (room_id, sender, recipient, body, created_at, type) \
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO messages \
+             (room_id, sender, recipient, body, created_at, type, severity, question_text) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(room_id)
         .bind(sender)
@@ -186,6 +195,8 @@ impl Storage {
         .bind(body)
         .bind(created)
         .bind(msg_type.as_str())
+        .bind(severity.map(Severity::as_str))
+        .bind(question_text)
         .execute(&self.pool)
         .await?;
 
@@ -199,6 +210,8 @@ impl Storage {
             msg_type,
             // Sentinels are agent-originated signals; DB default is 0.
             from_human: false,
+            severity,
+            question_text: question_text.map(str::to_string),
         })
     }
 
@@ -257,6 +270,9 @@ impl Storage {
             created_at,
             msg_type: MessageType::Msg,
             from_human,
+            // The capped path is `msg`-only; sentinel metadata never applies.
+            severity: None,
+            question_text: None,
         }))
     }
 
@@ -271,7 +287,8 @@ impl Storage {
         after_seq: i64,
     ) -> Result<Option<Message>, StorageError> {
         let row = sqlx::query(
-            "SELECT seq, room_id, sender, recipient, body, created_at, type, from_human \
+            "SELECT seq, room_id, sender, recipient, body, created_at, type, from_human, \
+                    severity, question_text \
              FROM messages \
              WHERE room_id = ? AND seq > ? AND sender != ? \
                AND (recipient IS NULL OR recipient = ?) \
@@ -325,11 +342,13 @@ impl Storage {
     /// count at send (no race, no atomicity needed). The wait handler compares
     /// this to `soft_cap - 1` to decide whether to surface to the user.
     ///
-    /// The reset boundary is the highest `from_human = 1` `msg` at or before
-    /// `up_to_seq` (seq 0 if none). Sentinels (`type != 'msg'`) neither count nor
-    /// reset — only `msg` rows do, in lockstep with the cap seams. Slice C will
-    /// OR `type = 'waiting_user'` into the reset subquery (consulting the user
-    /// also breaks a run); that is the one documented extension point here.
+    /// The reset boundary is the highest row at or before `up_to_seq` that breaks
+    /// the autonomous run (seq 0 if none): either a `from_human = 1` `msg` (the
+    /// `--human` fold) OR a `waiting_user` sentinel (consulting the user also
+    /// pulls a human into the loop). The count itself stays `type = 'msg' AND
+    /// from_human = 0` — a sentinel resets the run but is never itself counted as
+    /// a turn. This asymmetry (in the boundary, out of the count) keeps the cap
+    /// seams in lockstep while letting a consultation break the run.
     pub async fn consecutive_msg_count(
         &self,
         room_id: &str,
@@ -339,7 +358,8 @@ impl Storage {
             "SELECT COUNT(*) FROM messages \
              WHERE room_id = ? AND type = 'msg' AND from_human = 0 AND seq <= ? \
                AND seq > (SELECT COALESCE(MAX(seq), 0) FROM messages \
-                          WHERE room_id = ? AND type = 'msg' AND from_human = 1 AND seq <= ?)",
+                          WHERE room_id = ? AND seq <= ? \
+                            AND ((type = 'msg' AND from_human = 1) OR type = 'waiting_user'))",
         )
         .bind(room_id)
         .bind(up_to_seq)
@@ -358,7 +378,8 @@ impl Storage {
         limit: i64,
     ) -> Result<Vec<Message>, StorageError> {
         let rows = sqlx::query(
-            "SELECT seq, room_id, sender, recipient, body, created_at, type, from_human \
+            "SELECT seq, room_id, sender, recipient, body, created_at, type, from_human, \
+                    severity, question_text \
              FROM messages WHERE room_id = ? ORDER BY seq DESC LIMIT ?",
         )
         .bind(room_id)
@@ -521,6 +542,13 @@ fn row_to_message(row: &sqlx::sqlite::SqliteRow) -> Result<Message, StorageError
     let type_str: String = row.try_get("type")?;
     let msg_type = MessageType::parse(&type_str)
         .ok_or_else(|| StorageError::Corrupt(format!("unknown message type: {type_str}")))?;
+    let severity = match row.try_get::<Option<String>, _>("severity")? {
+        Some(s) => Some(
+            Severity::parse(&s)
+                .ok_or_else(|| StorageError::Corrupt(format!("unknown severity: {s}")))?,
+        ),
+        None => None,
+    };
     Ok(Message {
         seq: row.try_get("seq")?,
         room_id: row.try_get("room_id")?,
@@ -530,6 +558,8 @@ fn row_to_message(row: &sqlx::sqlite::SqliteRow) -> Result<Message, StorageError
         created_at: parse_ts(&row.try_get::<String, _>("created_at")?)?,
         msg_type,
         from_human: row.try_get("from_human")?,
+        severity,
+        question_text: row.try_get("question_text")?,
     })
 }
 

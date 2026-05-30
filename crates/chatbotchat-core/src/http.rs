@@ -1,6 +1,6 @@
 use crate::identity::{derive_handle, HandleOutcome, JoinIdentity};
 use crate::ids;
-use crate::message::Message;
+use crate::message::{Message, MessageType, Severity};
 use crate::participant::Participant;
 use crate::room::{Room, RoomConfig, RoomState};
 use crate::storage::{Storage, StorageError};
@@ -13,7 +13,7 @@ use axum::{Json, Router};
 use chatbotchat_protocol::{
     ErrorEnvelope, JoinRoomRequest, JoinRoomResponse, MessageView, OpenRoomRequest,
     OpenRoomResponse, ParticipantView, RoomStatus, SendMessageRequest, SendMessageResponse,
-    WaitRequest, WaitResponse,
+    SignalRequest, SignalResponse, WaitRequest, WaitResponse,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -62,6 +62,7 @@ pub fn router(state: AppState) -> Router {
         .route("/rooms/{id}", get(get_room))
         .route("/rooms/{id}/join", post(join_room))
         .route("/rooms/{id}/messages", post(send_message))
+        .route("/rooms/{id}/signals", post(signal_room))
         .route("/rooms/{id}/wait", get(wait_room))
         .with_state(state)
 }
@@ -320,6 +321,93 @@ async fn send_message(
     ))
 }
 
+/// Post a sentinel (out-of-band signal) to a room. The sender is resolved from
+/// the `(repo, model, cwd)` tuple (400 if not a participant). Sentinels are
+/// uncapped — they route through `create_message_typed`, never the capped gate —
+/// and are always broadcast. Only `waiting_user` and `fold` are accepted here;
+/// `blocker_real_work`/`close` (and the conversation `msg`) are rejected. After
+/// the insert commits, ring the room so any parked waiters re-query.
+async fn signal_room(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SignalRequest>,
+) -> Result<(StatusCode, Json<SignalResponse>), ApiError> {
+    state
+        .storage
+        .get_room(&id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    let sender = state
+        .storage
+        .get_participant_by_tuple(&id, &req.repo, &req.model, &req.cwd)
+        .await?
+        .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
+
+    // Only sentinel types are valid on this endpoint. `blocker_real_work`/`close`
+    // are the lifecycle slice's; the conversation `msg` belongs on /messages.
+    let msg_type = match MessageType::parse(&req.signal_type) {
+        Some(t @ (MessageType::WaitingUser | MessageType::Fold)) => t,
+        _ => {
+            return Err(ApiError::BadRequest(format!(
+                "unsupported signal type '{}'; expected waiting_user or fold",
+                req.signal_type
+            )))
+        }
+    };
+
+    // Per-type field rules, checked on field *presence* (not emptiness) so a
+    // stray empty string can't slip a non-NULL value past the invariant. Done
+    // before parsing the severity value, so a `fold` carrying any severity is
+    // rejected as "fold takes no severity" rather than "invalid severity".
+    // `waiting_user` is the question-carrying sentinel (needs both severity and a
+    // non-empty question); `fold` is a bare marker (carries neither).
+    let severity = match msg_type {
+        MessageType::WaitingUser => {
+            let s = req.severity.as_deref().ok_or_else(|| {
+                ApiError::BadRequest("waiting_user requires a severity (low|med|high)".into())
+            })?;
+            let severity = Severity::parse(s)
+                .ok_or_else(|| ApiError::BadRequest(format!("invalid severity '{s}'")))?;
+            if req.question_text.as_deref().is_none_or(|q| q.is_empty()) {
+                return Err(ApiError::BadRequest(
+                    "waiting_user requires a non-empty question_text".into(),
+                ));
+            }
+            Some(severity)
+        }
+        MessageType::Fold => {
+            if req.severity.is_some() {
+                return Err(ApiError::BadRequest("fold takes no severity".into()));
+            }
+            if req.question_text.is_some() {
+                return Err(ApiError::BadRequest("fold takes no question_text".into()));
+            }
+            None
+        }
+        // The match above only admits WaitingUser/Fold.
+        _ => unreachable!("signal type already gated to waiting_user|fold"),
+    };
+
+    let now = OffsetDateTime::now_utc();
+    let msg = state
+        .storage
+        .create_message_typed(
+            &id,
+            &sender.handle,
+            None,
+            "",
+            now,
+            msg_type,
+            severity,
+            req.question_text.as_deref(),
+        )
+        .await?;
+    state.hub.notify(&id);
+
+    Ok((StatusCode::CREATED, Json(SignalResponse { seq: msg.seq })))
+}
+
 /// Long-poll for the next message addressed to the caller (or broadcast). The
 /// caller is resolved from the `(repo, model, cwd)` tuple (400 if not a
 /// participant). Blocks up to the server cap, then returns `paused_by_timeout`.
@@ -379,6 +467,9 @@ fn message_view(m: &Message) -> Result<MessageView, ApiError> {
             .created_at
             .format(&Rfc3339)
             .map_err(|e| ApiError::Internal(e.to_string()))?,
+        msg_type: m.msg_type.as_str().to_string(),
+        severity: m.severity.map(|s| s.as_str().to_string()),
+        question_text: m.question_text.clone(),
     })
 }
 

@@ -1,4 +1,4 @@
-use chatbotchat_core::message::MessageType;
+use chatbotchat_core::message::{MessageType, Severity};
 use chatbotchat_core::participant::Participant;
 use chatbotchat_core::room::{Room, RoomConfig, RoomState};
 use chatbotchat_core::storage::Storage;
@@ -258,6 +258,8 @@ async fn sentinel_rows_do_not_count_toward_the_cap() {
             "consulting my user",
             now,
             MessageType::WaitingUser,
+            None,
+            None,
         )
         .await
         .expect("create sentinel");
@@ -290,6 +292,8 @@ async fn msg_type_survives_the_write_read_round_trip() {
             "consulting my user",
             now,
             MessageType::WaitingUser,
+            None,
+            None,
         )
         .await
         .expect("create sentinel");
@@ -312,6 +316,44 @@ async fn msg_type_survives_the_write_read_round_trip() {
 }
 
 #[tokio::test]
+async fn sentinel_severity_and_question_survive_round_trip() {
+    let storage = fresh_storage().await;
+    let room = sample_room();
+    storage.create_room(&room).await.expect("create_room ok");
+    let now = OffsetDateTime::now_utc();
+
+    // A `waiting_user` sentinel carries a severity and the question the agent is
+    // asking its user. Both must survive the storage round-trip alongside the
+    // type — the question lives in `question_text`, not `body` (body stays empty
+    // for a pure sentinel).
+    storage
+        .create_message_typed(
+            &room.id,
+            "sender",
+            None,
+            "",
+            now,
+            MessageType::WaitingUser,
+            Some(Severity::High),
+            Some("should I merge to production?"),
+        )
+        .await
+        .expect("create sentinel");
+
+    let recent = storage
+        .recent_messages(&room.id, 10)
+        .await
+        .expect("recent ok");
+    let m = recent.first().expect("one row");
+    assert_eq!(m.severity, Some(Severity::High), "severity must round-trip");
+    assert_eq!(
+        m.question_text.as_deref(),
+        Some("should I merge to production?"),
+        "question_text must round-trip"
+    );
+}
+
+#[tokio::test]
 async fn create_message_capped_gate_ignores_sentinel_rows() {
     let storage = fresh_storage().await;
     let room = sample_room();
@@ -329,6 +371,8 @@ async fn create_message_capped_gate_ignores_sentinel_rows() {
             "consulting my user",
             now,
             MessageType::WaitingUser,
+            None,
+            None,
         )
         .await
         .expect("create sentinel");
@@ -485,16 +529,22 @@ async fn consecutive_msg_count_resets_at_a_human_msg() {
 }
 
 #[tokio::test]
-async fn consecutive_msg_count_excludes_sentinels() {
+async fn waiting_user_sentinel_resets_the_consecutive_msg_run() {
     let storage = fresh_storage().await;
     let room = sample_room();
     storage.create_room(&room).await.expect("create_room ok");
     let now = OffsetDateTime::now_utc();
     const CAP: i64 = 10;
 
-    // An autonomous turn, then a sentinel interleaved, then another turn. The
-    // sentinel (`type != 'msg'`) neither counts toward the run nor resets it —
-    // only `msg` rows do, in lockstep with the cap seams.
+    // An autonomous turn, then a `waiting_user` sentinel, then another turn.
+    // Consulting the user pulls a human into the loop, so it BREAKS the
+    // consecutive-autonomous run exactly like a `--human` fold does: the run at
+    // m2 is 1 (just m2), not 2. m1 sits before the reset boundary.
+    //
+    // (Contract change in slice 5a: pre-activation, the sentinel was transparent
+    // to the run and this scenario counted 2. Activating the documented
+    // extension point in `consecutive_msg_count` makes `waiting_user` a reset
+    // boundary — see `crates/chatbotchat-core/src/storage.rs`.)
     storage
         .create_message_capped(&room.id, "a", None, "m1", now, false, CAP)
         .await
@@ -505,9 +555,11 @@ async fn consecutive_msg_count_excludes_sentinels() {
             &room.id,
             "a",
             None,
-            "consulting my user",
+            "",
             now,
             MessageType::WaitingUser,
+            Some(Severity::High),
+            Some("should I merge?"),
         )
         .await
         .expect("create sentinel");
@@ -522,8 +574,53 @@ async fn consecutive_msg_count_excludes_sentinels() {
             .consecutive_msg_count(&room.id, m2.seq)
             .await
             .expect("count ok"),
+        1,
+        "a waiting_user sentinel resets the autonomous-turn run"
+    );
+}
+
+#[tokio::test]
+async fn waiting_user_sentinel_is_not_itself_counted_as_a_turn() {
+    let storage = fresh_storage().await;
+    let room = sample_room();
+    storage.create_room(&room).await.expect("create_room ok");
+    let now = OffsetDateTime::now_utc();
+    const CAP: i64 = 10;
+
+    // A sentinel followed by two autonomous turns. The sentinel resets the run,
+    // and the two `msg` rows after it count — but the sentinel row itself is
+    // never tallied as a turn (the count seam stays `type='msg'`). Run at m2 = 2.
+    storage
+        .create_message_typed(
+            &room.id,
+            "a",
+            None,
+            "",
+            now,
+            MessageType::WaitingUser,
+            Some(Severity::Low),
+            Some("hold on"),
+        )
+        .await
+        .expect("create sentinel");
+    storage
+        .create_message_capped(&room.id, "a", None, "m1", now, false, CAP)
+        .await
+        .expect("ok")
+        .expect("under cap");
+    let m2 = storage
+        .create_message_capped(&room.id, "a", None, "m2", now, false, CAP)
+        .await
+        .expect("ok")
+        .expect("under cap");
+
+    assert_eq!(
+        storage
+            .consecutive_msg_count(&room.id, m2.seq)
+            .await
+            .expect("count ok"),
         2,
-        "the sentinel between m1 and m2 must not count toward the run"
+        "the sentinel resets but is not itself counted; only the two msgs after it"
     );
 }
 

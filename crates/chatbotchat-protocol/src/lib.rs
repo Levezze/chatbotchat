@@ -29,8 +29,15 @@ pub struct JoinRoomRequest {
     pub cwd: String,
 }
 
+fn default_msg_type() -> String {
+    "msg".to_string()
+}
+
 /// Wire view of a single message. `from`/`to` are participant handles; `to` is
-/// `None` for a broadcast to all. `seq` is the monotonic ordering key.
+/// `None` for a broadcast to all. `seq` is the monotonic ordering key. `msg_type`
+/// (wire field `type`) distinguishes a conversation turn (`msg`) from a sentinel;
+/// `severity` and `question_text` are populated only on a `waiting_user` sentinel
+/// (the question the other agent is asking its user) and `null` otherwise.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageView {
     pub seq: i64,
@@ -38,6 +45,12 @@ pub struct MessageView {
     pub to: Option<String>,
     pub body: String,
     pub created_at: String,
+    #[serde(rename = "type", default = "default_msg_type")]
+    pub msg_type: String,
+    #[serde(default)]
+    pub severity: Option<String>,
+    #[serde(default)]
+    pub question_text: Option<String>,
 }
 
 /// Request body for `POST /rooms/:id/messages`. Identity is the
@@ -61,6 +74,32 @@ pub struct SendMessageRequest {
 /// Response body for `POST /rooms/:id/messages`: the assigned monotonic `seq`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendMessageResponse {
+    pub seq: i64,
+}
+
+/// Request body for `POST /rooms/:id/signals`. Identity is the `(repo, model,
+/// cwd)` tuple, same as send; the caller must already be a participant. A signal
+/// is an out-of-band sentinel, not a conversation turn — it does not count toward
+/// the caps and is always a broadcast. `signal_type` is the wire field `type`:
+/// only `waiting_user` and `fold` are accepted here (`blocker_real_work`/`close`
+/// land in the lifecycle slice). `severity` (`low|med|high`) and `question_text`
+/// are required for `waiting_user` and absent for `fold`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalRequest {
+    pub repo: String,
+    pub model: String,
+    pub cwd: String,
+    #[serde(rename = "type")]
+    pub signal_type: String,
+    #[serde(default)]
+    pub severity: Option<String>,
+    #[serde(default)]
+    pub question_text: Option<String>,
+}
+
+/// Response body for `POST /rooms/:id/signals`: the assigned monotonic `seq`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalResponse {
     pub seq: i64,
 }
 
@@ -135,5 +174,76 @@ impl ErrorEnvelope {
         ErrorEnvelope {
             error: message.into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A `waiting_user` sentinel view serializes the type under the wire key
+    /// `type` and carries its severity + question, and survives a full
+    /// serialize → deserialize round-trip unchanged.
+    #[test]
+    fn message_view_sentinel_round_trips() {
+        let view = MessageView {
+            seq: 7,
+            from: "repo-a-opus47-0496".into(),
+            to: None,
+            body: String::new(),
+            created_at: "2026-05-30T01:00:00Z".into(),
+            msg_type: "waiting_user".into(),
+            severity: Some("high".into()),
+            question_text: Some("should I merge?".into()),
+        };
+
+        let value = serde_json::to_value(&view).expect("serialize");
+        assert_eq!(value["type"], json!("waiting_user"), "wire key is `type`");
+        assert_eq!(value["severity"], json!("high"));
+        assert_eq!(value["question_text"], json!("should I merge?"));
+        assert!(
+            value.get("msg_type").is_none(),
+            "the Rust field name must not leak onto the wire"
+        );
+
+        let back: MessageView = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(back.msg_type, "waiting_user");
+        assert_eq!(back.severity.as_deref(), Some("high"));
+        assert_eq!(back.question_text.as_deref(), Some("should I merge?"));
+    }
+
+    /// A plain `msg` view emits `type: "msg"` with null sentinel fields, and a
+    /// legacy payload that omits the three new fields entirely deserializes to a
+    /// `msg` with no severity/question (forward-compat defaults).
+    #[test]
+    fn message_view_plain_msg_and_legacy_payload_default_to_msg() {
+        let view = MessageView {
+            seq: 1,
+            from: "repo-a-opus47-0496".into(),
+            to: Some("repo-b-sonnet46-1234".into()),
+            body: "hello".into(),
+            created_at: "2026-05-30T01:00:00Z".into(),
+            msg_type: "msg".into(),
+            severity: None,
+            question_text: None,
+        };
+        let value = serde_json::to_value(&view).expect("serialize");
+        assert_eq!(value["type"], json!("msg"));
+        assert_eq!(value["severity"], json!(null));
+        assert_eq!(value["question_text"], json!(null));
+
+        // Legacy shape (pre-5a): no type/severity/question_text keys.
+        let legacy = json!({
+            "seq": 2,
+            "from": "repo-a-opus47-0496",
+            "to": null,
+            "body": "old client message",
+            "created_at": "2026-05-30T01:00:00Z"
+        });
+        let parsed: MessageView = serde_json::from_value(legacy).expect("deserialize legacy");
+        assert_eq!(parsed.msg_type, "msg", "missing type defaults to msg");
+        assert_eq!(parsed.severity, None);
+        assert_eq!(parsed.question_text, None);
     }
 }

@@ -220,6 +220,217 @@ async fn wait(
     (status, body)
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn signal(
+    app: &axum::Router,
+    room_id: &str,
+    repo: &str,
+    model: &str,
+    cwd: &str,
+    signal_type: &str,
+    severity: Option<&str>,
+    question_text: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut payload = json!({ "repo": repo, "model": model, "cwd": cwd, "type": signal_type });
+    if let Some(s) = severity {
+        payload["severity"] = json!(s);
+    }
+    if let Some(q) = question_text {
+        payload["question_text"] = json!(q);
+    }
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/rooms/{room_id}/signals"))
+        .header("content-type", "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = body_json(resp.into_body()).await;
+    (status, body)
+}
+
+#[tokio::test]
+async fn signal_posts_a_waiting_user_sentinel_uncapped() {
+    // A room capped at a single `msg`. A participant posts a `waiting_user`
+    // sentinel, then a real `msg`. The sentinel must NOT consume the lone cap
+    // slot — signals are uncapped — so the real msg is still admitted.
+    let app = test_router().await;
+    let room_id = open_with_caps(&app, "signal uncapped", Some(1), None).await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+
+    let (status, body) = signal(
+        &app,
+        &room_id,
+        "repo-a",
+        "opus47",
+        "/work/a",
+        "waiting_user",
+        Some("high"),
+        Some("should I merge to production?"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "signal should be accepted; got {body}"
+    );
+    assert!(
+        body["seq"].as_i64().is_some(),
+        "signal returns the assigned seq; got {body}"
+    );
+
+    // The single cap slot is still free: a real msg is admitted, proving the
+    // sentinel did not count toward the cap.
+    let (send_status, _) = send(
+        &app,
+        &room_id,
+        "repo-a",
+        "opus47",
+        "/work/a",
+        None,
+        "real turn",
+    )
+    .await;
+    assert_eq!(
+        send_status,
+        StatusCode::CREATED,
+        "a sentinel must not consume cap budget"
+    );
+}
+
+#[tokio::test]
+async fn wait_delivers_a_waiting_user_sentinel_with_its_question() {
+    // A signals that it is consulting its user; B's wait must surface the sentinel
+    // once, carrying the type, severity, and the question — so B's UX can show
+    // "the other agent is asking its user: …".
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "sentinel delivery").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    join(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+
+    let (sig_status, _) = signal(
+        &app,
+        &room_id,
+        "repo-a",
+        "opus47",
+        "/work/a",
+        "waiting_user",
+        Some("high"),
+        Some("should I merge to production?"),
+    )
+    .await;
+    assert_eq!(sig_status, StatusCode::CREATED);
+
+    let (status, body) = wait(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+    assert_eq!(status, StatusCode::OK);
+    let m = &body["message"];
+    assert_eq!(m["type"].as_str(), Some("waiting_user"), "got {body}");
+    assert_eq!(m["severity"].as_str(), Some("high"), "got {body}");
+    assert_eq!(
+        m["question_text"].as_str(),
+        Some("should I merge to production?"),
+        "got {body}"
+    );
+}
+
+#[tokio::test]
+async fn signal_validation_rejects_malformed_sentinels() {
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "signal validation").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    let sig = |ty: &'static str, sev: Option<&'static str>, q: Option<&'static str>| {
+        let app = app.clone();
+        let room_id = room_id.clone();
+        async move { signal(&app, &room_id, "repo-a", "opus47", "/work/a", ty, sev, q).await }
+    };
+
+    // waiting_user requires both severity and question_text.
+    let (s, _) = sig("waiting_user", None, Some("q?")).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "waiting_user needs a severity");
+    let (s, _) = sig("waiting_user", Some("high"), None).await;
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "waiting_user needs a question_text"
+    );
+    let (s, _) = sig("waiting_user", Some("urgent"), Some("q?")).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "severity must be low|med|high");
+
+    // fold carries neither severity nor question_text.
+    let (s, _) = sig("fold", Some("high"), None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "fold takes no severity");
+    let (s, _) = sig("fold", None, Some("q?")).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "fold takes no question_text");
+
+    // The conversation `msg` and the lifecycle types are not signals.
+    for ty in ["msg", "blocker_real_work", "close", "bogus"] {
+        let (s, _) = sig(ty, Some("high"), Some("q?")).await;
+        assert_eq!(
+            s,
+            StatusCode::BAD_REQUEST,
+            "{ty} is not a valid signal type"
+        );
+    }
+
+    // fold rejects an *empty-string* question too — "carries neither" is about
+    // presence, not non-emptiness; an empty string must not slip through and
+    // persist a non-NULL question_text on a fold row.
+    let (s, _) = sig("fold", None, Some("")).await;
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "fold must reject question_text even when empty"
+    );
+
+    // The happy paths still work: waiting_user with both, fold with neither.
+    let (s, _) = sig("waiting_user", Some("high"), Some("q?")).await;
+    assert_eq!(
+        s,
+        StatusCode::CREATED,
+        "a complete waiting_user is accepted"
+    );
+    let (s, _) = sig("fold", None, None).await;
+    assert_eq!(s, StatusCode::CREATED, "a bare fold is accepted");
+}
+
+#[tokio::test]
+async fn signal_to_missing_room_is_404() {
+    let app = test_router().await;
+    let (status, _) = signal(
+        &app,
+        "nope-20260528-1500",
+        "repo-a",
+        "opus47",
+        "/work/a",
+        "waiting_user",
+        Some("high"),
+        Some("q?"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn signal_from_non_participant_is_rejected() {
+    // The room exists but the caller never joined — signalling must be refused,
+    // mirroring the send path. (Identity is the (repo, model, cwd) tuple.)
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "signal non participant").await;
+    let (status, _) = signal(
+        &app,
+        &room_id,
+        "repo-ghost",
+        "opus47",
+        "/work/ghost",
+        "waiting_user",
+        Some("high"),
+        Some("q?"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn send_then_wait_round_trips_a_message() {
     let app = test_router().await;
