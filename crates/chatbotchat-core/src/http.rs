@@ -431,28 +431,18 @@ async fn wait_room(
     // Polling backoff (slice 5b). If the counterpart is parked behind an active
     // `waiting_user` sentinel, shorten this long-poll to the severity-scaled,
     // time-decayed backoff and hand that hint back so the LLM consumer — which
-    // has no `sleep()` of its own — stays quiet. The active-sentinel check is the
-    // latest row from anyone but the caller (two-agent v1); a later `msg` from
-    // that sender self-supersedes the pause, so only `WaitingUser` counts. A
-    // corrupt sentinel missing its severity simply yields no backoff (never a
-    // panic on the wait path).
-    let retry_after = match state
-        .storage
-        .latest_message_from_other(&id, &caller.handle)
-        .await?
-    {
-        Some(m) if m.msg_type == MessageType::WaitingUser => m.severity.map(|sev| {
-            let elapsed = (OffsetDateTime::now_utc() - m.created_at).whole_seconds();
-            backoff_secs(sev, elapsed)
-        }),
-        _ => None,
-    };
-
-    // `wait_cap` is the absolute ceiling; an active sentinel only ever *shortens*
-    // it. In prod (wait_cap = 600s ≥ backoff ≤ 60s) the min is always the
-    // backoff; the min exists so the `with_wait_cap` test seam keeps parking
-    // tests fast (a millisecond cap wins).
-    let effective_cap = match retry_after {
+    // has no `sleep()` of its own — stays quiet.
+    //
+    // The state is read twice on purpose. The park duration can only be decided
+    // up front, so the *cap* uses the pre-park reading. But a pause can clear (or
+    // a new one can begin) while we are parked, so the *response hint* is
+    // re-derived from the post-wake state — otherwise a sentinel delivered on
+    // wake would lose its hint, or a msg that cleared the pause would carry a
+    // stale one. `wait_cap` is the absolute ceiling; a sentinel only ever
+    // shortens it (in prod wait_cap = 600s ≥ backoff ≤ 60s, so the min is always
+    // the backoff; the min exists so the `with_wait_cap` test seam keeps parking
+    // tests fast).
+    let effective_cap = match active_sentinel_backoff(&state.storage, &id, &caller.handle).await? {
         Some(secs) => state.wait_cap.min(Duration::from_secs(secs as u64)),
         None => state.wait_cap,
     };
@@ -465,6 +455,8 @@ async fn wait_room(
         effective_cap,
     )
     .await?;
+
+    let retry_after = active_sentinel_backoff(&state.storage, &id, &caller.handle).await?;
 
     Ok(Json(match outcome {
         WaitOutcome::Message(m) => {
@@ -486,6 +478,28 @@ async fn wait_room(
             retry_after,
         },
     }))
+}
+
+/// The polling backoff (seconds) implied by the counterpart's *current* state,
+/// or `None` when no pause is active. Reads the latest row in the room from
+/// anyone but `handle` (two-agent v1) of *any* type: only a `waiting_user`
+/// counts, so a later `msg` from that sender self-supersedes the pause and
+/// clears the backoff. A corrupt sentinel missing its severity yields `None`
+/// rather than panicking the wait path.
+async fn active_sentinel_backoff(
+    storage: &Storage,
+    room_id: &str,
+    handle: &str,
+) -> Result<Option<u32>, StorageError> {
+    Ok(
+        match storage.latest_message_from_other(room_id, handle).await? {
+            Some(m) if m.msg_type == MessageType::WaitingUser => m.severity.map(|sev| {
+                let elapsed = (OffsetDateTime::now_utc() - m.created_at).whole_seconds();
+                backoff_secs(sev, elapsed)
+            }),
+            _ => None,
+        },
+    )
 }
 
 fn message_view(m: &Message) -> Result<MessageView, ApiError> {

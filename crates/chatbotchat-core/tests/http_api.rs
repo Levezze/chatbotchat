@@ -437,6 +437,112 @@ async fn wait_without_an_active_sentinel_omits_retry_after() {
 }
 
 #[tokio::test]
+async fn a_wait_parked_when_a_sentinel_arrives_gains_the_backoff_hint() {
+    // Live hot path: B is already long-polling an empty room when A pauses to
+    // consult its user. B wakes on the sentinel — and that delivery must carry
+    // the backoff hint even though no sentinel existed when B began to park. The
+    // hint reflects the state at wake, not at park-start.
+    let app = test_router_with_cap(std::time::Duration::from_secs(2)).await;
+    let room_id = open_room_id(&app, "parked arrival").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    join(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+
+    // B parks first — nothing to read yet.
+    let waiter = {
+        let app = app.clone();
+        let room_id = room_id.clone();
+        tokio::spawn(async move { wait(&app, &room_id, "repo-b", "sonnet46", "/work/b").await })
+    };
+
+    // Let B reach the park (past its pre-park state read), then A signals; the
+    // hub wakes B and delivers the sentinel.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    signal(
+        &app,
+        &room_id,
+        "repo-a",
+        "opus47",
+        "/work/a",
+        "waiting_user",
+        Some("high"),
+        Some("merge?"),
+    )
+    .await;
+
+    let (status, body) = waiter.await.expect("waiter task");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["message"]["type"].as_str(),
+        Some("waiting_user"),
+        "got {body}"
+    );
+    assert_eq!(
+        body["retry_after"].as_u64(),
+        Some(45),
+        "a sentinel delivered on wake must carry the hint, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_wait_parked_when_the_pause_clears_drops_the_stale_hint() {
+    // B has already consumed A's sentinel and re-parks while the pause is still
+    // active (so the long-poll is shortened). A then resumes with a normal turn,
+    // clearing the pause mid-park. B wakes on that msg — and it must NOT carry a
+    // stale backoff hint, since the counterpart is no longer paused.
+    let app = test_router_with_cap(std::time::Duration::from_secs(2)).await;
+    let room_id = open_room_id(&app, "parked clear").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    join(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+
+    // A pauses; B consumes the sentinel (cursor advances past it), pause active.
+    signal(
+        &app,
+        &room_id,
+        "repo-a",
+        "opus47",
+        "/work/a",
+        "waiting_user",
+        Some("high"),
+        Some("merge?"),
+    )
+    .await;
+    let (_, first) = wait(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+    assert_eq!(first["message"]["type"].as_str(), Some("waiting_user"));
+
+    // B re-parks: nothing new to read, pause still active so the cap shortens.
+    let waiter = {
+        let app = app.clone();
+        let room_id = room_id.clone();
+        tokio::spawn(async move { wait(&app, &room_id, "repo-b", "sonnet46", "/work/b").await })
+    };
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // A resumes with a normal turn — the later msg self-supersedes the pause.
+    send(
+        &app,
+        &room_id,
+        "repo-a",
+        "opus47",
+        "/work/a",
+        None,
+        "back, resuming",
+    )
+    .await;
+
+    let (status, body) = waiter.await.expect("waiter task");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["message"]["body"].as_str(),
+        Some("back, resuming"),
+        "got {body}"
+    );
+    assert!(
+        body.get("retry_after").is_none(),
+        "a pause cleared during the park must not leave a stale hint, got {body}"
+    );
+}
+
+#[tokio::test]
 async fn signal_validation_rejects_malformed_sentinels() {
     let app = test_router().await;
     let room_id = open_room_id(&app, "signal validation").await;
