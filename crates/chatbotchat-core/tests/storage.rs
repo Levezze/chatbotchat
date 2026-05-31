@@ -1,8 +1,9 @@
+use chatbotchat_core::event::EventKind;
 use chatbotchat_core::message::{MessageType, Severity};
 use chatbotchat_core::participant::Participant;
 use chatbotchat_core::room::{Room, RoomConfig, RoomState};
 use chatbotchat_core::storage::Storage;
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 
 async fn fresh_storage() -> Storage {
     Storage::connect("sqlite::memory:")
@@ -18,6 +19,7 @@ fn sample_room() -> Room {
         started_at: now,
         last_activity_at: now,
         state: RoomState::Active,
+        state_changed_at: now,
         config: RoomConfig::default(),
         prev_room_id: None,
     }
@@ -757,5 +759,180 @@ async fn create_message_capped_enforces_the_cap_atomically_and_honors_the_config
             .expect("count ok"),
         CAP,
         "the refused message must not be persisted"
+    );
+}
+
+// --- lifecycle storage seams (slice 6a) ---
+
+fn room_with_id(id: &str) -> Room {
+    let now = OffsetDateTime::now_utc();
+    Room {
+        id: id.into(),
+        subject: "lifecycle".into(),
+        started_at: now,
+        last_activity_at: now,
+        state: RoomState::Active,
+        state_changed_at: now,
+        config: RoomConfig::default(),
+        prev_room_id: None,
+    }
+}
+
+#[tokio::test]
+async fn update_room_state_changes_state_and_records_a_transition_event() {
+    let storage = fresh_storage().await;
+    let room = room_with_id("life-1-20260530-0000");
+    storage.create_room(&room).await.expect("create_room ok");
+
+    let now = OffsetDateTime::now_utc();
+    let changed = storage
+        .update_room_state(&room.id, RoomState::Active, RoomState::Closed, now, None)
+        .await
+        .expect("update ok");
+    assert!(changed, "precondition matched, so the write applies");
+
+    let fetched = storage
+        .get_room(&room.id)
+        .await
+        .expect("get ok")
+        .expect("exists");
+    assert_eq!(fetched.state, RoomState::Closed);
+    assert_eq!(
+        fetched.state_changed_at.unix_timestamp(),
+        now.unix_timestamp(),
+        "state_changed_at re-anchored on transition"
+    );
+
+    let events = storage.list_events(&room.id).await.expect("events ok");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, EventKind::Transition);
+    assert_eq!(events[0].from_state, Some(RoomState::Active));
+    assert_eq!(events[0].to_state, Some(RoomState::Closed));
+}
+
+#[tokio::test]
+async fn update_room_state_is_conditional_on_the_from_state() {
+    let storage = fresh_storage().await;
+    let room = room_with_id("life-2-20260530-0000"); // starts Active
+    storage.create_room(&room).await.expect("create_room ok");
+
+    let now = OffsetDateTime::now_utc();
+    // Precondition `Idle` does not match the actual `Active` state.
+    let changed = storage
+        .update_room_state(&room.id, RoomState::Idle, RoomState::Closed, now, None)
+        .await
+        .expect("update ok");
+    assert!(!changed, "stale precondition must not clobber the row");
+
+    let fetched = storage
+        .get_room(&room.id)
+        .await
+        .expect("get ok")
+        .expect("exists");
+    assert_eq!(fetched.state, RoomState::Active, "state unchanged");
+    assert!(
+        storage
+            .list_events(&room.id)
+            .await
+            .expect("events ok")
+            .is_empty(),
+        "no event written when the write did not apply"
+    );
+}
+
+#[tokio::test]
+async fn transition_into_archived_emits_an_archive_kind_event() {
+    let storage = fresh_storage().await;
+    let room = room_with_id("life-3-20260530-0000");
+    storage.create_room(&room).await.expect("create_room ok");
+
+    let now = OffsetDateTime::now_utc();
+    storage
+        .update_room_state(&room.id, RoomState::Active, RoomState::Closed, now, None)
+        .await
+        .expect("close ok");
+    storage
+        .update_room_state(&room.id, RoomState::Closed, RoomState::Archived, now, None)
+        .await
+        .expect("archive ok");
+
+    let events = storage.list_events(&room.id).await.expect("events ok");
+    assert_eq!(events.len(), 2, "one row per transition");
+    // The first is the close; the second (archive) carries the hook kind.
+    assert_eq!(events[0].kind, EventKind::Transition);
+    assert_eq!(events[1].kind, EventKind::Archive);
+    assert_eq!(events[1].to_state, Some(RoomState::Archived));
+}
+
+#[tokio::test]
+async fn touch_last_activity_updates_the_column() {
+    let storage = fresh_storage().await;
+    let room = room_with_id("life-4-20260530-0000");
+    storage.create_room(&room).await.expect("create_room ok");
+
+    let later = OffsetDateTime::now_utc() + Duration::hours(3);
+    storage
+        .touch_last_activity(&room.id, later)
+        .await
+        .expect("touch ok");
+
+    let fetched = storage
+        .get_room(&room.id)
+        .await
+        .expect("get ok")
+        .expect("exists");
+    assert_eq!(
+        fetched.last_activity_at.unix_timestamp(),
+        later.unix_timestamp()
+    );
+}
+
+#[tokio::test]
+async fn list_rooms_for_sweep_excludes_archived() {
+    let storage = fresh_storage().await;
+    let live = room_with_id("sweep-live-20260530-0000");
+    let dead = room_with_id("sweep-dead-20260530-0000");
+    storage.create_room(&live).await.expect("create live");
+    storage.create_room(&dead).await.expect("create dead");
+
+    let now = OffsetDateTime::now_utc();
+    storage
+        .update_room_state(&dead.id, RoomState::Active, RoomState::Archived, now, None)
+        .await
+        .expect("archive dead");
+
+    let rooms = storage.list_rooms_for_sweep().await.expect("sweep list ok");
+    let ids: Vec<&str> = rooms.iter().map(|r| r.id.as_str()).collect();
+    assert!(ids.contains(&live.id.as_str()), "live room is swept");
+    assert!(
+        !ids.contains(&dead.id.as_str()),
+        "archived room is excluded from the sweep"
+    );
+}
+
+#[tokio::test]
+async fn update_room_state_persists_the_detail_field() {
+    let storage = fresh_storage().await;
+    let room = room_with_id("life-5-20260530-0000");
+    storage.create_room(&room).await.expect("create_room ok");
+
+    let now = OffsetDateTime::now_utc();
+    storage
+        .update_room_state(
+            &room.id,
+            RoomState::Active,
+            RoomState::Paused,
+            now,
+            Some("went to do real work"),
+        )
+        .await
+        .expect("pause ok");
+
+    let events = storage.list_events(&room.id).await.expect("events ok");
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].detail.as_deref(),
+        Some("went to do real work"),
+        "the pause reason must survive the events round-trip"
     );
 }

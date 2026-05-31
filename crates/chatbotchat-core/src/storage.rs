@@ -1,3 +1,4 @@
+use crate::event::{Event, EventKind};
 use crate::message::{Message, MessageType, Severity};
 use crate::participant::Participant;
 use crate::room::{Room, RoomConfig, RoomState};
@@ -65,19 +66,21 @@ impl Storage {
     pub async fn create_room(&self, room: &Room) -> Result<(), StorageError> {
         let started_at = room.started_at.format(&Rfc3339).map_err(fmt_err)?;
         let last_activity_at = room.last_activity_at.format(&Rfc3339).map_err(fmt_err)?;
+        let state_changed_at = room.state_changed_at.format(&Rfc3339).map_err(fmt_err)?;
         let config = serde_json::to_string(&room.config)
             .map_err(|e| StorageError::Corrupt(e.to_string()))?;
 
         sqlx::query(
             "INSERT INTO rooms \
-             (id, subject, started_at, last_activity_at, state, config, prev_room_id) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+             (id, subject, started_at, last_activity_at, state, state_changed_at, config, prev_room_id) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&room.id)
         .bind(&room.subject)
         .bind(started_at)
         .bind(last_activity_at)
         .bind(room.state.as_str())
+        .bind(state_changed_at)
         .bind(config)
         .bind(&room.prev_room_id)
         .execute(&self.pool)
@@ -88,7 +91,7 @@ impl Storage {
 
     pub async fn get_room(&self, id: &str) -> Result<Option<Room>, StorageError> {
         let row = sqlx::query(
-            "SELECT id, subject, started_at, last_activity_at, state, config, prev_room_id \
+            "SELECT id, subject, started_at, last_activity_at, state, state_changed_at, config, prev_room_id \
              FROM rooms WHERE id = ?",
         )
         .bind(id)
@@ -527,6 +530,147 @@ impl Storage {
 
         rows.iter().map(row_to_participant).collect()
     }
+
+    /// Conditionally transition a room's state. The `UPDATE` is gated on the
+    /// room *currently* being in `from` (CAS-style, like `claim_next_unread`), so
+    /// a concurrent explicit transition (wake/close) cannot be clobbered by a
+    /// stale sweeper read: if the precondition no longer holds, zero rows change
+    /// and this returns `Ok(false)` having written nothing. On success it
+    /// re-anchors `state_changed_at` to `now` and appends one `events` row —
+    /// `archive`-kind when transitioning into `archived` (the `on_archive` hook),
+    /// `transition`-kind otherwise. `detail` is free text (e.g. a pause reason).
+    pub async fn update_room_state(
+        &self,
+        room_id: &str,
+        from: RoomState,
+        to: RoomState,
+        now: OffsetDateTime,
+        detail: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        let ts = now.format(&Rfc3339).map_err(fmt_err)?;
+
+        // The CAS update and its audit row are one transaction: if the event
+        // write fails, the state change rolls back, so a room never transitions
+        // without its `events` row (the on_archive / audit invariant — AC #8).
+        // The event insert runs on the transaction connection via
+        // `insert_event_row`, NOT `self.insert_event`: the latter borrows
+        // `self.pool` and would acquire a *second* connection, deadlocking the
+        // single-connection in-memory pool used by tests.
+        let mut tx = self.pool.begin().await?;
+
+        let result = sqlx::query(
+            "UPDATE rooms SET state = ?, state_changed_at = ? WHERE id = ? AND state = ?",
+        )
+        .bind(to.as_str())
+        .bind(&ts)
+        .bind(room_id)
+        .bind(from.as_str())
+        .execute(&mut *tx)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            // Precondition no longer holds: nothing changed, nothing logged.
+            tx.rollback().await?;
+            return Ok(false);
+        }
+
+        let kind = if to == RoomState::Archived {
+            EventKind::Archive
+        } else {
+            EventKind::Transition
+        };
+        insert_event_row(&mut *tx, room_id, kind, Some(from), Some(to), detail, &ts).await?;
+
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Append a row to the `events` log. Used by `update_room_state`; also
+    /// callable directly. The log is append-only — never updated or deleted.
+    pub async fn insert_event(
+        &self,
+        room_id: &str,
+        kind: EventKind,
+        from: Option<RoomState>,
+        to: Option<RoomState>,
+        detail: Option<&str>,
+        at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        let at = at.format(&Rfc3339).map_err(fmt_err)?;
+        insert_event_row(&self.pool, room_id, kind, from, to, detail, &at).await
+    }
+
+    /// All `events` for a room, oldest first.
+    pub async fn list_events(&self, room_id: &str) -> Result<Vec<Event>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, room_id, kind, from_state, to_state, detail, at \
+             FROM events WHERE room_id = ? ORDER BY id",
+        )
+        .bind(room_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.iter().map(row_to_event).collect()
+    }
+
+    /// Mark a room as active *now* by bumping `last_activity_at`. Drives the
+    /// sweeper's idle/stale timing; does not touch `state`.
+    pub async fn touch_last_activity(
+        &self,
+        room_id: &str,
+        now: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        let now = now.format(&Rfc3339).map_err(fmt_err)?;
+        sqlx::query("UPDATE rooms SET last_activity_at = ? WHERE id = ?")
+            .bind(now)
+            .bind(room_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Every non-terminal room, for the hourly sweep. `archived` is terminal and
+    /// excluded so the sweep cost stays proportional to live rooms.
+    pub async fn list_rooms_for_sweep(&self) -> Result<Vec<Room>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT id, subject, started_at, last_activity_at, state, state_changed_at, config, prev_room_id \
+             FROM rooms WHERE state != 'archived'",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.iter().map(row_to_room).collect()
+    }
+}
+
+/// Insert one `events` row using any sqlx executor — the pool (direct
+/// `insert_event`) or a transaction connection (`update_room_state`, which needs
+/// the row written inside its tx). `at` is pre-formatted RFC3339.
+async fn insert_event_row<'e, E>(
+    executor: E,
+    room_id: &str,
+    kind: EventKind,
+    from: Option<RoomState>,
+    to: Option<RoomState>,
+    detail: Option<&str>,
+    at: &str,
+) -> Result<(), StorageError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    sqlx::query(
+        "INSERT INTO events (room_id, kind, from_state, to_state, detail, at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(room_id)
+    .bind(kind.as_str())
+    .bind(from.map(|s| s.as_str()))
+    .bind(to.map(|s| s.as_str()))
+    .bind(detail)
+    .bind(at)
+    .execute(executor)
+    .await?;
+    Ok(())
 }
 
 /// True for SQLite URLs that map to a private in-memory database.
@@ -597,6 +741,28 @@ fn row_to_message(row: &sqlx::sqlite::SqliteRow) -> Result<Message, StorageError
     })
 }
 
+fn parse_state_opt(s: Option<String>) -> Result<Option<RoomState>, StorageError> {
+    match s {
+        Some(s) => Ok(Some(parse_state(&s)?)),
+        None => Ok(None),
+    }
+}
+
+fn row_to_event(row: &sqlx::sqlite::SqliteRow) -> Result<Event, StorageError> {
+    let kind_str: String = row.try_get("kind")?;
+    let kind = EventKind::parse(&kind_str)
+        .ok_or_else(|| StorageError::Corrupt(format!("unknown event kind: {kind_str}")))?;
+    Ok(Event {
+        id: row.try_get("id")?,
+        room_id: row.try_get("room_id")?,
+        kind,
+        from_state: parse_state_opt(row.try_get("from_state")?)?,
+        to_state: parse_state_opt(row.try_get("to_state")?)?,
+        detail: row.try_get("detail")?,
+        at: parse_ts(&row.try_get::<String, _>("at")?)?,
+    })
+}
+
 fn row_to_room(row: &sqlx::sqlite::SqliteRow) -> Result<Room, StorageError> {
     let config_str: String = row.try_get("config")?;
     let config: RoomConfig = serde_json::from_str(&config_str)
@@ -608,7 +774,69 @@ fn row_to_room(row: &sqlx::sqlite::SqliteRow) -> Result<Room, StorageError> {
         started_at: parse_ts(&row.try_get::<String, _>("started_at")?)?,
         last_activity_at: parse_ts(&row.try_get::<String, _>("last_activity_at")?)?,
         state: parse_state(&row.try_get::<String, _>("state")?)?,
+        state_changed_at: parse_ts(&row.try_get::<String, _>("state_changed_at")?)?,
         config,
         prev_room_id: row.try_get("prev_room_id")?,
     })
+}
+
+#[cfg(test)]
+mod atomicity_tests {
+    use super::*;
+    use crate::room::{Room, RoomConfig};
+
+    async fn active_room(storage: &Storage, id: &str) {
+        let now = OffsetDateTime::now_utc();
+        let room = Room {
+            id: id.into(),
+            subject: "atomicity".into(),
+            started_at: now,
+            last_activity_at: now,
+            state: RoomState::Active,
+            state_changed_at: now,
+            config: RoomConfig::default(),
+            prev_room_id: None,
+        };
+        storage.create_room(&room).await.expect("create room");
+    }
+
+    // A state transition and its audit-log row must be atomic. If the events
+    // insert fails, the room state must NOT change — otherwise the room
+    // transitions with no audit/on_archive row, violating the invariant that
+    // every transition writes exactly one event (AC #8). We force the event
+    // write to fail by dropping the `events` table out from under the call,
+    // then assert the room state was rolled back. This is an in-module test
+    // because the fault injection needs the private pool; the assertion itself
+    // is pure external behavior (observable room state).
+    #[tokio::test]
+    async fn update_room_state_rolls_back_when_event_write_fails() {
+        let storage = Storage::connect("sqlite::memory:").await.expect("connect");
+        let id = "atom-1-20260531-0000";
+        active_room(&storage, id).await;
+
+        sqlx::query("DROP TABLE events")
+            .execute(&storage.pool)
+            .await
+            .expect("drop events to induce an insert failure");
+
+        let now = OffsetDateTime::now_utc();
+        let result = storage
+            .update_room_state(id, RoomState::Active, RoomState::Closed, now, None)
+            .await;
+        assert!(
+            result.is_err(),
+            "the event write failed, so the call must surface an error"
+        );
+
+        let room = storage
+            .get_room(id)
+            .await
+            .expect("get ok")
+            .expect("room exists");
+        assert_eq!(
+            room.state,
+            RoomState::Active,
+            "state must roll back when the audit row could not be written"
+        );
+    }
 }

@@ -55,6 +55,10 @@ pub struct Room {
     #[serde(with = "time::serde::rfc3339")]
     pub last_activity_at: OffsetDateTime,
     pub state: RoomState,
+    /// When the room last entered `state`. Anchors the `stale`/`closed` -> `archived`
+    /// window. Set to `started_at` at creation.
+    #[serde(with = "time::serde::rfc3339")]
+    pub state_changed_at: OffsetDateTime,
     pub config: RoomConfig,
     pub prev_room_id: Option<String>,
 }
