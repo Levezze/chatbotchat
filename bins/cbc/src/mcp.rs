@@ -91,6 +91,39 @@ pub struct WaitArgs {
     pub model: String,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CloseArgs {
+    #[schemars(description = "Room id to close")]
+    pub room_id: String,
+    #[schemars(
+        description = "Self-declared model name (your identity; e.g. opus47). repo and cwd are auto-detected from the server's working directory."
+    )]
+    pub model: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct PauseArgs {
+    #[schemars(description = "Room id to pause")]
+    pub room_id: String,
+    #[schemars(
+        description = "Self-declared model name (your identity; e.g. opus47). repo and cwd are auto-detected from the server's working directory."
+    )]
+    pub model: String,
+    #[schemars(description = "Optional free-text reason, recorded in the room's audit log")]
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct WakeArgs {
+    #[schemars(description = "Room id to wake back to active")]
+    pub room_id: String,
+    #[schemars(
+        description = "Self-declared model name (your identity; e.g. opus47). repo and cwd are auto-detected from the server's working directory."
+    )]
+    pub model: String,
+}
+
 #[derive(Clone)]
 pub struct CbcMcp {
     client: HttpClient,
@@ -196,6 +229,59 @@ impl CbcMcp {
             )
             .await
         {
+            Ok(resp) => json_or_err(&resp),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Explicitly close a room (the conversation is done). Identity is (repo, model, cwd) — repo and cwd auto-detected, you supply the model. You must have joined first. Non-idempotent: closing an already-closed room is a 409. Returns {state} as JSON"
+    )]
+    async fn cbc_close(
+        &self,
+        Parameters(CloseArgs { room_id, model }): Parameters<CloseArgs>,
+    ) -> String {
+        let repo = crate::context::detect_repo();
+        let cwd = crate::context::detect_cwd();
+        match self.client.close(&room_id, &repo, &model, &cwd).await {
+            Ok(resp) => json_or_err(&resp),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Pause a room (park it; only an explicit wake resumes it). Optional `reason` is recorded in the audit log. Identity is (repo, model, cwd) — repo and cwd auto-detected, you supply the model. You must have joined first. Non-idempotent: pausing an already-paused room is a 409. Returns {state} as JSON"
+    )]
+    async fn cbc_pause(
+        &self,
+        Parameters(PauseArgs {
+            room_id,
+            model,
+            reason,
+        }): Parameters<PauseArgs>,
+    ) -> String {
+        let repo = crate::context::detect_repo();
+        let cwd = crate::context::detect_cwd();
+        match self
+            .client
+            .pause(&room_id, &repo, &model, &cwd, reason.as_deref())
+            .await
+        {
+            Ok(resp) => json_or_err(&resp),
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
+
+    #[tool(
+        description = "Wake a paused (or idle) room back to active. Identity is (repo, model, cwd) — repo and cwd auto-detected, you supply the model. You must have joined first. Non-idempotent: waking an already-active room is a 409. Returns {state} as JSON"
+    )]
+    async fn cbc_wake(
+        &self,
+        Parameters(WakeArgs { room_id, model }): Parameters<WakeArgs>,
+    ) -> String {
+        let repo = crate::context::detect_repo();
+        let cwd = crate::context::detect_cwd();
+        match self.client.wake(&room_id, &repo, &model, &cwd).await {
             Ok(resp) => json_or_err(&resp),
             Err(e) => err_json(&e.to_string()),
         }

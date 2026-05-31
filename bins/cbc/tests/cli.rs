@@ -197,6 +197,59 @@ fn signal_then_wait_surfaces_the_question_over_cli() {
 }
 
 #[test]
+fn pause_wake_close_round_trip_over_cli() {
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "cli lifecycle");
+    join(&base, &room_id, "opus47");
+
+    // pause (with a reason) parks the room.
+    let paused = Command::cargo_bin("cbc")
+        .unwrap()
+        .args([
+            "pause",
+            &room_id,
+            "--model",
+            "opus47",
+            "--reason",
+            "stepping away",
+        ])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(paused.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("State: paused"),
+        "pause should report the paused state; got:\n{out}"
+    );
+
+    // wake brings it back to active.
+    let woken = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["wake", &room_id, "--model", "opus47"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(woken.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("State: active"),
+        "wake should report the active state; got:\n{out}"
+    );
+
+    // close ends it.
+    let closed = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["close", &room_id, "--model", "opus47"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(closed.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("State: closed"),
+        "close should report the closed state; got:\n{out}"
+    );
+}
+
+#[test]
 fn status_reports_open_room() {
     let base = spawn_daemon();
 

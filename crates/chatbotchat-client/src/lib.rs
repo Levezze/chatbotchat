@@ -47,6 +47,10 @@ impl HttpClient {
                 subject: subject.to_string(),
                 hard_cap,
                 soft_cap,
+                // No CLI/MCP surface for continuation rooms yet; the server
+                // accepts the link, the typed client will gain a param when the
+                // open-from-prior flow lands.
+                prev_room_id: None,
             })
             .send()
             .await?;
