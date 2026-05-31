@@ -117,6 +117,13 @@ pub struct WaitRequest {
 /// `{ "status": "paused_by_timeout" }`. `surface_to_user` is the soft-cap signal:
 /// `true` when this delivery is the (soft_cap − 1)th consecutive autonomous turn,
 /// telling the receiving agent to fold its user in before replying.
+/// `retry_after` (slice 5b) is the server-computed polling backoff in seconds:
+/// present (on either variant) only while the counterpart is parked behind an
+/// active `waiting_user` sentinel, telling the receiver how long it just backed
+/// off and roughly how long to stay quiet. `skip_serializing_if` keeps it *off
+/// the wire* — not `null` — when no sentinel is active, which is the contract.
+/// Untagged disambiguation is unaffected: `message`/`status` stay the keys that
+/// pick the variant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum WaitResponse {
@@ -124,9 +131,13 @@ pub enum WaitResponse {
         message: MessageView,
         #[serde(default)]
         surface_to_user: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after: Option<u32>,
     },
     Timeout {
         status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after: Option<u32>,
     },
 }
 
@@ -245,5 +256,100 @@ mod tests {
         assert_eq!(parsed.msg_type, "msg", "missing type defaults to msg");
         assert_eq!(parsed.severity, None);
         assert_eq!(parsed.question_text, None);
+    }
+
+    fn sample_view() -> MessageView {
+        MessageView {
+            seq: 3,
+            from: "repo-a-opus47-0496".into(),
+            to: None,
+            body: String::new(),
+            created_at: "2026-05-30T01:00:00Z".into(),
+            msg_type: "waiting_user".into(),
+            severity: Some("high".into()),
+            question_text: Some("merge?".into()),
+        }
+    }
+
+    /// `retry_after` rides on the `Message` variant when a sentinel is active,
+    /// and is *absent from the wire* (not `null`) when there is none — the
+    /// "omitted" contract needs `skip_serializing_if`, which a round-trip alone
+    /// would not catch. Untagged disambiguation still keys off `message`.
+    #[test]
+    fn wait_response_message_carries_optional_retry_after() {
+        let with = WaitResponse::Message {
+            message: sample_view(),
+            surface_to_user: false,
+            retry_after: Some(45),
+        };
+        let value = serde_json::to_value(&with).expect("serialize");
+        assert_eq!(value["retry_after"], json!(45));
+        let back: WaitResponse = serde_json::from_value(value).expect("deserialize");
+        assert!(matches!(
+            back,
+            WaitResponse::Message {
+                retry_after: Some(45),
+                ..
+            }
+        ));
+
+        let without = WaitResponse::Message {
+            message: sample_view(),
+            surface_to_user: false,
+            retry_after: None,
+        };
+        let text = serde_json::to_string(&without).expect("serialize");
+        assert!(
+            !text.contains("retry_after"),
+            "no sentinel ⇒ retry_after omitted, got: {text}"
+        );
+        let back: WaitResponse = serde_json::from_str(&text).expect("deserialize");
+        assert!(matches!(
+            back,
+            WaitResponse::Message {
+                retry_after: None,
+                ..
+            }
+        ));
+    }
+
+    /// `retry_after` also rides on the `Timeout` variant (a parked wait that
+    /// elapsed while a sentinel was active still hands back the backoff hint),
+    /// and is likewise omitted when absent. Untagged disambiguation keys off
+    /// `status`.
+    #[test]
+    fn wait_response_timeout_carries_optional_retry_after() {
+        let with = WaitResponse::Timeout {
+            status: "paused_by_timeout".into(),
+            retry_after: Some(60),
+        };
+        let value = serde_json::to_value(&with).expect("serialize");
+        assert_eq!(value["retry_after"], json!(60));
+        let back: WaitResponse = serde_json::from_value(value).expect("deserialize");
+        assert!(matches!(
+            back,
+            WaitResponse::Timeout {
+                retry_after: Some(60),
+                ..
+            }
+        ));
+
+        let without = WaitResponse::Timeout {
+            status: "paused_by_timeout".into(),
+            retry_after: None,
+        };
+        let text = serde_json::to_string(&without).expect("serialize");
+        assert!(
+            !text.contains("retry_after"),
+            "no sentinel ⇒ retry_after omitted, got: {text}"
+        );
+        let back: WaitResponse = serde_json::from_str(&text).expect("deserialize");
+        assert!(matches!(
+            back,
+            WaitResponse::Timeout {
+                retry_after: None,
+                ..
+            }
+        ));
     }
 }

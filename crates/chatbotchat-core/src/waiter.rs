@@ -2,7 +2,7 @@
 //! notifies it, and [`wait_for_message`] parks on it until a message addressed
 //! to the caller arrives or the server-side cap elapses.
 
-use crate::message::Message;
+use crate::message::{Message, Severity};
 use crate::storage::{Storage, StorageError};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -105,5 +105,86 @@ pub async fn wait_for_message(
             // Cap elapsed.
             Err(_elapsed) => return Ok(WaitOutcome::PausedByTimeout),
         }
+    }
+}
+
+/// Server-side polling backoff for a counterpart parked behind an active
+/// `waiting_user` sentinel (slice 5b). Returns the number of seconds the wait
+/// should park, given the sentinel's `severity` and how long it has been active
+/// (`elapsed_secs`, from the sentinel's `created_at` to now).
+///
+/// Per-state time-decay: a flat base for the first five minutes, then a
+/// compounding 1.5× step per full minute past the 5:00 mark, capped at 60s.
+/// `n = max(0, floor((elapsed − 300) / 60))`; `retry = min(60, round(base·1.5ⁿ))`.
+/// Bases: `low=10`, `med=20`, `high=45`. `high` is effectively a single step
+/// (45·1.5 > 60), and the re-signal that resets the clock measures decay from
+/// the latest sentinel's `created_at`.
+pub fn backoff_secs(severity: Severity, elapsed_secs: i64) -> u32 {
+    let base: f64 = match severity {
+        Severity::Low => 10.0,
+        Severity::Med => 20.0,
+        Severity::High => 45.0,
+    };
+    // Full minutes past the 5:00 mark, floored at 0 (no decay in the first 5 min).
+    let n = (elapsed_secs - 300).max(0) / 60;
+    let raw = base * 1.5f64.powi(n as i32);
+    // `f64::round` is half-up for positives; the float→u32 cast saturates, so a
+    // huge `n` lands on `u32::MAX` and the `.min(60)` cap still holds.
+    (raw.round() as u32).min(60)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bases_apply_before_the_five_minute_mark() {
+        // n = 0 anywhere in [0, 300): each severity sits on its base.
+        assert_eq!(backoff_secs(Severity::Low, 0), 10);
+        assert_eq!(backoff_secs(Severity::Med, 0), 20);
+        assert_eq!(backoff_secs(Severity::High, 0), 45);
+        assert_eq!(backoff_secs(Severity::Low, 299), 10);
+    }
+
+    #[test]
+    fn exactly_five_minutes_is_still_base() {
+        // 300s ⇒ n = floor(0/60) = 0. The decay starts strictly after 5:00.
+        assert_eq!(backoff_secs(Severity::Low, 300), 10);
+        assert_eq!(backoff_secs(Severity::Med, 300), 20);
+        assert_eq!(backoff_secs(Severity::High, 300), 45);
+        // Still n = 0 at 359s (< one full minute past the mark).
+        assert_eq!(backoff_secs(Severity::Low, 359), 10);
+    }
+
+    #[test]
+    fn six_minutes_is_one_decay_step() {
+        // 360s ⇒ n = 1, one compounding 1.5× step.
+        assert_eq!(backoff_secs(Severity::Low, 360), 15); // 10 × 1.5
+        assert_eq!(backoff_secs(Severity::Med, 360), 30); // 20 × 1.5
+    }
+
+    #[test]
+    fn high_decays_in_a_single_step_to_the_cap() {
+        // 45 × 1.5 = 67.5 → round 68 → capped at 60.
+        assert_eq!(backoff_secs(Severity::High, 360), 60);
+    }
+
+    #[test]
+    fn rounds_half_up() {
+        // low, n = 2 (420s): 10 × 1.5² = 22.5 → 23.
+        assert_eq!(backoff_secs(Severity::Low, 420), 23);
+    }
+
+    #[test]
+    fn caps_at_sixty_for_long_pauses() {
+        // low keeps compounding until it crosses 60 and pins there.
+        assert_eq!(backoff_secs(Severity::Low, 600), 60); // 10 × 1.5⁵ = 75.9 → 76 → 60
+        assert_eq!(backoff_secs(Severity::Med, 6_000), 60);
+    }
+
+    #[test]
+    fn negative_elapsed_floors_to_base() {
+        // A future-dated sentinel (clock skew) must not underflow the step count.
+        assert_eq!(backoff_secs(Severity::High, -100), 45);
     }
 }

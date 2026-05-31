@@ -354,6 +354,104 @@ async fn sentinel_severity_and_question_survive_round_trip() {
 }
 
 #[tokio::test]
+async fn latest_message_from_other_returns_the_counterpart_active_sentinel() {
+    let storage = fresh_storage().await;
+    let room = sample_room();
+    storage.create_room(&room).await.expect("create_room ok");
+    let now = OffsetDateTime::now_utc();
+
+    // The counterpart ("sender") paused to consult its user. From "viewer"'s
+    // vantage the latest non-self row is that active sentinel — the backoff
+    // driver reads its type/severity/created_at.
+    storage
+        .create_message_typed(
+            &room.id,
+            "sender",
+            None,
+            "",
+            now,
+            MessageType::WaitingUser,
+            Some(Severity::High),
+            Some("merge?"),
+        )
+        .await
+        .expect("create sentinel");
+
+    let latest = storage
+        .latest_message_from_other(&room.id, "viewer")
+        .await
+        .expect("query ok")
+        .expect("a counterpart row exists");
+    assert_eq!(latest.msg_type, MessageType::WaitingUser);
+    assert_eq!(latest.severity, Some(Severity::High));
+    assert_eq!(latest.sender, "sender");
+}
+
+#[tokio::test]
+async fn latest_message_from_other_supersedes_a_cleared_sentinel() {
+    let storage = fresh_storage().await;
+    let room = sample_room();
+    storage.create_room(&room).await.expect("create_room ok");
+    let now = OffsetDateTime::now_utc();
+
+    // Sentinel, then the same sender resumes with a plain turn. The later `msg`
+    // self-supersedes the pause: latest-of-any-type returns the `msg`, so the
+    // handler's `type == WaitingUser` check sees no active sentinel. (Filtering
+    // to waiting_user rows in SQL would wrongly keep backing off forever.)
+    storage
+        .create_message_typed(
+            &room.id,
+            "sender",
+            None,
+            "",
+            now,
+            MessageType::WaitingUser,
+            Some(Severity::High),
+            Some("merge?"),
+        )
+        .await
+        .expect("create sentinel");
+    storage
+        .create_message(&room.id, "sender", None, "back, resuming", now)
+        .await
+        .expect("create msg");
+
+    let latest = storage
+        .latest_message_from_other(&room.id, "viewer")
+        .await
+        .expect("query ok")
+        .expect("a counterpart row exists");
+    assert_eq!(
+        latest.msg_type,
+        MessageType::Msg,
+        "the later plain turn must supersede the sentinel"
+    );
+}
+
+#[tokio::test]
+async fn latest_message_from_other_excludes_the_callers_own_rows() {
+    let storage = fresh_storage().await;
+    let room = sample_room();
+    storage.create_room(&room).await.expect("create_room ok");
+    let now = OffsetDateTime::now_utc();
+
+    // Only the viewer has spoken — there is no counterpart row, so no backoff.
+    storage
+        .create_message(&room.id, "viewer", None, "anyone there?", now)
+        .await
+        .expect("create msg");
+
+    let latest = storage
+        .latest_message_from_other(&room.id, "viewer")
+        .await
+        .expect("query ok");
+    assert!(
+        latest.is_none(),
+        "the caller's own messages never count as a counterpart pause"
+    );
+}
+
+#[tokio::test]
 async fn create_message_capped_gate_ignores_sentinel_rows() {
     let storage = fresh_storage().await;
     let room = sample_room();

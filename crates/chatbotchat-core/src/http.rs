@@ -4,7 +4,7 @@ use crate::message::{Message, MessageType, Severity};
 use crate::participant::Participant;
 use crate::room::{Room, RoomConfig, RoomState};
 use crate::storage::{Storage, StorageError};
-use crate::waiter::{wait_for_message, Hub, WaitOutcome};
+use crate::waiter::{backoff_secs, wait_for_message, Hub, WaitOutcome};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -428,14 +428,35 @@ async fn wait_room(
         .await?
         .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
 
+    // Polling backoff (slice 5b). If the counterpart is parked behind an active
+    // `waiting_user` sentinel, shorten this long-poll to the severity-scaled,
+    // time-decayed backoff and hand that hint back so the LLM consumer — which
+    // has no `sleep()` of its own — stays quiet.
+    //
+    // The state is read twice on purpose. The park duration can only be decided
+    // up front, so the *cap* uses the pre-park reading. But a pause can clear (or
+    // a new one can begin) while we are parked, so the *response hint* is
+    // re-derived from the post-wake state — otherwise a sentinel delivered on
+    // wake would lose its hint, or a msg that cleared the pause would carry a
+    // stale one. `wait_cap` is the absolute ceiling; a sentinel only ever
+    // shortens it (in prod wait_cap = 600s ≥ backoff ≤ 60s, so the min is always
+    // the backoff; the min exists so the `with_wait_cap` test seam keeps parking
+    // tests fast).
+    let effective_cap = match active_sentinel_backoff(&state.storage, &id, &caller.handle).await? {
+        Some(secs) => state.wait_cap.min(Duration::from_secs(secs as u64)),
+        None => state.wait_cap,
+    };
+
     let outcome = wait_for_message(
         &state.storage,
         &state.hub,
         &id,
         &caller.handle,
-        state.wait_cap,
+        effective_cap,
     )
     .await?;
+
+    let retry_after = active_sentinel_backoff(&state.storage, &id, &caller.handle).await?;
 
     Ok(Json(match outcome {
         WaitOutcome::Message(m) => {
@@ -449,12 +470,36 @@ async fn wait_room(
             WaitResponse::Message {
                 message: message_view(&m)?,
                 surface_to_user,
+                retry_after,
             }
         }
         WaitOutcome::PausedByTimeout => WaitResponse::Timeout {
             status: "paused_by_timeout".to_string(),
+            retry_after,
         },
     }))
+}
+
+/// The polling backoff (seconds) implied by the counterpart's *current* state,
+/// or `None` when no pause is active. Reads the latest row in the room from
+/// anyone but `handle` (two-agent v1) of *any* type: only a `waiting_user`
+/// counts, so a later `msg` from that sender self-supersedes the pause and
+/// clears the backoff. A corrupt sentinel missing its severity yields `None`
+/// rather than panicking the wait path.
+async fn active_sentinel_backoff(
+    storage: &Storage,
+    room_id: &str,
+    handle: &str,
+) -> Result<Option<u32>, StorageError> {
+    Ok(
+        match storage.latest_message_from_other(room_id, handle).await? {
+            Some(m) if m.msg_type == MessageType::WaitingUser => m.severity.map(|sev| {
+                let elapsed = (OffsetDateTime::now_utc() - m.created_at).whole_seconds();
+                backoff_secs(sev, elapsed)
+            }),
+            _ => None,
+        },
+    )
 }
 
 fn message_view(m: &Message) -> Result<MessageView, ApiError> {
