@@ -80,10 +80,12 @@ pub struct SendMessageResponse {
 /// Request body for `POST /rooms/:id/signals`. Identity is the `(repo, model,
 /// cwd)` tuple, same as send; the caller must already be a participant. A signal
 /// is an out-of-band sentinel, not a conversation turn — it does not count toward
-/// the caps and is always a broadcast. `signal_type` is the wire field `type`:
-/// only `waiting_user` and `fold` are accepted here (`blocker_real_work`/`close`
-/// land in the lifecycle slice). `severity` (`low|med|high`) and `question_text`
-/// are required for `waiting_user` and absent for `fold`.
+/// the caps and is always a broadcast. `signal_type` is the wire field `type`;
+/// the endpoint accepts `waiting_user`, `fold`, and `blocker_real_work` (the
+/// `close` lifecycle op has its own endpoint). Per-type fields: `waiting_user`
+/// requires `severity` (`low|med|high`) and a non-empty `question_text`; `fold`
+/// carries neither; `blocker_real_work` carries neither but takes an optional
+/// `reason` and drives the room to `paused`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignalRequest {
     pub repo: String,

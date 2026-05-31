@@ -598,8 +598,27 @@ async fn signal_validation_rejects_malformed_sentinels() {
     let (s, _) = sig("fold", None, Some("q?")).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "fold takes no question_text");
 
-    // The conversation `msg` and the lifecycle types are not signals.
-    for ty in ["msg", "blocker_real_work", "close", "bogus"] {
+    // blocker_real_work carries neither severity nor question_text (only an
+    // optional `reason`); presence of either is rejected on its own merits — it
+    // is a *valid* signal type, so these 400s are field-rule failures, not
+    // "unsupported type".
+    let (s, _) = sig("blocker_real_work", Some("high"), None).await;
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "blocker_real_work takes no severity"
+    );
+    let (s, _) = sig("blocker_real_work", None, Some("q?")).await;
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "blocker_real_work takes no question_text"
+    );
+
+    // The conversation `msg` and the `close` lifecycle op are not signals.
+    // (blocker_real_work IS a valid signal type as of 6b, so it is not in this
+    // list — it is exercised by its own field-rule and happy-path tests.)
+    for ty in ["msg", "close", "bogus"] {
         let (s, _) = sig(ty, Some("high"), Some("q?")).await;
         assert_eq!(
             s,
@@ -1789,5 +1808,53 @@ async fn a_parked_waiter_receives_the_blocker_reason_before_the_pause_gates_it()
         body["message"]["body"].as_str(),
         Some("merging the branch by hand"),
         "the blocker reason must reach the counterpart in the message body, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn blocker_real_work_on_a_stale_room_is_409_and_persists_nothing() {
+    // `Pause` is illegal from `stale` (locked table), and the legality is checked
+    // before any write — so the signal 409s and leaves neither a pause nor an
+    // orphaned blocker message behind. This pins the data-integrity invariant the
+    // validate-before-write ordering exists to protect.
+    let (app, storage) = test_router_returning_storage().await;
+    let now = OffsetDateTime::now_utc();
+    let room_id = open_room_id(&app, "stale blocker").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+
+    // Arrange `stale` directly (no 6b HTTP path reaches it — sweeper-driven, 6c).
+    storage
+        .update_room_state(&room_id, RoomState::Active, RoomState::Stale, now, None)
+        .await
+        .expect("arrange stale");
+
+    let (status, body) = signal_blocker(
+        &app,
+        &room_id,
+        "repo-a",
+        "opus47",
+        "/work/a",
+        Some("too late to block"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "blocker_real_work from stale is illegal, got {body}"
+    );
+
+    // No pause applied: the room is still stale.
+    assert_eq!(room_state(&app, &room_id).await, "stale");
+    // No orphaned sentinel: the room holds no messages (seq high-water still 0).
+    assert_eq!(
+        storage.current_seq(&room_id).await.expect("current_seq"),
+        0,
+        "an illegal blocker must not persist a message"
+    );
+    // And no pause transition was logged.
+    let events = storage.list_events(&room_id).await.expect("events");
+    assert!(
+        events.iter().all(|e| e.to_state != Some(RoomState::Paused)),
+        "no pause should be recorded for an illegal blocker, got {events:?}"
     );
 }

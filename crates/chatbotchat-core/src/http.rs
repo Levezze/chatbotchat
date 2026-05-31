@@ -277,7 +277,12 @@ async fn send_message(
         .ok_or(ApiError::NotFound)?;
 
     // Write guard: a paused/closed/archived room takes no new traffic. This is an
-    // additive pre-check, separate from `create_message_capped`'s atomic cap gate.
+    // additive pre-check, separate from `create_message_capped`'s atomic cap gate
+    // (a locked design constraint — the guard must not fold state into that SQL).
+    // Consequently it is a non-atomic pre-read: a `close`/`pause` landing between
+    // this check and the insert can admit one trailing message onto a room that
+    // just became non-writable. Accepted for v1 — the message is logged, no state
+    // is corrupted, and the next `wait` returns the terminal status.
     reject_unless_writable(&room)?;
 
     let sender = state
@@ -438,8 +443,8 @@ async fn signal_room(
     };
 
     // For `blocker_real_work`, confirm the `Pause` is legal from the room's
-    // current state *before* persisting the sentinel — a `stale`-room 409 must
-    // not leave an orphaned blocker message behind.
+    // current state — an illegal origin (e.g. `stale`) is a 409 with nothing
+    // written.
     let pause_to = if msg_type == MessageType::BlockerRealWork {
         Some(
             lifecycle::transition(room.state, LifecycleEvent::Pause).map_err(|_| {
@@ -451,6 +456,24 @@ async fn signal_room(
     };
 
     let now = OffsetDateTime::now_utc();
+
+    // Apply the pause *before* persisting the sentinel. The CAS is the real
+    // gate: if a concurrent transition moved the room off `room.state` between
+    // our read and here, it returns `false` and we 409 with nothing written —
+    // never a 201 on an unpaused room, and never an orphaned blocker message.
+    // The reason is recorded in the transition's audit row (`events.detail`).
+    if let Some(to) = pause_to {
+        let changed = state
+            .storage
+            .update_room_state(&id, room.state, to, now, req.reason.as_deref())
+            .await?;
+        if !changed {
+            return Err(ApiError::Conflict(
+                "room state changed concurrently; retry".into(),
+            ));
+        }
+    }
+
     let msg = state
         .storage
         .create_message_typed(
@@ -464,15 +487,6 @@ async fn signal_room(
             req.question_text.as_deref(),
         )
         .await?;
-
-    // Apply the pause, recording the reason in the transition's audit row. (A
-    // concurrent transition can make the CAS a no-op; the sentinel still stands.)
-    if let Some(to) = pause_to {
-        state
-            .storage
-            .update_room_state(&id, room.state, to, now, req.reason.as_deref())
-            .await?;
-    }
 
     state.hub.notify(&id);
 
