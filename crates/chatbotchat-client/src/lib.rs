@@ -2,9 +2,9 @@
 //! `reqwest` against the chatbotchat daemon.
 
 use chatbotchat_protocol::{
-    ErrorEnvelope, JoinRoomRequest, JoinRoomResponse, OpenRoomRequest, OpenRoomResponse,
-    RoomStatus, SendMessageRequest, SendMessageResponse, SignalRequest, SignalResponse,
-    WaitRequest, WaitResponse,
+    ErrorEnvelope, JoinRoomRequest, JoinRoomResponse, LifecycleRequest, LifecycleResponse,
+    OpenRoomRequest, OpenRoomResponse, RoomStatus, SendMessageRequest, SendMessageResponse,
+    SignalRequest, SignalResponse, WaitRequest, WaitResponse,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -152,6 +152,7 @@ impl HttpClient {
                 signal_type: signal_type.to_string(),
                 severity: severity.map(str::to_string),
                 question_text: question_text.map(str::to_string),
+                reason: None,
             })
             .send()
             .await?;
@@ -162,6 +163,70 @@ impl HttpClient {
         let resp = self
             .http
             .get(format!("{}/rooms/{room_id}", self.base_url))
+            .send()
+            .await?;
+        decode(resp).await
+    }
+
+    /// Explicitly close a room. Identity is the `(repo, model, cwd)` tuple; the
+    /// caller must be a participant. Returns the room's new state.
+    pub async fn close(
+        &self,
+        room_id: &str,
+        repo: &str,
+        model: &str,
+        cwd: &str,
+    ) -> Result<LifecycleResponse, ClientError> {
+        self.lifecycle(room_id, "close", repo, model, cwd, None)
+            .await
+    }
+
+    /// Pause a room, optionally recording `reason` in the audit log. Identity is
+    /// the `(repo, model, cwd)` tuple; the caller must be a participant.
+    pub async fn pause(
+        &self,
+        room_id: &str,
+        repo: &str,
+        model: &str,
+        cwd: &str,
+        reason: Option<&str>,
+    ) -> Result<LifecycleResponse, ClientError> {
+        self.lifecycle(room_id, "pause", repo, model, cwd, reason)
+            .await
+    }
+
+    /// Wake a paused (or idle) room back to active. Identity is the
+    /// `(repo, model, cwd)` tuple; the caller must be a participant.
+    pub async fn wake(
+        &self,
+        room_id: &str,
+        repo: &str,
+        model: &str,
+        cwd: &str,
+    ) -> Result<LifecycleResponse, ClientError> {
+        self.lifecycle(room_id, "wake", repo, model, cwd, None)
+            .await
+    }
+
+    /// Shared POST for the close/pause/wake lifecycle endpoints.
+    async fn lifecycle(
+        &self,
+        room_id: &str,
+        op: &str,
+        repo: &str,
+        model: &str,
+        cwd: &str,
+        reason: Option<&str>,
+    ) -> Result<LifecycleResponse, ClientError> {
+        let resp = self
+            .http
+            .post(format!("{}/rooms/{room_id}/{op}", self.base_url))
+            .json(&LifecycleRequest {
+                repo: repo.to_string(),
+                model: model.to_string(),
+                cwd: cwd.to_string(),
+                reason: reason.map(str::to_string),
+            })
             .send()
             .await?;
         decode(resp).await

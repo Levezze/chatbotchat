@@ -80,10 +80,12 @@ pub struct SendMessageResponse {
 /// Request body for `POST /rooms/:id/signals`. Identity is the `(repo, model,
 /// cwd)` tuple, same as send; the caller must already be a participant. A signal
 /// is an out-of-band sentinel, not a conversation turn — it does not count toward
-/// the caps and is always a broadcast. `signal_type` is the wire field `type`:
-/// only `waiting_user` and `fold` are accepted here (`blocker_real_work`/`close`
-/// land in the lifecycle slice). `severity` (`low|med|high`) and `question_text`
-/// are required for `waiting_user` and absent for `fold`.
+/// the caps and is always a broadcast. `signal_type` is the wire field `type`;
+/// the endpoint accepts `waiting_user`, `fold`, and `blocker_real_work` (the
+/// `close` lifecycle op has its own endpoint). Per-type fields: `waiting_user`
+/// requires `severity` (`low|med|high`) and a non-empty `question_text`; `fold`
+/// carries neither; `blocker_real_work` carries neither but takes an optional
+/// `reason` and drives the room to `paused`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignalRequest {
     pub repo: String,
@@ -95,12 +97,38 @@ pub struct SignalRequest {
     pub severity: Option<String>,
     #[serde(default)]
     pub question_text: Option<String>,
+    /// Optional free-text note for a `blocker_real_work` signal (why the agent is
+    /// pausing to do hands-on work). Recorded in the room's `events.detail`.
+    /// Absent / ignored for `waiting_user`/`fold`.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// Response body for `POST /rooms/:id/signals`: the assigned monotonic `seq`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignalResponse {
     pub seq: i64,
+}
+
+/// Request body for the explicit lifecycle endpoints `POST /rooms/:id/close`,
+/// `/pause`, and `/wake`. Identity is the `(repo, model, cwd)` tuple (same as
+/// send/signal/wait — the caller must already be a participant). `reason` is the
+/// optional free-text pause note (only meaningful for `pause`; ignored by
+/// close/wake) and is recorded in the room's `events.detail` audit row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LifecycleRequest {
+    pub repo: String,
+    pub model: String,
+    pub cwd: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Response body for the lifecycle endpoints: the room's new state after the
+/// transition (e.g. `closed`, `paused`, `active`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LifecycleResponse {
+    pub state: String,
 }
 
 /// Query parameters for `GET /rooms/:id/wait`. Same tuple identity as send.
@@ -351,5 +379,63 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// The "bitten twice" insurance (slice 6). Every lifecycle `status` is a new
+    /// *string* on the one `Timeout` arm — never a new structurally-identical
+    /// variant — because `untagged` would silently decode an overlapping variant
+    /// to the wrong arm. This asserts each status round-trips back to `Timeout`
+    /// **and preserves the exact string** (a variant-only check is too weak: all
+    /// these statuses share the `Timeout` shape, so they would pass a
+    /// `matches!(.., Timeout { .. })` assertion regardless of corruption).
+    #[test]
+    fn wait_response_every_status_round_trips_to_timeout_preserving_the_string() {
+        for status in [
+            "paused_by_timeout",
+            "paused",
+            "closed",
+            "archived",
+            "counterpart_stale",
+        ] {
+            let value = serde_json::to_value(WaitResponse::Timeout {
+                status: status.to_string(),
+                retry_after: None,
+            })
+            .expect("serialize");
+            let back: WaitResponse = serde_json::from_value(value).expect("deserialize");
+            match back {
+                WaitResponse::Timeout { status: got, .. } => assert_eq!(
+                    got, status,
+                    "the status string must survive the round-trip, not just the variant"
+                ),
+                WaitResponse::Message { .. } => {
+                    panic!("status {status:?} wrongly decoded to the Message arm")
+                }
+            }
+        }
+    }
+
+    /// The mirror of the above: a `Message`-shaped payload must never be captured
+    /// by the `Timeout` arm. The `message` key is the discriminator.
+    #[test]
+    fn wait_response_message_payload_never_decodes_as_timeout() {
+        let value = serde_json::to_value(WaitResponse::Message {
+            message: sample_view(),
+            surface_to_user: true,
+            retry_after: Some(10),
+        })
+        .expect("serialize");
+        let back: WaitResponse = serde_json::from_value(value).expect("deserialize");
+        assert!(
+            matches!(
+                back,
+                WaitResponse::Message {
+                    surface_to_user: true,
+                    retry_after: Some(10),
+                    ..
+                }
+            ),
+            "a Message payload must decode to the Message arm, not Timeout"
+        );
     }
 }

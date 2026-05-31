@@ -22,6 +22,33 @@ async fn test_router_with_cap(cap: std::time::Duration) -> axum::Router {
     router(AppState::with_wait_cap(storage, cap))
 }
 
+/// Like `test_router`, but also hands back a clone of the `Storage` so a test
+/// can read the audit log or arrange a precondition state (`idle`/`stale`/
+/// `archived`) that has no 6b HTTP path — those are sweeper-driven (6c), so the
+/// test drives them straight through `storage.update_room_state(...)`.
+async fn test_router_returning_storage() -> (axum::Router, Storage) {
+    let storage = Storage::connect("sqlite::memory:")
+        .await
+        .expect("connect in-memory sqlite");
+    (router(AppState::new(storage.clone())), storage)
+}
+
+/// A cap-bound router that also returns the `Storage` handle. The short cap means
+/// a regressed wait-state gate (one that parked instead of returning the state
+/// immediately) fails fast — it returns `paused_by_timeout` after the cap rather
+/// than hanging the suite.
+async fn test_router_with_cap_returning_storage(
+    cap: std::time::Duration,
+) -> (axum::Router, Storage) {
+    let storage = Storage::connect("sqlite::memory:")
+        .await
+        .expect("connect in-memory sqlite");
+    (
+        router(AppState::with_wait_cap(storage.clone(), cap)),
+        storage,
+    )
+}
+
 async fn body_json(body: Body) -> Value {
     let bytes = body.collect().await.expect("collect body").to_bytes();
     serde_json::from_slice(&bytes).expect("valid json body")
@@ -571,8 +598,27 @@ async fn signal_validation_rejects_malformed_sentinels() {
     let (s, _) = sig("fold", None, Some("q?")).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "fold takes no question_text");
 
-    // The conversation `msg` and the lifecycle types are not signals.
-    for ty in ["msg", "blocker_real_work", "close", "bogus"] {
+    // blocker_real_work carries neither severity nor question_text (only an
+    // optional `reason`); presence of either is rejected on its own merits — it
+    // is a *valid* signal type, so these 400s are field-rule failures, not
+    // "unsupported type".
+    let (s, _) = sig("blocker_real_work", Some("high"), None).await;
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "blocker_real_work takes no severity"
+    );
+    let (s, _) = sig("blocker_real_work", None, Some("q?")).await;
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "blocker_real_work takes no question_text"
+    );
+
+    // The conversation `msg` and the `close` lifecycle op are not signals.
+    // (blocker_real_work IS a valid signal type as of 6b, so it is not in this
+    // list — it is exercised by its own field-rule and happy-path tests.)
+    for ty in ["msg", "close", "bogus"] {
         let (s, _) = sig(ty, Some("high"), Some("q?")).await;
         assert_eq!(
             s,
@@ -1347,4 +1393,468 @@ async fn hard_cap_holds_under_concurrent_sends() {
         .as_array()
         .expect("recent_messages array");
     assert_eq!(recent.len(), HARD_CAP, "the room must not exceed the cap");
+}
+
+/// POST /rooms/{id}/{op} where `op` is `close` | `pause` | `wake`. Identity is
+/// the `(repo, model, cwd)` tuple in the body; `reason` is the optional pause
+/// note. Mirrors the `send`/`signal` helpers.
+#[allow(clippy::too_many_arguments)]
+async fn lifecycle_op(
+    app: &axum::Router,
+    room_id: &str,
+    op: &str,
+    repo: &str,
+    model: &str,
+    cwd: &str,
+    reason: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut payload = json!({ "repo": repo, "model": model, "cwd": cwd });
+    if let Some(r) = reason {
+        payload["reason"] = json!(r);
+    }
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/rooms/{room_id}/{op}"))
+        .header("content-type", "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = body_json(resp.into_body()).await;
+    (status, body)
+}
+
+#[tokio::test]
+async fn close_transitions_room_to_closed() {
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "wrap it up").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+
+    let (status, body) =
+        lifecycle_op(&app, &room_id, "close", "repo-a", "opus47", "/work/a", None).await;
+    assert_eq!(status, StatusCode::OK, "close should succeed: {body}");
+    assert_eq!(
+        body["state"].as_str(),
+        Some("closed"),
+        "close must report the new state"
+    );
+
+    // And it sticks: a status read reflects `closed`.
+    let status_req = Request::builder()
+        .method("GET")
+        .uri(format!("/rooms/{room_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(status_req).await.unwrap();
+    let body = body_json(resp.into_body()).await;
+    assert_eq!(body["state"].as_str(), Some("closed"));
+}
+
+#[tokio::test]
+async fn send_is_rejected_on_a_closed_room() {
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "wrap it up").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+
+    // A send while active is fine.
+    let (status, _) = send(
+        &app,
+        &room_id,
+        "repo-a",
+        "opus47",
+        "/work/a",
+        None,
+        "still here",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // Close it, then a further send is refused — the conversation is over.
+    let (status, _) =
+        lifecycle_op(&app, &room_id, "close", "repo-a", "opus47", "/work/a", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(
+        &app, &room_id, "repo-a", "opus47", "/work/a", None, "too late",
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a send into a closed room must be refused, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn pause_then_wake_round_trips_through_paused() {
+    // A storage-returning router: pause/wake go through HTTP, while the
+    // events.detail assertion reads the audit log directly off the handle.
+    let (app, storage) = test_router_returning_storage().await;
+    let room_id = open_room_id(&app, "blocked on real work").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+
+    let (status, body) = lifecycle_op(
+        &app,
+        &room_id,
+        "pause",
+        "repo-a",
+        "opus47",
+        "/work/a",
+        Some("running the migration by hand"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "pause should succeed: {body}");
+    assert_eq!(body["state"].as_str(), Some("paused"));
+
+    // The pause reason is recorded in the room's audit log.
+    let events = storage.list_events(&room_id).await.expect("list events");
+    assert!(
+        events.iter().any(|e| {
+            e.to_state == Some(RoomState::Paused)
+                && e.detail.as_deref() == Some("running the migration by hand")
+        }),
+        "pause reason must land in events.detail, got {events:?}"
+    );
+
+    let (status, body) =
+        lifecycle_op(&app, &room_id, "wake", "repo-a", "opus47", "/work/a", None).await;
+    assert_eq!(status, StatusCode::OK, "wake should succeed: {body}");
+    assert_eq!(body["state"].as_str(), Some("active"));
+}
+
+#[tokio::test]
+async fn illegal_lifecycle_transitions_are_409() {
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "edge cases").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+
+    // wake on an active room: there is nothing to wake.
+    let (status, body) =
+        lifecycle_op(&app, &room_id, "wake", "repo-a", "opus47", "/work/a", None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "wake-on-active: {body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("cannot"),
+        "409 body should explain the illegal transition, got {body}"
+    );
+
+    // pause, then pause again: the second is illegal from `paused`.
+    lifecycle_op(&app, &room_id, "pause", "repo-a", "opus47", "/work/a", None).await;
+    let (status, _) =
+        lifecycle_op(&app, &room_id, "pause", "repo-a", "opus47", "/work/a", None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "pause-on-paused");
+
+    // wake back to active, close, then close again: the second is illegal.
+    lifecycle_op(&app, &room_id, "wake", "repo-a", "opus47", "/work/a", None).await;
+    lifecycle_op(&app, &room_id, "close", "repo-a", "opus47", "/work/a", None).await;
+    let (status, _) =
+        lifecycle_op(&app, &room_id, "close", "repo-a", "opus47", "/work/a", None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "close-on-closed");
+}
+
+#[tokio::test]
+async fn lifecycle_op_by_a_non_participant_is_400() {
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "membership").await;
+    // No join: the caller is not a participant of this room.
+    let (status, _) = lifecycle_op(
+        &app,
+        &room_id,
+        "close",
+        "stranger",
+        "opus47",
+        "/elsewhere",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// GET the room's current lifecycle state string.
+async fn room_state(app: &axum::Router, room_id: &str) -> String {
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/rooms/{room_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let body = body_json(resp.into_body()).await;
+    body["state"].as_str().expect("state").to_string()
+}
+
+/// POST a `blocker_real_work` signal with an optional `reason`.
+async fn signal_blocker(
+    app: &axum::Router,
+    room_id: &str,
+    repo: &str,
+    model: &str,
+    cwd: &str,
+    reason: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut payload =
+        json!({ "repo": repo, "model": model, "cwd": cwd, "type": "blocker_real_work" });
+    if let Some(r) = reason {
+        payload["reason"] = json!(r);
+    }
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/rooms/{room_id}/signals"))
+        .header("content-type", "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = body_json(resp.into_body()).await;
+    (status, body)
+}
+
+#[tokio::test]
+async fn blocker_real_work_signal_pauses_the_room() {
+    let (app, storage) = test_router_returning_storage().await;
+    let room_id = open_room_id(&app, "blocked on real work").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+
+    let (status, body) = signal_blocker(
+        &app,
+        &room_id,
+        "repo-a",
+        "opus47",
+        "/work/a",
+        Some("rebasing the branch by hand"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "blocker_real_work must be accepted: {body}"
+    );
+
+    // The signal pauses the room.
+    assert_eq!(room_state(&app, &room_id).await, "paused");
+
+    // The reason is recorded in the transition's audit row.
+    let events = storage.list_events(&room_id).await.expect("events");
+    assert!(
+        events.iter().any(|e| {
+            e.to_state == Some(RoomState::Paused)
+                && e.detail.as_deref() == Some("rebasing the branch by hand")
+        }),
+        "blocker reason must land in events.detail, got {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_msg_revives_an_idle_or_stale_room_to_active() {
+    let (app, storage) = test_router_returning_storage().await;
+    let now = OffsetDateTime::now_utc();
+
+    for arranged in [RoomState::Idle, RoomState::Stale] {
+        let room_id = open_room_id(&app, &format!("quiet {arranged:?}")).await;
+        join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+
+        // No 6b HTTP path reaches idle/stale (sweeper-driven, 6c) — arrange it
+        // directly via the storage handle.
+        let changed = storage
+            .update_room_state(&room_id, RoomState::Active, arranged, now, None)
+            .await
+            .expect("arrange state");
+        assert!(changed, "precondition CAS should apply");
+        assert_eq!(room_state(&app, &room_id).await, arranged.as_str());
+
+        // A conversation `msg` is accepted and revives the room to active.
+        let (status, _) = send(
+            &app,
+            &room_id,
+            "repo-a",
+            "opus47",
+            "/work/a",
+            None,
+            "back online",
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "msg accepted on {arranged:?}");
+        assert_eq!(
+            room_state(&app, &room_id).await,
+            "active",
+            "a msg on {arranged:?} must revive the room to active"
+        );
+    }
+}
+
+#[tokio::test]
+async fn writes_are_rejected_on_paused_and_archived_rooms() {
+    let (app, storage) = test_router_returning_storage().await;
+    let now = OffsetDateTime::now_utc();
+
+    // `paused` is reachable via the pause endpoint.
+    let paused = open_room_id(&app, "paused room").await;
+    join(&app, &paused, "repo-a", "opus47", "/work/a").await;
+    lifecycle_op(&app, &paused, "pause", "repo-a", "opus47", "/work/a", None).await;
+    let (s, _) = send(&app, &paused, "repo-a", "opus47", "/work/a", None, "hi").await;
+    assert_eq!(s, StatusCode::CONFLICT, "send on paused must be refused");
+    let (s, _) = signal(
+        &app, &paused, "repo-a", "opus47", "/work/a", "fold", None, None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::CONFLICT, "signal on paused must be refused");
+
+    // `archived` has no 6b HTTP path — arrange it directly.
+    let arch = open_room_id(&app, "archived room").await;
+    join(&app, &arch, "repo-a", "opus47", "/work/a").await;
+    storage
+        .update_room_state(&arch, RoomState::Active, RoomState::Archived, now, None)
+        .await
+        .expect("arrange archived");
+    let (s, _) = send(&app, &arch, "repo-a", "opus47", "/work/a", None, "hi").await;
+    assert_eq!(s, StatusCode::CONFLICT, "send on archived must be refused");
+    let (s, _) = signal(
+        &app, &arch, "repo-a", "opus47", "/work/a", "fold", None, None,
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::CONFLICT,
+        "signal on archived must be refused"
+    );
+}
+
+#[tokio::test]
+async fn a_wait_on_a_non_active_room_returns_its_state_immediately() {
+    // Short cap: if the entry gate regressed and the wait parked instead, it would
+    // return `paused_by_timeout` after the cap (fast failure), not hang.
+    let cap = std::time::Duration::from_millis(100);
+    let (app, storage) = test_router_with_cap_returning_storage(cap).await;
+    let now = OffsetDateTime::now_utc();
+
+    let paused = open_room_id(&app, "paused").await;
+    join(&app, &paused, "repo-a", "opus47", "/work/a").await;
+    lifecycle_op(&app, &paused, "pause", "repo-a", "opus47", "/work/a", None).await;
+    let (st, body) = wait(&app, &paused, "repo-a", "opus47", "/work/a").await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        body["status"].as_str(),
+        Some("paused"),
+        "a wait on a paused room reports paused at once, got {body}"
+    );
+    assert!(
+        body.get("retry_after").is_none(),
+        "a state-gated wait carries no retry_after, got {body}"
+    );
+
+    let closed = open_room_id(&app, "closed").await;
+    join(&app, &closed, "repo-a", "opus47", "/work/a").await;
+    lifecycle_op(&app, &closed, "close", "repo-a", "opus47", "/work/a", None).await;
+    let (_, body) = wait(&app, &closed, "repo-a", "opus47", "/work/a").await;
+    assert_eq!(body["status"].as_str(), Some("closed"), "got {body}");
+
+    let arch = open_room_id(&app, "archived").await;
+    join(&app, &arch, "repo-a", "opus47", "/work/a").await;
+    storage
+        .update_room_state(&arch, RoomState::Active, RoomState::Archived, now, None)
+        .await
+        .expect("arrange archived");
+    let (_, body) = wait(&app, &arch, "repo-a", "opus47", "/work/a").await;
+    assert_eq!(body["status"].as_str(), Some("archived"), "got {body}");
+}
+
+#[tokio::test]
+async fn a_parked_waiter_receives_the_blocker_reason_before_the_pause_gates_it() {
+    // The blocker reason is delivered to a counterpart that is *already parked*:
+    // it wakes on the broadcast and claims the sentinel before any re-entry hits
+    // the paused entry-gate. (A fresh poll after the pause gets `status:"paused"`
+    // and reads the reason from the message log / events.detail instead.) This
+    // pins the delivery channel that 6c's wait-path reordering must preserve.
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "blocker delivery").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await; // signaller
+    join(&app, &room_id, "repo-b", "sonnet46", "/work/b").await; // parked waiter
+
+    // B parks on the still-active room (passes the entry gate, then blocks).
+    let waiter = {
+        let app = app.clone();
+        let room_id = room_id.clone();
+        tokio::spawn(async move { wait(&app, &room_id, "repo-b", "sonnet46", "/work/b").await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // A signals blocker_real_work: persists the broadcast sentinel, pauses the
+    // room, and rings it.
+    let (status, _) = signal_blocker(
+        &app,
+        &room_id,
+        "repo-a",
+        "opus47",
+        "/work/a",
+        Some("merging the branch by hand"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // B wakes on the broadcast and receives the blocker sentinel with its reason —
+    // not a `paused`/`paused_by_timeout` status.
+    let (st, body) = tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+        .await
+        .expect("waiter resolved before the deadline")
+        .expect("waiter task did not panic");
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        body["message"]["type"].as_str(),
+        Some("blocker_real_work"),
+        "the parked waiter must receive the blocker sentinel, got {body}"
+    );
+    assert_eq!(
+        body["message"]["body"].as_str(),
+        Some("merging the branch by hand"),
+        "the blocker reason must reach the counterpart in the message body, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn blocker_real_work_on_a_stale_room_is_409_and_persists_nothing() {
+    // `Pause` is illegal from `stale` (locked table), and the legality is checked
+    // before any write — so the signal 409s and leaves neither a pause nor an
+    // orphaned blocker message behind. This pins the data-integrity invariant the
+    // validate-before-write ordering exists to protect.
+    let (app, storage) = test_router_returning_storage().await;
+    let now = OffsetDateTime::now_utc();
+    let room_id = open_room_id(&app, "stale blocker").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+
+    // Arrange `stale` directly (no 6b HTTP path reaches it — sweeper-driven, 6c).
+    storage
+        .update_room_state(&room_id, RoomState::Active, RoomState::Stale, now, None)
+        .await
+        .expect("arrange stale");
+
+    let (status, body) = signal_blocker(
+        &app,
+        &room_id,
+        "repo-a",
+        "opus47",
+        "/work/a",
+        Some("too late to block"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "blocker_real_work from stale is illegal, got {body}"
+    );
+
+    // No pause applied: the room is still stale.
+    assert_eq!(room_state(&app, &room_id).await, "stale");
+    // No orphaned sentinel: the room holds no messages (seq high-water still 0).
+    assert_eq!(
+        storage.current_seq(&room_id).await.expect("current_seq"),
+        0,
+        "an illegal blocker must not persist a message"
+    );
+    // And no pause transition was logged.
+    let events = storage.list_events(&room_id).await.expect("events");
+    assert!(
+        events.iter().all(|e| e.to_state != Some(RoomState::Paused)),
+        "no pause should be recorded for an illegal blocker, got {events:?}"
+    );
 }

@@ -1,5 +1,6 @@
 use crate::identity::{derive_handle, HandleOutcome, JoinIdentity};
 use crate::ids;
+use crate::lifecycle::{self, LifecycleEvent};
 use crate::message::{Message, MessageType, Severity};
 use crate::participant::Participant;
 use crate::room::{Room, RoomConfig, RoomState};
@@ -11,9 +12,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chatbotchat_protocol::{
-    ErrorEnvelope, JoinRoomRequest, JoinRoomResponse, MessageView, OpenRoomRequest,
-    OpenRoomResponse, ParticipantView, RoomStatus, SendMessageRequest, SendMessageResponse,
-    SignalRequest, SignalResponse, WaitRequest, WaitResponse,
+    ErrorEnvelope, JoinRoomRequest, JoinRoomResponse, LifecycleRequest, LifecycleResponse,
+    MessageView, OpenRoomRequest, OpenRoomResponse, ParticipantView, RoomStatus,
+    SendMessageRequest, SendMessageResponse, SignalRequest, SignalResponse, WaitRequest,
+    WaitResponse,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -64,6 +66,9 @@ pub fn router(state: AppState) -> Router {
         .route("/rooms/{id}/messages", post(send_message))
         .route("/rooms/{id}/signals", post(signal_room))
         .route("/rooms/{id}/wait", get(wait_room))
+        .route("/rooms/{id}/close", post(close_room))
+        .route("/rooms/{id}/pause", post(pause_room))
+        .route("/rooms/{id}/wake", post(wake_room))
         .with_state(state)
 }
 
@@ -271,6 +276,15 @@ async fn send_message(
         .await?
         .ok_or(ApiError::NotFound)?;
 
+    // Write guard: a paused/closed/archived room takes no new traffic. This is an
+    // additive pre-check, separate from `create_message_capped`'s atomic cap gate
+    // (a locked design constraint — the guard must not fold state into that SQL).
+    // Consequently it is a non-atomic pre-read: a `close`/`pause` landing between
+    // this check and the insert can admit one trailing message onto a room that
+    // just became non-writable. Accepted for v1 — the message is logged, no state
+    // is corrupted, and the next `wait` returns the terminal status.
+    reject_unless_writable(&room)?;
+
     let sender = state
         .storage
         .get_participant_by_tuple(&id, &req.repo, &req.model, &req.cwd)
@@ -314,6 +328,21 @@ async fn send_message(
                 room.config.hard_cap
             ))
         })?;
+
+    // Activity bookkeeping. The timestamp bump drives the sweeper's idle/stale
+    // timing on every msg; and a msg landing on an `idle`/`stale` room revives it
+    // to `active` (a `Message` transition). The state write is guarded to those
+    // two states so an active room does not log a spurious active→active row.
+    state.storage.touch_last_activity(&id, now).await?;
+    if matches!(room.state, RoomState::Idle | RoomState::Stale) {
+        let to = lifecycle::transition(room.state, LifecycleEvent::Message)
+            .expect("Message is a legal transition from idle/stale");
+        state
+            .storage
+            .update_room_state(&id, room.state, to, now, None)
+            .await?;
+    }
+
     state.hub.notify(&id);
 
     Ok((
@@ -325,19 +354,25 @@ async fn send_message(
 /// Post a sentinel (out-of-band signal) to a room. The sender is resolved from
 /// the `(repo, model, cwd)` tuple (400 if not a participant). Sentinels are
 /// uncapped — they route through `create_message_typed`, never the capped gate —
-/// and are always broadcast. Only `waiting_user` and `fold` are accepted here;
-/// `blocker_real_work`/`close` (and the conversation `msg`) are rejected. After
-/// the insert commits, ring the room so any parked waiters re-query.
+/// and are always broadcast. Accepted here: `waiting_user`, `fold`, and
+/// `blocker_real_work` (the latter also drives a `Pause`); `close` is the close
+/// endpoint's, and the conversation `msg` belongs on /messages. After the insert
+/// commits, ring the room so any parked waiters re-query.
 async fn signal_room(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<SignalRequest>,
 ) -> Result<(StatusCode, Json<SignalResponse>), ApiError> {
-    state
+    let room = state
         .storage
         .get_room(&id)
         .await?
         .ok_or(ApiError::NotFound)?;
+
+    // Write guard: a paused/closed/archived room takes no new signals (same gate
+    // as `send_message`). `blocker_real_work` on active/idle passes here and the
+    // Pause is decided below.
+    reject_unless_writable(&room)?;
 
     let sender = state
         .storage
@@ -345,13 +380,15 @@ async fn signal_room(
         .await?
         .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
 
-    // Only sentinel types are valid on this endpoint. `blocker_real_work`/`close`
-    // are the lifecycle slice's; the conversation `msg` belongs on /messages.
+    // Only sentinel types are valid on this endpoint. `close` is the close
+    // endpoint's; the conversation `msg` belongs on /messages.
     let msg_type = match MessageType::parse(&req.signal_type) {
-        Some(t @ (MessageType::WaitingUser | MessageType::Fold)) => t,
+        Some(t @ (MessageType::WaitingUser | MessageType::Fold | MessageType::BlockerRealWork)) => {
+            t
+        }
         _ => {
             return Err(ApiError::BadRequest(format!(
-                "unsupported signal type '{}'; expected waiting_user or fold",
+                "unsupported signal type '{}'; expected waiting_user, fold or blocker_real_work",
                 req.signal_type
             )))
         }
@@ -362,8 +399,9 @@ async fn signal_room(
     // before parsing the severity value, so a `fold` carrying any severity is
     // rejected as "fold takes no severity" rather than "invalid severity".
     // `waiting_user` is the question-carrying sentinel (needs both severity and a
-    // non-empty question); `fold` is a bare marker (carries neither).
-    let severity = match msg_type {
+    // non-empty question); `fold` is a bare marker; `blocker_real_work` carries
+    // only an optional free-text `reason` (no severity, no question).
+    let (severity, body): (Option<Severity>, &str) = match msg_type {
         MessageType::WaitingUser => {
             let s = req.severity.as_deref().ok_or_else(|| {
                 ApiError::BadRequest("waiting_user requires a severity (low|med|high)".into())
@@ -375,7 +413,7 @@ async fn signal_room(
                     "waiting_user requires a non-empty question_text".into(),
                 ));
             }
-            Some(severity)
+            (Some(severity), "")
         }
         MessageType::Fold => {
             if req.severity.is_some() {
@@ -384,29 +422,169 @@ async fn signal_room(
             if req.question_text.is_some() {
                 return Err(ApiError::BadRequest("fold takes no question_text".into()));
             }
-            None
+            (None, "")
         }
-        // The match above only admits WaitingUser/Fold.
-        _ => unreachable!("signal type already gated to waiting_user|fold"),
+        MessageType::BlockerRealWork => {
+            if req.severity.is_some() {
+                return Err(ApiError::BadRequest(
+                    "blocker_real_work takes no severity".into(),
+                ));
+            }
+            if req.question_text.is_some() {
+                return Err(ApiError::BadRequest(
+                    "blocker_real_work takes no question_text".into(),
+                ));
+            }
+            // The reason rides in the message body so the counterpart can read it.
+            (None, req.reason.as_deref().unwrap_or(""))
+        }
+        // The match above only admits the three sentinel types.
+        _ => unreachable!("signal type already gated to waiting_user|fold|blocker_real_work"),
+    };
+
+    // For `blocker_real_work`, confirm the `Pause` is legal from the room's
+    // current state — an illegal origin (e.g. `stale`) is a 409 with nothing
+    // written.
+    let pause_to = if msg_type == MessageType::BlockerRealWork {
+        Some(
+            lifecycle::transition(room.state, LifecycleEvent::Pause).map_err(|_| {
+                ApiError::Conflict(format!("cannot Pause from {}", room.state.as_str()))
+            })?,
+        )
+    } else {
+        None
     };
 
     let now = OffsetDateTime::now_utc();
+
+    // Apply the pause *before* persisting the sentinel. The CAS is the real
+    // gate: if a concurrent transition moved the room off `room.state` between
+    // our read and here, it returns `false` and we 409 with nothing written —
+    // never a 201 on an unpaused room, and never an orphaned blocker message.
+    // The reason is recorded in the transition's audit row (`events.detail`).
+    if let Some(to) = pause_to {
+        let changed = state
+            .storage
+            .update_room_state(&id, room.state, to, now, req.reason.as_deref())
+            .await?;
+        if !changed {
+            return Err(ApiError::Conflict(
+                "room state changed concurrently; retry".into(),
+            ));
+        }
+    }
+
     let msg = state
         .storage
         .create_message_typed(
             &id,
             &sender.handle,
             None,
-            "",
+            body,
             now,
             msg_type,
             severity,
             req.question_text.as_deref(),
         )
         .await?;
+
     state.hub.notify(&id);
 
     Ok((StatusCode::CREATED, Json(SignalResponse { seq: msg.seq })))
+}
+
+/// Explicitly close a room. The caller must be a participant. Drives a `Close`
+/// lifecycle transition; `Err` (e.g. already closed) → 409.
+async fn close_room(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<LifecycleRequest>,
+) -> Result<Json<LifecycleResponse>, ApiError> {
+    apply_transition(&state, &id, &req, LifecycleEvent::Close, None).await
+}
+
+/// Explicitly pause a room (the durable park). The caller must be a participant.
+/// Drives a `Pause` transition; the optional `reason` is recorded in the audit
+/// row's `detail`. `Err` (e.g. already paused, or from `stale`) → 409.
+async fn pause_room(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<LifecycleRequest>,
+) -> Result<Json<LifecycleResponse>, ApiError> {
+    let detail = req.reason.clone();
+    apply_transition(&state, &id, &req, LifecycleEvent::Pause, detail.as_deref()).await
+}
+
+/// Explicitly wake a paused (or idle) room back to active. The caller must be a
+/// participant. Drives a `Wake` transition; `Err` (e.g. already active) → 409.
+async fn wake_room(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<LifecycleRequest>,
+) -> Result<Json<LifecycleResponse>, ApiError> {
+    apply_transition(&state, &id, &req, LifecycleEvent::Wake, None).await
+}
+
+/// Resolve the room + caller, apply `event` through the pure state machine, and
+/// persist the transition with a CAS write. Shared by the close/pause/wake
+/// endpoints. `detail` is recorded in the `events.detail` audit row (the pause
+/// reason). Two failure modes both map to 409: an illegal transition from the
+/// room's current state, and a CAS miss (the state changed under us).
+async fn apply_transition(
+    state: &AppState,
+    id: &str,
+    req: &LifecycleRequest,
+    event: LifecycleEvent,
+    detail: Option<&str>,
+) -> Result<Json<LifecycleResponse>, ApiError> {
+    let room = state
+        .storage
+        .get_room(id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    // Lifecycle ops are participant-driven — uniform with send/signal/wait.
+    state
+        .storage
+        .get_participant_by_tuple(id, &req.repo, &req.model, &req.cwd)
+        .await?
+        .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
+
+    let to = lifecycle::transition(room.state, event).map_err(|_| {
+        ApiError::Conflict(format!("cannot {event:?} from {}", room.state.as_str()))
+    })?;
+
+    let now = OffsetDateTime::now_utc();
+    let changed = state
+        .storage
+        .update_room_state(id, room.state, to, now, detail)
+        .await?;
+    if !changed {
+        return Err(ApiError::Conflict(
+            "room state changed concurrently; retry".into(),
+        ));
+    }
+    state.hub.notify(id);
+
+    Ok(Json(LifecycleResponse {
+        state: to.as_str().to_string(),
+    }))
+}
+
+/// Reject a write (send/signal) when the room is not accepting traffic. A
+/// `paused`/`closed`/`archived` room is non-writable: a `paused` room is waiting
+/// on an explicit wake, and `closed`/`archived` are terminal. `active`/`idle`/
+/// `stale` accept writes (a `msg` revives idle/stale → active downstream).
+fn reject_unless_writable(room: &Room) -> Result<(), ApiError> {
+    match room.state {
+        RoomState::Active | RoomState::Idle | RoomState::Stale => Ok(()),
+        RoomState::Paused | RoomState::Closed | RoomState::Archived => {
+            Err(ApiError::Conflict(format!(
+                "room is {}; it is not accepting messages",
+                room.state.as_str()
+            )))
+        }
+    }
 }
 
 /// Long-poll for the next message addressed to the caller (or broadcast). The
@@ -428,6 +606,21 @@ async fn wait_room(
         .get_participant_by_tuple(&id, &req.repo, &req.model, &req.cwd)
         .await?
         .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
+
+    // State entry gate: a paused/closed/archived room never long-polls. Return
+    // its state immediately so the caller stops waiting — only an explicit wake
+    // (paused) or a human (closed/archived) clears it, so polling can't help and
+    // there is no retry_after hint. This early return never enters the park path,
+    // so the slice-5b two-read backoff invariant below is untouched.
+    if matches!(
+        room.state,
+        RoomState::Paused | RoomState::Closed | RoomState::Archived
+    ) {
+        return Ok(Json(WaitResponse::Timeout {
+            status: room.state.as_str().to_string(),
+            retry_after: None,
+        }));
+    }
 
     // Polling backoff (slice 5b). If the counterpart is parked behind an active
     // `waiting_user` sentinel, shorten this long-poll to the severity-scaled,
