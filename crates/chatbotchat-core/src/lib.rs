@@ -10,4 +10,5 @@ pub mod message;
 pub mod participant;
 pub mod room;
 pub mod storage;
+pub mod sweeper;
 pub mod waiter;

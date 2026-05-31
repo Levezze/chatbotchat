@@ -91,6 +91,33 @@ enum Command {
         /// Room id.
         room_id: String,
     },
+    /// Explicitly close a room; repo and cwd are auto-detected.
+    Close {
+        /// Room id to close.
+        room_id: String,
+        /// Self-declared model name (your identity; e.g. opus47).
+        #[arg(long)]
+        model: String,
+    },
+    /// Pause a room; repo and cwd are auto-detected.
+    Pause {
+        /// Room id to pause.
+        room_id: String,
+        /// Self-declared model name (your identity; e.g. opus47).
+        #[arg(long)]
+        model: String,
+        /// Optional reason, recorded in the room's audit log.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Wake a paused (or idle) room back to active; repo and cwd are auto-detected.
+    Wake {
+        /// Room id to wake.
+        room_id: String,
+        /// Self-declared model name (your identity; e.g. opus47).
+        #[arg(long)]
+        model: String,
+    },
     /// Run as an MCP stdio server (wired in a later cycle).
     Mcp,
 }
@@ -225,6 +252,37 @@ async fn main() -> anyhow::Result<()> {
                     println!("  - {} ({} @ {})", p.handle, p.model, p.cwd);
                 }
             }
+        }
+        Command::Close { room_id, model } => {
+            let repo = context::detect_repo();
+            let cwd = context::detect_cwd();
+            let resp = client
+                .close(&room_id, &repo, &model, &cwd)
+                .await
+                .context("closing room")?;
+            println!("State: {}", resp.state);
+        }
+        Command::Pause {
+            room_id,
+            model,
+            reason,
+        } => {
+            let repo = context::detect_repo();
+            let cwd = context::detect_cwd();
+            let resp = client
+                .pause(&room_id, &repo, &model, &cwd, reason.as_deref())
+                .await
+                .context("pausing room")?;
+            println!("State: {}", resp.state);
+        }
+        Command::Wake { room_id, model } => {
+            let repo = context::detect_repo();
+            let cwd = context::detect_cwd();
+            let resp = client
+                .wake(&room_id, &repo, &model, &cwd)
+                .await
+                .context("waking room")?;
+            println!("State: {}", resp.state);
         }
         Command::Mcp => {
             mcp::run(client).await.context("running MCP server")?;

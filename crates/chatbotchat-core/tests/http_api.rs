@@ -1858,3 +1858,191 @@ async fn blocker_real_work_on_a_stale_room_is_409_and_persists_nothing() {
         "no pause should be recorded for an illegal blocker, got {events:?}"
     );
 }
+
+#[tokio::test]
+async fn opening_with_prev_room_id_records_the_link() {
+    let (app, storage) = test_router_returning_storage().await;
+
+    // A continuation room carries the id of the room it succeeds (AC #7). The
+    // link is persisted but not surfaced on RoomStatus, so assert it through the
+    // storage handle.
+    let req = Request::builder()
+        .method("POST")
+        .uri("/rooms")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({
+                "subject": "follow-up room",
+                "prev_room_id": "prior-room-20260501-1000"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let room_id = body_json(resp.into_body()).await["room_id"]
+        .as_str()
+        .expect("room_id")
+        .to_string();
+
+    let room = storage
+        .get_room(&room_id)
+        .await
+        .expect("get ok")
+        .expect("room exists");
+    assert_eq!(
+        room.prev_room_id.as_deref(),
+        Some("prior-room-20260501-1000"),
+        "the prev_room_id from the open request must be persisted"
+    );
+}
+
+#[tokio::test]
+async fn opening_without_prev_room_id_leaves_the_link_empty() {
+    // The field is optional (`#[serde(default)]`), so a 6b-era client that omits
+    // it stays wire-compatible: the room opens with no predecessor link.
+    let (app, storage) = test_router_returning_storage().await;
+    let room_id = open_room_id(&app, "standalone room").await;
+
+    let room = storage
+        .get_room(&room_id)
+        .await
+        .expect("get ok")
+        .expect("room exists");
+    assert!(
+        room.prev_room_id.is_none(),
+        "omitting prev_room_id must leave it null, got {:?}",
+        room.prev_room_id
+    );
+}
+
+#[tokio::test]
+async fn a_wait_returns_counterpart_stale_when_the_other_agent_has_gone_dark() {
+    // Short cap so a regressed ghost path (one that parks instead of returning
+    // immediately) fails fast as `paused_by_timeout` rather than hanging the
+    // suite — and the status assertion still catches it.
+    let (app, storage) =
+        test_router_with_cap_returning_storage(std::time::Duration::from_millis(200)).await;
+    let room_id = open_room_id(&app, "ghost room").await;
+
+    // A (the caller) and B (the counterpart) both join.
+    let (_, _a) = join(&app, &room_id, "repo-a", "opus47", "/a").await;
+    let (_, b) = join(&app, &room_id, "repo-b", "opus47", "/b").await;
+    let b_handle = b["handle"].as_str().expect("b handle").to_string();
+
+    // B last polled 20 min ago — past GHOST_AFTER (15 min): it has gone dark with
+    // no away-signal.
+    let stale = OffsetDateTime::now_utc() - time::Duration::minutes(20);
+    storage
+        .touch_last_poll(&b_handle, stale)
+        .await
+        .expect("backdate B's last poll");
+
+    // A waits: nothing to read and the counterpart is dark → stop waiting on a
+    // ghost, immediately (AC #5).
+    let (status, body) = wait(&app, &room_id, "repo-a", "opus47", "/a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["status"].as_str(),
+        Some("counterpart_stale"),
+        "a dark counterpart must yield counterpart_stale, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn an_active_waiting_user_suppresses_counterpart_stale() {
+    // Pins the locked decision AND discriminates the branch ordering. B posts a
+    // waiting_user, A consumes it, THEN B goes dark. On A's *next* wait there is
+    // no unread message left to claim, so the response reveals which branch ran:
+    //   - backoff-first (correct): the waiting_user is still the latest message
+    //     from B, so `active_sentinel_backoff` stays `Some` → A parks and times
+    //     out as `paused_by_timeout` WITH a `retry_after` hint. The away-signal
+    //     suppressed ghost detection.
+    //   - ghost-first (buggy): A would short-circuit to `counterpart_stale`.
+    // A single-wait test can't tell these apart — the unread sentinel is claimed
+    // under either ordering — so the consume-then-rewait is the real proof.
+    let (app, storage) =
+        test_router_with_cap_returning_storage(std::time::Duration::from_millis(150)).await;
+    let room_id = open_room_id(&app, "suppress room").await;
+
+    let (_, _a) = join(&app, &room_id, "repo-a", "opus47", "/a").await;
+    let (_, b) = join(&app, &room_id, "repo-b", "opus47", "/b").await;
+    let b_handle = b["handle"].as_str().expect("b handle").to_string();
+
+    // B signals it is consulting its user.
+    let (s, _) = signal(
+        &app,
+        &room_id,
+        "repo-b",
+        "opus47",
+        "/b",
+        "waiting_user",
+        Some("high"),
+        Some("which option do you want?"),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+
+    // A consumes the sentinel, advancing its read cursor past it.
+    let (_, first) = wait(&app, &room_id, "repo-a", "opus47", "/a").await;
+    assert_eq!(
+        first["message"]["type"].as_str(),
+        Some("waiting_user"),
+        "A should first receive the sentinel, got {first}"
+    );
+
+    // Now B goes dark past GHOST_AFTER, with nothing left for A to read.
+    let stale = OffsetDateTime::now_utc() - time::Duration::minutes(20);
+    storage
+        .touch_last_poll(&b_handle, stale)
+        .await
+        .expect("backdate B's last poll");
+
+    // A waits again. The active away-signal must suppress ghost detection: A
+    // parks and reports `paused_by_timeout` WITH a backoff hint — NOT
+    // `counterpart_stale` (which would carry no hint).
+    let (status, body) = wait(&app, &room_id, "repo-a", "opus47", "/a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["status"].as_str(),
+        Some("paused_by_timeout"),
+        "an active away-signal must suppress ghost detection, got {body}"
+    );
+    assert!(
+        body["retry_after"].as_u64().is_some(),
+        "the suppressed slice-5b path carries a backoff hint, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn an_archived_room_still_serves_reads() {
+    // AC #6: archived is read-*only*, not read-*blocked*. Writes are refused
+    // (covered by `writes_are_rejected_on_paused_and_archived_rooms`) and a wait
+    // returns `archived` at once (covered by
+    // `a_wait_on_a_non_active_room_returns_its_state_immediately`), but a plain
+    // status GET must still succeed so the conversation stays inspectable after
+    // the room has ended. `get_room` carries no state gate, so this pins that
+    // reads remain ungated.
+    let (app, storage) = test_router_returning_storage().await;
+    let room_id = open_room_id(&app, "archived readable room").await;
+    let now = OffsetDateTime::now_utc();
+    storage
+        .update_room_state(&room_id, RoomState::Active, RoomState::Archived, now, None)
+        .await
+        .expect("arrange archived");
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/rooms/{room_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "reads on an archived room must still succeed"
+    );
+    let body = body_json(resp.into_body()).await;
+    assert_eq!(body["state"].as_str(), Some("archived"));
+    assert_eq!(body["subject"].as_str(), Some("archived readable room"));
+}

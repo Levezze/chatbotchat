@@ -9,6 +9,10 @@ pub struct OpenRoomRequest {
     pub hard_cap: Option<u32>,
     #[serde(default)]
     pub soft_cap: Option<u32>,
+    /// The id of the room this one continues, if any. Persisted as a back-link
+    /// (AC #7); omitted means a standalone room.
+    #[serde(default)]
+    pub prev_room_id: Option<String>,
 }
 
 /// Response body for `POST /rooms`.

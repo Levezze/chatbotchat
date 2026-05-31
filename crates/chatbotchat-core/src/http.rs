@@ -54,6 +54,13 @@ impl AppState {
             wait_cap,
         }
     }
+
+    /// A clone of the storage handle (`Storage` is `Clone`). The daemon needs it
+    /// to spawn the background sweeper alongside the router; the field itself
+    /// stays private to this module.
+    pub fn storage(&self) -> Storage {
+        self.storage.clone()
+    }
 }
 
 /// Build the application router. This is the integration seam exercised both by
@@ -121,7 +128,7 @@ async fn open_room(
             state: RoomState::Active,
             state_changed_at: now,
             config,
-            prev_room_id: None,
+            prev_room_id: req.prev_room_id.clone(),
         };
         match state.storage.create_room(&room).await {
             Ok(()) => break candidate,
@@ -622,34 +629,61 @@ async fn wait_room(
         }));
     }
 
-    // Polling backoff (slice 5b). If the counterpart is parked behind an active
-    // `waiting_user` sentinel, shorten this long-poll to the severity-scaled,
-    // time-decayed backoff and hand that hint back so the LLM consumer — which
-    // has no `sleep()` of its own — stays quiet.
+    // Decide the park duration up front from the counterpart's current signal —
+    // ghost detection (slice 6c) layered on the polling backoff (slice 5b):
     //
-    // The state is read twice on purpose. The park duration can only be decided
-    // up front, so the *cap* uses the pre-park reading. But a pause can clear (or
-    // a new one can begin) while we are parked, so the *response hint* is
-    // re-derived from the post-wake state — otherwise a sentinel delivered on
-    // wake would lose its hint, or a msg that cleared the pause would carry a
-    // stale one. `wait_cap` is the absolute ceiling; a sentinel only ever
-    // shortens it (in prod wait_cap = 600s ≥ backoff ≤ 60s, so the min is always
-    // the backoff; the min exists so the `with_wait_cap` test seam keeps parking
-    // tests fast).
-    let effective_cap = match active_sentinel_backoff(&state.storage, &id, &caller.handle).await? {
-        Some(secs) => state.wait_cap.min(Duration::from_secs(secs as u64)),
-        None => state.wait_cap,
+    // - Active `waiting_user` (`active_sentinel_backoff` = `Some`): the
+    //   counterpart explicitly said "I'm away consulting my user", so shorten the
+    //   long-poll to the severity-scaled, time-decayed backoff and park. An
+    //   explicit away-signal is NOT a ghost, so this case *suppresses* ghost
+    //   detection (the locked 6c decision).
+    // - Otherwise, if the counterpart (the other participant — 2-agent v1) has
+    //   gone *silently* dark past `GHOST_AFTER`: stop waiting on it. A zero-cap
+    //   `wait_for_message` still claims a ready message before checking the
+    //   deadline (so a queued message is delivered), but never parks — a dark
+    //   counterpart yields `counterpart_stale` at once rather than a full-cap
+    //   timeout (AC #5).
+    // - Otherwise park for the full cap.
+    let backoff = active_sentinel_backoff(&state.storage, &id, &caller.handle).await?;
+    let (outcome, ghosted) = if let Some(secs) = backoff {
+        let cap = state.wait_cap.min(Duration::from_secs(secs as u64));
+        (
+            wait_for_message(&state.storage, &state.hub, &id, &caller.handle, cap).await?,
+            false,
+        )
+    } else if counterpart_is_stale(&state.storage, &id, &caller.handle).await? {
+        (
+            wait_for_message(
+                &state.storage,
+                &state.hub,
+                &id,
+                &caller.handle,
+                Duration::ZERO,
+            )
+            .await?,
+            true,
+        )
+    } else {
+        (
+            wait_for_message(
+                &state.storage,
+                &state.hub,
+                &id,
+                &caller.handle,
+                state.wait_cap,
+            )
+            .await?,
+            false,
+        )
     };
 
-    let outcome = wait_for_message(
-        &state.storage,
-        &state.hub,
-        &id,
-        &caller.handle,
-        effective_cap,
-    )
-    .await?;
-
+    // Re-derive the hint from the post-wake state (the slice-5b two-read
+    // invariant): the *cap* above used the pre-park reading, but a pause can
+    // begin or clear while parked, so the *response hint* is re-read now —
+    // otherwise a sentinel delivered on wake would lose its hint, or a msg that
+    // cleared the pause would carry a stale one. The `counterpart_stale` arm
+    // deliberately carries no hint: the counterpart is gone, not paused, so there
+    // is nothing to back off behind.
     let retry_after = active_sentinel_backoff(&state.storage, &id, &caller.handle).await?;
 
     Ok(Json(match outcome {
@@ -667,11 +701,34 @@ async fn wait_room(
                 retry_after,
             }
         }
+        WaitOutcome::PausedByTimeout if ghosted => WaitResponse::Timeout {
+            status: "counterpart_stale".to_string(),
+            retry_after: None,
+        },
         WaitOutcome::PausedByTimeout => WaitResponse::Timeout {
             status: "paused_by_timeout".to_string(),
             retry_after,
         },
     }))
+}
+
+/// True when the room's counterpart — the other participant, 2-agent v1 — has
+/// not polled within `GHOST_AFTER`. A room with no counterpart yet is never a
+/// ghost (returns `false`), so a lone waiter parks normally rather than being
+/// told an absent other side is stale. Uses the strict `>` boundary, matching
+/// `lifecycle::no_live_poller`.
+async fn counterpart_is_stale(
+    storage: &Storage,
+    room_id: &str,
+    handle: &str,
+) -> Result<bool, StorageError> {
+    let now = OffsetDateTime::now_utc();
+    Ok(storage
+        .list_participants(room_id)
+        .await?
+        .into_iter()
+        .filter(|p| p.handle != handle)
+        .any(|p| now - p.last_poll_at > lifecycle::GHOST_AFTER))
 }
 
 /// The polling backoff (seconds) implied by the counterpart's *current* state,
