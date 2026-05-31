@@ -909,3 +909,30 @@ async fn list_rooms_for_sweep_excludes_archived() {
         "archived room is excluded from the sweep"
     );
 }
+
+#[tokio::test]
+async fn update_room_state_persists_the_detail_field() {
+    let storage = fresh_storage().await;
+    let room = room_with_id("life-5-20260530-0000");
+    storage.create_room(&room).await.expect("create_room ok");
+
+    let now = OffsetDateTime::now_utc();
+    storage
+        .update_room_state(
+            &room.id,
+            RoomState::Active,
+            RoomState::Paused,
+            now,
+            Some("went to do real work"),
+        )
+        .await
+        .expect("pause ok");
+
+    let events = storage.list_events(&room.id).await.expect("events ok");
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].detail.as_deref(),
+        Some("went to do real work"),
+        "the pause reason must survive the events round-trip"
+    );
+}
