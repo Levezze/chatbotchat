@@ -114,6 +114,7 @@ async fn open_room(
             started_at: now,
             last_activity_at: now,
             state: RoomState::Active,
+            state_changed_at: now,
             config,
             prev_room_id: None,
         };

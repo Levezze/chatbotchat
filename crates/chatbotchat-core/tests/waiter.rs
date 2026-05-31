@@ -17,6 +17,7 @@ async fn storage_with_room() -> (Storage, String) {
         started_at: now,
         last_activity_at: now,
         state: RoomState::Active,
+        state_changed_at: now,
         config: RoomConfig::default(),
         prev_room_id: None,
     };

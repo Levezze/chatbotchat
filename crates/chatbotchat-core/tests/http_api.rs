@@ -1249,6 +1249,7 @@ async fn hard_cap_honors_a_non_default_persisted_room_config() {
         started_at: now,
         last_activity_at: now,
         state: RoomState::Active,
+        state_changed_at: now,
         config: RoomConfig {
             hard_cap: 2,
             soft_cap: 4,
