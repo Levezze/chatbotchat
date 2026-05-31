@@ -187,6 +187,58 @@ async fn sweep_archives_a_closed_room_past_the_archive_window() {
             .state,
         RoomState::Archived
     );
+
+    // closed→archived must also land exactly one archive event (the on_archive
+    // hook, AC #8) — same `update_room_state` path as stale→archived.
+    let events = storage.list_events(&room.id).await.expect("events ok");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.kind == EventKind::Archive)
+            .count(),
+        1,
+        "an archive of a closed room writes one archive event"
+    );
+}
+
+#[tokio::test]
+async fn sweep_idles_an_active_room_whose_pollers_have_all_gone_stale() {
+    // GhostAllStale: an active room with RECENT activity (well under IDLE_AFTER)
+    // but every participant polling-dark past GHOST_AFTER still idles. This drives
+    // the liveness branch of compute_time_event through the sweeper, distinct from
+    // the 24h-inactivity branch covered above.
+    let storage = fresh_storage().await;
+    let now = OffsetDateTime::now_utc();
+    // last activity only 30 min ago — NOT past IDLE_AFTER (24h), so only the
+    // all-pollers-stale path can idle this room.
+    let room = room_at(
+        "sweep-ghost-20260530-1200",
+        RoomState::Active,
+        now - Duration::minutes(30),
+    );
+    storage.create_room(&room).await.expect("create room");
+    join_with_poll(
+        &storage,
+        &room.id,
+        "sweep-test-opus47-aaaa",
+        "/a",
+        now - Duration::minutes(20),
+    )
+    .await;
+    join_with_poll(
+        &storage,
+        &room.id,
+        "sweep-test-opus47-bbbb",
+        "/b",
+        now - Duration::minutes(20),
+    )
+    .await;
+
+    let outcomes = sweep_once(&storage, now).await.expect("sweep ok");
+
+    assert_eq!(outcomes.len(), 1, "all-pollers-stale should idle the room");
+    assert_eq!(outcomes[0].from, RoomState::Active);
+    assert_eq!(outcomes[0].to, RoomState::Idle);
 }
 
 #[tokio::test]

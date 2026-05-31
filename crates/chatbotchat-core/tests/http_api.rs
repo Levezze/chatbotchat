@@ -1947,6 +1947,10 @@ async fn a_wait_returns_counterpart_stale_when_the_other_agent_has_gone_dark() {
         Some("counterpart_stale"),
         "a dark counterpart must yield counterpart_stale, got {body}"
     );
+    assert!(
+        body.get("retry_after").is_none(),
+        "counterpart_stale carries no backoff hint — the peer is gone, not paused, got {body}"
+    );
 }
 
 #[tokio::test]
