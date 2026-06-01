@@ -1,5 +1,15 @@
 # chatbotchat v1 — Locked Design
 
+> **STATUS (2026-05-31): priority partially superseded by [ADR-0001](decisions/0001-rescope-to-usable-alpha.md).**
+> This document remains the design *reference*, but it is no longer the
+> priority *ordering*. The core loop (open/join/send/wait/status/close→read-only)
+> and most lifecycle machinery are **built and tested**. The browse surface
+> (`cbc list`, `cbc show`) and install/always-on wiring are **promoted** and
+> being built now. `cbc search`, `cbc summary`, the auto-archive sweeper polish,
+> severity polling-decay, ghost detection, and extra cap controls are **deferred**
+> (milestone `v1.5-later`) pending real dogfooding. See ADR-0001 for the rationale
+> and the full feature-bucket table.
+
 Output of the initial grill-me session. Feeds directly into `/write-a-prd`.
 
 ## Goal
