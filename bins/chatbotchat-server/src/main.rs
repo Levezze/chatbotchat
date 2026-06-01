@@ -62,8 +62,10 @@ fn port_conflict_message(port: u16, pid: Option<u32>) -> String {
 /// `None` whenever `lsof` is missing, fails, or names no listener — the error
 /// message degrades to omitting the PID rather than failing.
 fn conflicting_pid(port: u16) -> Option<u32> {
+    // `-sTCP:LISTEN` restricts the match to the listening socket, so we name the
+    // server holding the port rather than some incidental client connection.
     let output = std::process::Command::new("lsof")
-        .args(["-ti", &format!("tcp:{port}")])
+        .args(["-ti", &format!("tcp:{port}"), "-sTCP:LISTEN"])
         .output()
         .ok()?;
     if !output.status.success() {

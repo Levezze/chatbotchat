@@ -32,12 +32,37 @@ pub fn server_binary_beside(cbc_exe: &Path) -> Option<PathBuf> {
 }
 
 /// Resolve the absolute path to `chatbotchat-server` to bake into the plist:
-/// prefer the sibling of the running `cbc`, then `which`, then the bare name
-/// (resolved on launchd's PATH at load time as a last resort).
-pub fn resolve_server_binary(cbc_exe: &Path) -> PathBuf {
-    server_binary_beside(cbc_exe)
-        .or_else(|| which_on_path("chatbotchat-server"))
-        .unwrap_or_else(|| PathBuf::from("chatbotchat-server"))
+/// prefer the sibling of the running `cbc`, then `which`. Errors rather than
+/// falling back to a bare name — launchd execs with a restricted PATH that does
+/// not include `~/.cargo/bin`, so a bare name would produce an agent that loads
+/// but never starts (a silent failure).
+pub fn resolve_server_binary(cbc_exe: &Path) -> anyhow::Result<PathBuf> {
+    choose_server_binary(
+        server_binary_beside(cbc_exe),
+        which_on_path("chatbotchat-server"),
+    )
+}
+
+/// Pick the daemon path from the sibling and PATH candidates, or error. Pure, so
+/// the precedence and the no-binary-found failure are tested without a filesystem.
+fn choose_server_binary(
+    beside: Option<PathBuf>,
+    on_path: Option<PathBuf>,
+) -> anyhow::Result<PathBuf> {
+    beside.or(on_path).context(
+        "could not locate the chatbotchat-server binary next to cbc or on PATH; \
+         install it (cargo install --path bins/chatbotchat-server) or put it on PATH first",
+    )
+}
+
+/// Escape the three characters that break XML text content. macOS install paths
+/// can legitimately contain `&`/`<`/`>`, and an unescaped one would make the
+/// generated plist unparseable — which `launchctl load` reports only at exec
+/// time, not as a load error.
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn which_on_path(name: &str) -> Option<PathBuf> {
@@ -64,10 +89,10 @@ fn stderr_log(config: &InstallConfig) -> PathBuf {
 /// `RunAtLoad`), logs under `~/Library/Logs`, and an `ExitTimeOut` that gives the
 /// daemon a grace window to finish before launchd escalates to SIGKILL.
 fn render_plist(config: &InstallConfig) -> String {
-    let binary = config.server_binary.display();
+    let binary = xml_escape(&config.server_binary.display().to_string());
     let port = config.port;
-    let out = stdout_log(config);
-    let err = stderr_log(config);
+    let out = xml_escape(&stdout_log(config).display().to_string());
+    let err = xml_escape(&stderr_log(config).display().to_string());
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -102,10 +127,38 @@ fn render_plist(config: &InstallConfig) -> String {
     <string>{err}</string>
 </dict>
 </plist>
-"#,
-        out = out.display(),
-        err = err.display(),
+"#
     )
+}
+
+/// Render a `newsyslog(8)` rule set that bounds the daemon's log growth: rotate
+/// each log at ~5 MB, keep 5 archives. No pidfile/signal column — the daemon
+/// holds its log open and does not reopen on signal, so a rotated file keeps
+/// receiving writes until the daemon's next (launchd-managed) restart; archives
+/// still age out by count, so disk stays bounded. No compression, to avoid
+/// compressing a file the daemon is still writing.
+fn render_newsyslog_conf(config: &InstallConfig) -> String {
+    let out = stdout_log(config).display().to_string();
+    let err = stderr_log(config).display().to_string();
+    format!(
+        "# chatbotchat log rotation for newsyslog(8).\n\
+         # Install: sudo cp this file to /etc/newsyslog.d/chatbotchat.conf\n\
+         # Fields: logfilename mode count size(KB) when\n\
+         {out}\t644\t5\t5120\t*\n\
+         {err}\t644\t5\t5120\t*\n"
+    )
+}
+
+/// Write the newsyslog rule set to a user-writable staging file under the log
+/// dir (the real `/etc/newsyslog.d/` needs root, so `install-daemon` stages it
+/// and prints the `sudo cp`). Returns the staging path.
+fn write_newsyslog_conf(config: &InstallConfig) -> anyhow::Result<PathBuf> {
+    std::fs::create_dir_all(&config.log_dir)
+        .with_context(|| format!("creating {}", config.log_dir.display()))?;
+    let path = config.log_dir.join("chatbotchat.newsyslog.conf");
+    std::fs::write(&path, render_newsyslog_conf(config))
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(path)
 }
 
 /// Render the agent and write it to `<plist_dir>/com.chatbotchat.server.plist`,
@@ -139,10 +192,25 @@ fn load_launchagent(plist_path: &Path) -> anyhow::Result<()> {
         "launchctl load failed for {}",
         plist_path.display()
     );
+    // `launchctl load` can exit 0 even when the job never registers (e.g. an
+    // unparseable plist), so probe explicitly: a registered label makes `list`
+    // exit 0. This turns a silent non-start into a loud error.
+    let listed = std::process::Command::new("launchctl")
+        .arg("list")
+        .arg(LABEL)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("running launchctl list")?;
+    anyhow::ensure!(
+        listed.success(),
+        "{LABEL} did not register after load — the daemon may have failed to start; \
+         check ~/Library/Logs/chatbotchat.err.log"
+    );
     Ok(())
 }
 
-fn print_next_steps(config: &InstallConfig, plist_path: &Path) {
+fn print_next_steps(config: &InstallConfig, plist_path: &Path, newsyslog_conf: &Path) {
     let port = config.port;
     println!("Installed launchd agent: {}", plist_path.display());
     println!("Daemon: {} --port {port}", config.server_binary.display());
@@ -152,6 +220,12 @@ fn print_next_steps(config: &InstallConfig, plist_path: &Path) {
     println!("Register the MCP tools globally for Claude Code (one time, all sessions):");
     println!(
         "  claude mcp add --scope user chatbotchat -e CBC_SERVER=http://127.0.0.1:{port} -- cbc mcp"
+    );
+    println!();
+    println!("Enable log rotation (needs sudo; one time):");
+    println!(
+        "  sudo cp {} /etc/newsyslog.d/chatbotchat.conf",
+        newsyslog_conf.display()
     );
     println!();
     println!("Verify:  launchctl list | grep {LABEL}");
@@ -164,7 +238,7 @@ fn print_next_steps(config: &InstallConfig, plist_path: &Path) {
 /// LaunchAgents directory.
 pub fn run(port: u16, plist_dir_override: Option<PathBuf>) -> anyhow::Result<()> {
     let cbc_exe = std::env::current_exe().context("locating the running cbc binary")?;
-    let server_binary = resolve_server_binary(&cbc_exe);
+    let server_binary = resolve_server_binary(&cbc_exe)?;
     let home = std::env::var_os("HOME").context("HOME not set; cannot place the launchd agent")?;
     let home = PathBuf::from(home);
     let config = InstallConfig {
@@ -174,8 +248,9 @@ pub fn run(port: u16, plist_dir_override: Option<PathBuf>) -> anyhow::Result<()>
         plist_dir: plist_dir_override.unwrap_or_else(|| home.join("Library").join("LaunchAgents")),
     };
     let plist_path = write_plist(&config)?;
+    let newsyslog_conf = write_newsyslog_conf(&config)?;
     load_launchagent(&plist_path)?;
-    print_next_steps(&config, &plist_path);
+    print_next_steps(&config, &plist_path, &newsyslog_conf);
     Ok(())
 }
 
@@ -230,5 +305,79 @@ mod tests {
         );
         // The log directory is created as a side effect.
         assert!(dir.path().join("Logs").is_dir());
+    }
+
+    #[test]
+    fn render_plist_escapes_xml_special_chars_in_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = InstallConfig {
+            server_binary: PathBuf::from("/opt/A & B/<svc>/chatbotchat-server"),
+            port: 8484,
+            log_dir: dir.path().join("Logs"),
+            plist_dir: dir.path().join("LA"),
+        };
+
+        let written = write_plist(&config).unwrap();
+        let contents = std::fs::read_to_string(&written).unwrap();
+
+        assert!(
+            contents.contains("/opt/A &amp; B/&lt;svc&gt;/chatbotchat-server"),
+            "binary path must be XML-escaped:\n{contents}"
+        );
+        assert!(
+            !contents.contains("A & B"),
+            "a raw, unescaped ampersand must not reach the plist:\n{contents}"
+        );
+    }
+
+    #[test]
+    fn choose_server_binary_prefers_sibling_then_path_then_errors() {
+        let sibling = PathBuf::from("/x/chatbotchat-server");
+        let on_path = PathBuf::from("/usr/local/bin/chatbotchat-server");
+
+        assert_eq!(
+            choose_server_binary(Some(sibling.clone()), Some(on_path.clone())).unwrap(),
+            sibling
+        );
+        assert_eq!(
+            choose_server_binary(None, Some(on_path.clone())).unwrap(),
+            on_path
+        );
+        assert!(
+            choose_server_binary(None, None).is_err(),
+            "with no binary found anywhere, install must error rather than bake an unrunnable path"
+        );
+    }
+
+    #[test]
+    fn newsyslog_conf_names_both_log_paths_with_a_rotation_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = InstallConfig {
+            server_binary: PathBuf::from("/opt/bin/chatbotchat-server"),
+            port: 8484,
+            log_dir: dir.path().join("Logs"),
+            plist_dir: dir.path().join("LA"),
+        };
+
+        let path = write_newsyslog_conf(&config).unwrap();
+        let conf = std::fs::read_to_string(&path).unwrap();
+
+        let out = dir.path().join("Logs").join("chatbotchat.log");
+        let err = dir.path().join("Logs").join("chatbotchat.err.log");
+        assert!(
+            conf.contains(&out.display().to_string()),
+            "conf must name the stdout log:\n{conf}"
+        );
+        assert!(
+            conf.contains(&err.display().to_string()),
+            "conf must name the stderr log:\n{conf}"
+        );
+        // A newsyslog rule is `logfile mode count size when`; assert the mode/size
+        // columns ride alongside the log path on a real rule line.
+        assert!(
+            conf.lines()
+                .any(|l| l.contains("chatbotchat.log") && l.contains("644") && l.contains("5120")),
+            "conf must carry a rotation rule (mode + size) for the log:\n{conf}"
+        );
     }
 }

@@ -88,10 +88,21 @@ cbc install-daemon
 ```
 
 This resolves the daemon's path, writes a launchd agent to
-`~/Library/LaunchAgents/com.chatbotchat.server.plist`, and loads it. The daemon
-binds `127.0.0.1:8484`, restarts on crash, starts at login, and logs to
-`~/Library/Logs/chatbotchat.log` (+ `.err.log`). Use `--port <N>` to bind a
-different port. The DB lives at `~/.chatbotchat/state.db`.
+`~/Library/LaunchAgents/com.chatbotchat.server.plist`, loads it, and verifies it
+registered. The daemon binds `127.0.0.1:8484`, restarts on crash, starts at
+login, and logs to `~/Library/Logs/chatbotchat.log` (+ `.err.log`). Use
+`--port <N>` to bind a different port. The DB lives at `~/.chatbotchat/state.db`.
+
+It also stages a `newsyslog` log-rotation rule and prints a one-line `sudo cp`
+to enable it (rotation needs root, so `cbc` can't install it for you):
+
+```sh
+sudo cp ~/Library/Logs/chatbotchat.newsyslog.conf /etc/newsyslog.d/chatbotchat.conf
+```
+
+That bounds log growth (rotate at ~5 MB, keep 5 archives). The running daemon
+keeps writing to the rotated file until its next restart, then reopens the fresh
+one — fine for a localhost dev daemon.
 
 **3. Register the MCP tools globally for Claude Code (one time, all sessions):**
 
@@ -201,8 +212,9 @@ launchctl list | grep com.chatbotchat.server
 tail -f ~/Library/Logs/chatbotchat.log ~/Library/Logs/chatbotchat.err.log
 ```
 
-Reload it with `cbc install-daemon` (it unloads any prior copy first). launchd
-does **not** rotate the logs; add a `newsyslog.d` rule if they grow.
+Reload it with `cbc install-daemon` (it unloads any prior copy first). Log
+rotation is handled by the `newsyslog` rule `cbc install-daemon` stages — run the
+`sudo cp … /etc/newsyslog.d/chatbotchat.conf` it prints if you haven't yet.
 
 **MCP tools not appearing in Claude Code.** Confirm the user-scope registration
 with `claude mcp list`; if it's missing, re-run the `claude mcp add --scope user

@@ -15,7 +15,8 @@
     launchctl load -w ~/Library/LaunchAgents/com.chatbotchat.server.plist
 
   Logs land in ~/Library/Logs/chatbotchat.log (+ .err.log). launchd does not
-  rotate them; add a newsyslog.d rule if they grow (see the README).
+  rotate them itself; `cbc install-daemon` stages a newsyslog rule and prints a
+  `sudo cp ... /etc/newsyslog.d/chatbotchat.conf` to enable rotation (see README).
 -->
 <plist version="1.0">
 <dict>
