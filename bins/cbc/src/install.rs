@@ -177,9 +177,14 @@ pub fn write_plist(config: &InstallConfig) -> anyhow::Result<PathBuf> {
 /// Best-effort (re)load of the agent: unload any prior copy first so re-running
 /// `install-daemon` refreshes cleanly, then load with `-w` (enable at boot).
 fn load_launchagent(plist_path: &Path) -> anyhow::Result<()> {
+    // Silenced: on a fresh install there is nothing to unload, and launchctl
+    // prints "Unload failed: 5: Input/output error" to stderr. We already ignore
+    // the status, so swallow the output too rather than alarming the user.
     let _ = std::process::Command::new("launchctl")
         .arg("unload")
         .arg(plist_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status();
     let status = std::process::Command::new("launchctl")
         .arg("load")
