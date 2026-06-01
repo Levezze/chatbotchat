@@ -141,6 +141,13 @@ pub struct WaitRequest {
     pub repo: String,
     pub model: String,
     pub cwd: String,
+    /// Optional per-call upper bound (seconds) on the long-poll, capped by the
+    /// server's own wait cap. The MCP `cbc_wait` tool sets this below the
+    /// client's tool-call timeout so the poll returns `paused_by_timeout` (for a
+    /// re-poll) instead of erroring client-side. The CLI omits it and gets the
+    /// full server cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_wait_secs: Option<u32>,
 }
 
 /// Response body for `GET /rooms/:id/wait`: either the next message addressed to

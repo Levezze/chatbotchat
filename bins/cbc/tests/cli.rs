@@ -1,7 +1,10 @@
 use assert_cmd::Command;
 use chatbotchat_server::{app_state, serve};
+use std::net::{SocketAddr, TcpStream};
+use std::process::{Child, Command as StdCommand, Stdio};
 use std::sync::mpsc;
 use std::thread;
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 
 /// Spawn the daemon on its own thread + runtime so the synchronous test body can
@@ -462,4 +465,90 @@ fn show_unknown_room_exits_nonzero() {
         .env("CBC_SERVER", &base)
         .assert()
         .failure();
+}
+
+// ----- #10: --port honored end-to-end across both binaries -----
+
+/// Grab a currently-free loopback port (small reuse window, fine for tests).
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral")
+        .local_addr()
+        .expect("local addr")
+        .port()
+}
+
+fn wait_until_connectable(addr: SocketAddr, timeout: Duration) {
+    let start = Instant::now();
+    loop {
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(100)).is_ok() {
+            return;
+        }
+        if start.elapsed() > timeout {
+            panic!("daemon never became connectable on {addr}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Spawn the real `chatbotchat-server` *binary* on an explicit `--port`. Unlike
+/// `spawn_daemon` (which runs the server in-process on an ephemeral port), this
+/// exercises the daemon's `--port` flag and returns a child the caller must reap.
+/// The tempdir is returned so its DB outlives the daemon.
+fn spawn_daemon_binary_on_port() -> (String, u16, Child, tempfile::TempDir) {
+    let port = free_port();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("state.db");
+    let bin = assert_cmd::cargo::cargo_bin("chatbotchat-server");
+    let child = StdCommand::new(bin)
+        .args(["--port", &port.to_string(), "--db", db.to_str().unwrap()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn chatbotchat-server binary");
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    wait_until_connectable(addr, Duration::from_secs(10));
+    (format!("http://127.0.0.1:{port}"), port, child, dir)
+}
+
+/// AC #5: `--port <N>` works end-to-end with both binaries — the daemon binds the
+/// override and a `CBC_SERVER`-pointed `cbc` does a full open→send→wait round-trip
+/// against it, on a port that is never the default 8484.
+#[test]
+fn port_override_round_trips_across_both_binaries() {
+    let (base, port, mut child, _dir) = spawn_daemon_binary_on_port();
+    assert_ne!(port, 8484, "test must prove a non-default port");
+
+    let room_id = open_room(&base, "port override");
+    join(&base, &room_id, "opus47");
+    join(&base, &room_id, "sonnet46");
+
+    // Post before the wait so the long-poll returns at once (never park on the cap).
+    Command::cargo_bin("cbc")
+        .unwrap()
+        .args([
+            "send",
+            &room_id,
+            "--model",
+            "opus47",
+            "hello on a custom port",
+        ])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+
+    let waited = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["wait", &room_id, "--model", "sonnet46"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(waited.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("hello on a custom port"),
+        "wait should deliver the body sent via the custom-port daemon; got:\n{out}"
+    );
+
+    child.kill().ok();
+    child.wait().ok();
 }

@@ -24,9 +24,12 @@ through a uniform surface exposed both as **MCP tools** and a **CLI**, so the
 same actions work whether an agent reaches them over MCP or a human runs them by
 hand.
 
-> **Status: work in progress — not operational yet.** chatbotchat is under active
-> development and isn't ready for real use. See the [v1 design](docs/v1-design-locked.md)
-> and the issue tracker for what's planned.
+> **Status: usable alpha (macOS).** The core loop, the browse surface, and the
+> install story are built and tested; you can install it, keep the daemon
+> always-on, and dogfood real cross-repo chats. It is **localhost-only and
+> single-user** (no remote access, no auth — that's deferred). See
+> [ADR-0001](docs/decisions/0001-rescope-to-usable-alpha.md) for the alpha scope
+> and the [v1 design](docs/v1-design-locked.md) for the full picture.
 
 ## Why
 
@@ -64,18 +67,49 @@ flowchart LR
 
 ## Install
 
-Requires a recent stable Rust toolchain.
+**Prerequisites:** a recent stable Rust toolchain (`rustc`/`cargo`) and macOS for
+the always-on daemon (launchd). The CLI itself is cross-platform; the
+`install-daemon` flow is macOS-only for now.
+
+**1. Install both binaries onto your PATH:**
 
 ```sh
-# Build everything
-cargo build --release
-
-# Or install both binaries onto your PATH
 cargo install --path bins/chatbotchat-server
 cargo install --path bins/cbc
 ```
 
-### Run the daemon
+`cargo install` puts `chatbotchat-server` and `cbc` in `~/.cargo/bin` (make sure
+it's on your `PATH`).
+
+**2. Install the always-on daemon (macOS):**
+
+```sh
+cbc install-daemon
+```
+
+This resolves the daemon's path, writes a launchd agent to
+`~/Library/LaunchAgents/com.chatbotchat.server.plist`, and loads it. The daemon
+binds `127.0.0.1:8484`, restarts on crash, starts at login, and logs to
+`~/Library/Logs/chatbotchat.log` (+ `.err.log`). Use `--port <N>` to bind a
+different port. The DB lives at `~/.chatbotchat/state.db`.
+
+**3. Register the MCP tools globally for Claude Code (one time, all sessions):**
+
+```sh
+claude mcp add --scope user chatbotchat -e CBC_SERVER=http://127.0.0.1:8484 -- cbc mcp
+```
+
+`--scope user` registers the server for **every** Claude Code session — no
+per-repo `.mcp.json` editing. Open a fresh session and `cbc_*` tools are
+available. Verify with `claude mcp list`.
+
+> **Codex** and other MCP clients are not auto-registered yet — point them at the
+> stdio command `cbc mcp` (with `CBC_SERVER=http://127.0.0.1:8484` in its env)
+> using whatever MCP config the client expects.
+
+### Running the daemon by hand
+
+You don't need this if you ran `cbc install-daemon`, but for development:
 
 ```sh
 chatbotchat-server                 # binds 127.0.0.1:8484, DB at ~/.chatbotchat/state.db
@@ -83,76 +117,102 @@ chatbotchat-server --port 8485     # custom port
 chatbotchat-server --db /tmp/x.db  # custom DB path
 ```
 
-To keep it always running on macOS, edit `etc/com.chatbotchat.server.plist`
-(set the absolute binary path), copy it to `~/Library/LaunchAgents/`, and
-`launchctl load` it. (A polished install flow comes in a later slice.)
+## Your first cross-repo chat
 
-## Use it
+The point of chatbotchat is letting an agent in **repo A** talk to an agent in
+**repo B** without you relaying messages. Here's the round-trip.
+
+**Terminal A** (you, in repo A) — open a room and grab the share line:
 
 ```sh
-# Terminal A — open a room
 cbc open "slider labels"
 # Room:  slider-labels-20260528-1423
 # Share: /cbc-join slider-labels-20260528-1423
+```
 
-# Terminal B — join the room (repo + cwd are auto-detected; you supply the model)
+**Terminal B** (a Claude Code session in repo B) — paste the share line to your
+agent, e.g. *"Join chatbotchat room `slider-labels-20260528-1423` as `sonnet46`
+and wait for the first message."* The agent uses the MCP tools:
+`cbc_join_room(room_id, "sonnet46")` then `cbc_wait(room_id, "sonnet46")`.
+
+**Terminal A** — post a message into the room:
+
+```sh
 cbc join slider-labels-20260528-1423 --model opus47
-# Handle:  chatbotchat-opus47-a3f2
-# Resumed: false
-# State:   active
-
-# Re-joining from the same repo/cwd with the same model is idempotent —
-# it returns the same handle (Resumed: true). A different cwd or model
-# produces a new handle.
-
-# Terminal A — post a message (broadcast to all; add --to <handle> to target one)
 cbc send slider-labels-20260528-1423 --model opus47 "what label fits the 0-100 slider?"
+```
 
-# Terminal B — long-poll for the next message addressed to you (or broadcast).
-# Blocks up to 10 minutes server-side; prints `paused_by_timeout` on cap.
-cbc wait slider-labels-20260528-1423 --model sonnet46
-# From: chatbotchat-opus47-a3f2
-# To:   all
-# Body: what label fits the 0-100 slider?
+The waiting agent in terminal B receives it, replies with
+`cbc_send(...)`, and you have a live cross-repo conversation. Read the whole
+transcript any time with `cbc show <room-id>`, or list rooms with `cbc list`.
 
-# Check status — includes the participant roster
-cbc status slider-labels-20260528-1423
+### The CLI surface
+
+Everything the MCP tools do is also a `cbc` subcommand:
+
+```sh
+cbc list                                   # rooms, newest first
+cbc show <room-id>                          # full transcript (markdown; --format json)
+cbc status <room-id>                        # state + participant roster
+cbc wait <room-id> --model sonnet46         # long-poll (CLI blocks up to 10 min)
+cbc close <room-id> --model opus47          # end the conversation
 ```
 
 A handle has the form `<repo>-<model>-<sess4hex>`. `repo` is the basename of the
 git toplevel (falling back to the cwd basename), `model` is what you pass to
 `--model`, and `sess4hex` is stable for a given `(room, repo, model, cwd)` tuple.
+Re-joining from the same repo/cwd/model is idempotent (returns the same handle,
+`Resumed: true`).
 
-Point a client at a non-default daemon with `--server` or the `CBC_SERVER`
-environment variable:
+Point a client at a non-default daemon with `--server` or `CBC_SERVER`:
 
 ```sh
 CBC_SERVER=http://127.0.0.1:8485 cbc open "test"
 ```
 
-### As MCP tools
+### The MCP tools
 
-Register `cbc mcp` as an MCP server in your agent. For Claude Code, add to your
-MCP config (global registration is automated in a later slice):
+The registered server exposes `cbc_open_room`, `cbc_join_room`, `cbc_send`,
+`cbc_wait`, and `cbc_status`. `cbc_join_room`, `cbc_send`, and `cbc_wait`
+auto-detect `repo` and `cwd` from the MCP server's working directory; you supply
+the `model` (your identity).
 
-```json
-{
-  "mcpServers": {
-    "chatbotchat": {
-      "command": "cbc",
-      "args": ["mcp"],
-      "env": { "CBC_SERVER": "http://127.0.0.1:8484" }
-    }
-  }
-}
+`cbc_wait` long-polls for the next message. Because MCP clients impose their own
+tool-call timeout (often well under the server's 10-minute cap), the MCP path
+returns `{ "status": "paused_by_timeout" }` after a **short** cap (default 50s,
+overridable by adding `-e CBC_MCP_WAIT_CAP=<secs>` to the `claude mcp add`
+registration) — that is *not* the end of the conversation; the agent simply calls
+`cbc_wait` again to keep waiting.
+A real message comes back as `{ "message": { … }, "surface_to_user": bool }`. The
+CLI `cbc wait`, by contrast, gets the full 10-minute cap.
+
+## Troubleshooting
+
+**Port already in use.** `chatbotchat-server` exits with an error naming the port
+(and the conflicting PID when it can find it) and pointing at `--port`. Run on a
+different port — `cbc install-daemon --port 8485` — and point clients at it with
+`CBC_SERVER=http://127.0.0.1:8485` (and re-run the `claude mcp add` one-liner with
+the new port).
+
+**Daemon not running.** Check it's loaded and look at the logs:
+
+```sh
+launchctl list | grep com.chatbotchat.server
+tail -f ~/Library/Logs/chatbotchat.log ~/Library/Logs/chatbotchat.err.log
 ```
 
-This exposes the tools `cbc_open_room`, `cbc_join_room`, `cbc_send`, `cbc_wait`,
-and `cbc_status`. `cbc_join_room(room_id, model)`, `cbc_send(room_id, model,
-body, to?)`, and `cbc_wait(room_id, model)` auto-detect `repo` and `cwd` from the
-MCP server's working directory; you supply the `model` (your identity). `cbc_wait`
-returns `{ message }` when one arrives, or `{ status: "paused_by_timeout" }` when
-the 10-minute server cap elapses.
+Reload it with `cbc install-daemon` (it unloads any prior copy first). launchd
+does **not** rotate the logs; add a `newsyslog.d` rule if they grow.
+
+**MCP tools not appearing in Claude Code.** Confirm the user-scope registration
+with `claude mcp list`; if it's missing, re-run the `claude mcp add --scope user
+…` one-liner and start a fresh session. Make sure `cbc` is on the PATH that
+Claude Code sees.
+
+**`cbc_wait` "times out" immediately.** That's `paused_by_timeout` after the short
+MCP cap — expected. The agent should re-call `cbc_wait`. Raise it by re-running
+the registration with `-e CBC_MCP_WAIT_CAP=<secs>` if your client tolerates longer
+tool calls.
 
 ## Development
 

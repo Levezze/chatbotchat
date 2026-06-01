@@ -700,9 +700,21 @@ async fn wait_room(
     //   counterpart yields `counterpart_stale` at once rather than a full-cap
     //   timeout (AC #5).
     // - Otherwise park for the full cap.
+    // The full-cap park is bounded by the server cap and, when the caller
+    // supplied one (the MCP path), the per-call `max_wait_secs` — whichever is
+    // shorter. This lets `cbc_wait` return before a client's tool-call timeout
+    // without changing the server-wide cap the CLI relies on. The backoff and
+    // ghost branches below are already short, so they ignore it.
+    let full_cap = match req.max_wait_secs {
+        Some(secs) => state.wait_cap.min(Duration::from_secs(secs as u64)),
+        None => state.wait_cap,
+    };
     let backoff = active_sentinel_backoff(&state.storage, &id, &caller.handle).await?;
     let (outcome, ghosted) = if let Some(secs) = backoff {
-        let cap = state.wait_cap.min(Duration::from_secs(secs as u64));
+        // min(server cap, per-call max, backoff): the per-call cap (MCP path) must
+        // still win when it is shorter than the backoff, or an MCP `cbc_wait`
+        // would overshoot its cap behind a counterpart's away-signal.
+        let cap = full_cap.min(Duration::from_secs(secs as u64));
         (
             wait_for_message(&state.storage, &state.hub, &id, &caller.handle, cap).await?,
             false,
@@ -721,14 +733,7 @@ async fn wait_room(
         )
     } else {
         (
-            wait_for_message(
-                &state.storage,
-                &state.hub,
-                &id,
-                &caller.handle,
-                state.wait_cap,
-            )
-            .await?,
+            wait_for_message(&state.storage, &state.hub, &id, &caller.handle, full_cap).await?,
             false,
         )
     };

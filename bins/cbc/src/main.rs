@@ -4,6 +4,7 @@ use chatbotchat_protocol::{MessageView, RoomTranscript, WaitResponse};
 use clap::{Parser, Subcommand, ValueEnum};
 
 mod context;
+mod install;
 mod mcp;
 
 /// Output format for `cbc show`.
@@ -146,6 +147,15 @@ enum Command {
     },
     /// Run as an MCP stdio server (wired in a later cycle).
     Mcp,
+    /// Install the always-on launchd agent for the daemon (macOS) and load it.
+    InstallDaemon {
+        /// Port the daemon should listen on (baked into the launchd agent).
+        #[arg(long, default_value_t = 8484)]
+        port: u16,
+        /// Directory to write the agent into. Defaults to ~/Library/LaunchAgents.
+        #[arg(long)]
+        plist_dir: Option<std::path::PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -221,7 +231,7 @@ async fn main() -> anyhow::Result<()> {
             let repo = context::detect_repo();
             let cwd = context::detect_cwd();
             let resp = client
-                .wait(&room_id, &repo, &model, &cwd)
+                .wait(&room_id, &repo, &model, &cwd, None)
                 .await
                 .context("waiting for message")?;
             match resp {
@@ -343,6 +353,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Mcp => {
             mcp::run(client).await.context("running MCP server")?;
+        }
+        Command::InstallDaemon { port, plist_dir } => {
+            install::run(port, plist_dir).context("installing the launchd daemon")?;
         }
     }
 
