@@ -1,15 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Minimal launchd agent for the chatbotchat daemon.
+  Reference launchd agent for the chatbotchat daemon.
 
-  This is the slice-1 baseline; restart policy, log rotation, and graceful
-  shutdown are hardened in slice #10. Edit the absolute path to the binary to
-  match your install (`cargo install --path bins/chatbotchat-server` puts it in
-  ~/.cargo/bin), then:
+  You normally do NOT edit or copy this by hand: `cbc install-daemon` resolves the
+  daemon's absolute path, writes the equivalent agent into ~/Library/LaunchAgents/,
+  and loads it. This file documents what that agent looks like and serves as a
+  manual fallback.
+
+  Manual install: replace CHANGE_ME with the absolute path to chatbotchat-server
+  (`which chatbotchat-server`), then:
 
     cp etc/com.chatbotchat.server.plist ~/Library/LaunchAgents/
-    launchctl load ~/Library/LaunchAgents/com.chatbotchat.server.plist
+    launchctl load -w ~/Library/LaunchAgents/com.chatbotchat.server.plist
+
+  Logs land in ~/Library/Logs/chatbotchat.log (+ .err.log). launchd does not
+  rotate them itself; `cbc install-daemon` stages a newsyslog rule and prints a
+  `sudo cp ... /etc/newsyslog.d/chatbotchat.conf` to enable rotation (see README).
 -->
 <plist version="1.0">
 <dict>
@@ -23,16 +30,26 @@
         <string>8484</string>
     </array>
 
+    <!-- Start at login and restart on crash -> always-on. -->
     <key>RunAtLoad</key>
     <true/>
 
     <key>KeepAlive</key>
     <true/>
 
+    <!-- Long-running, low-priority background service. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <!-- Grace window before launchd escalates SIGTERM -> SIGKILL on stop/reboot,
+         so the daemon can finish in-flight work rather than being hard-killed. -->
+    <key>ExitTimeOut</key>
+    <integer>25</integer>
+
     <key>StandardOutPath</key>
-    <string>/tmp/chatbotchat-server.log</string>
+    <string>/Users/CHANGE_ME/Library/Logs/chatbotchat.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/tmp/chatbotchat-server.err.log</string>
+    <string>/Users/CHANGE_ME/Library/Logs/chatbotchat.err.log</string>
 </dict>
 </plist>

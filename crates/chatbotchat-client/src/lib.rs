@@ -108,15 +108,22 @@ impl HttpClient {
     }
 
     /// Long-poll for the next message addressed to the caller (or broadcast).
-    /// The per-request timeout sits just above the server's 10-minute cap so the
-    /// client never abandons the call before the server returns.
+    /// `max_wait_secs` optionally caps the server-side poll below its 10-minute
+    /// cap (the MCP path uses this to return before a client tool-call timeout);
+    /// `None` gets the full server cap. The per-request HTTP timeout sits just
+    /// above the effective cap so the client never abandons the call early.
     pub async fn wait(
         &self,
         room_id: &str,
         repo: &str,
         model: &str,
         cwd: &str,
+        max_wait_secs: Option<u32>,
     ) -> Result<WaitResponse, ClientError> {
+        let http_timeout = match max_wait_secs {
+            Some(secs) => std::time::Duration::from_secs(secs as u64 + 30),
+            None => std::time::Duration::from_secs(660),
+        };
         let resp = self
             .http
             .get(format!("{}/rooms/{room_id}/wait", self.base_url))
@@ -124,8 +131,9 @@ impl HttpClient {
                 repo: repo.to_string(),
                 model: model.to_string(),
                 cwd: cwd.to_string(),
+                max_wait_secs,
             })
-            .timeout(std::time::Duration::from_secs(660))
+            .timeout(http_timeout)
             .send()
             .await?;
         decode(resp).await

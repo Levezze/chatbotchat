@@ -116,8 +116,10 @@ fn port_conflict_exits_with_helpful_error() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
     assert!(
-        stderr.contains(&port.to_string()) && stderr.contains("another instance"),
-        "stderr should name the port and hint at a running instance; got: {stderr}"
+        stderr.contains(&port.to_string())
+            && stderr.contains("another instance")
+            && stderr.contains("--port"),
+        "stderr should name the port, hint at a running instance, and point at --port; got: {stderr}"
     );
 }
 

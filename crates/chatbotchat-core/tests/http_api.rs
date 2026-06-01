@@ -2235,3 +2235,119 @@ async fn transcript_for_missing_room_is_404() {
     let (status, _) = get_transcript(&app, "no-such-room-20260101-0000").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+// ----- #10: per-call max_wait_secs (MCP path returns before the client's tool timeout) -----
+
+/// `wait` with an explicit `max_wait_secs` query param. The MCP `cbc_wait` tool
+/// passes this to return before a client's tool-call timeout, well under the
+/// server's 10-minute cap.
+async fn wait_with_max(
+    app: &axum::Router,
+    room_id: &str,
+    repo: &str,
+    model: &str,
+    cwd: &str,
+    max_wait_secs: u32,
+) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!(
+            "/rooms/{room_id}/wait?repo={repo}&model={model}&cwd={cwd}&max_wait_secs={max_wait_secs}"
+        ))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = body_json(resp.into_body()).await;
+    (status, body)
+}
+
+#[tokio::test]
+async fn max_wait_secs_caps_below_server_wait_cap() {
+    // Server cap is the full 10 minutes (DEFAULT_WAIT_CAP); a per-call
+    // max_wait_secs must shorten it so the MCP path returns before a client's
+    // tool-call timeout. With no message queued, the wait returns
+    // paused_by_timeout promptly — not after parking for 600s.
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "mcp wait cap").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    join(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+
+    let (status, body) = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        wait_with_max(&app, &room_id, "repo-b", "sonnet46", "/work/b", 1),
+    )
+    .await
+    .expect("wait must honor max_wait_secs and return well before the 600s server cap");
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"].as_str(), Some("paused_by_timeout"));
+}
+
+#[tokio::test]
+async fn max_wait_secs_still_delivers_a_queued_message() {
+    // A short cap must not drop a message already waiting: the claim happens
+    // before the deadline check.
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "mcp wait cap delivery").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    join(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+
+    send(
+        &app,
+        &room_id,
+        "repo-a",
+        "opus47",
+        "/work/a",
+        None,
+        "queued before wait",
+    )
+    .await;
+
+    let (status, body) = wait_with_max(&app, &room_id, "repo-b", "sonnet46", "/work/b", 1).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["message"]["body"].as_str(), Some("queued before wait"));
+}
+
+#[tokio::test]
+async fn max_wait_secs_caps_below_the_counterpart_backoff() {
+    // When the counterpart is parked behind an active waiting_user sentinel, the
+    // server normally shortens the poll to the severity backoff (>= 10s). A
+    // smaller per-call max_wait_secs must still win — otherwise an MCP cbc_wait
+    // would overshoot its cap (and the client's tool-call timeout) in exactly the
+    // scenario the backoff machinery exists for.
+    let app = test_router().await; // 600s server cap
+    let room_id = open_room_id(&app, "mcp cap vs backoff").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    join(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+
+    // opus47 signals it is consulting its user → sonnet46's wait would back off.
+    signal(
+        &app,
+        &room_id,
+        "repo-a",
+        "opus47",
+        "/work/a",
+        "waiting_user",
+        Some("low"),
+        Some("which label?"),
+    )
+    .await;
+
+    // First wait consumes the sentinel message itself (delivered immediately).
+    let (_, first) = wait_with_max(&app, &room_id, "repo-b", "sonnet46", "/work/b", 1).await;
+    assert_eq!(first["message"]["type"].as_str(), Some("waiting_user"));
+
+    // Second wait has no new message but the sentinel is still active, so the
+    // server would park for the severity backoff (>= 10s). max_wait_secs=1 must
+    // still cap it, returning paused_by_timeout within the per-call bound.
+    let (status, body) = tokio::time::timeout(
+        std::time::Duration::from_secs(6),
+        wait_with_max(&app, &room_id, "repo-b", "sonnet46", "/work/b", 1),
+    )
+    .await
+    .expect("wait must honor max_wait_secs even while backing off behind a sentinel");
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"].as_str(), Some("paused_by_timeout"));
+}

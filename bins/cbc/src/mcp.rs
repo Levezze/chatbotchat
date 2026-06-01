@@ -187,7 +187,7 @@ impl CbcMcp {
     }
 
     #[tool(
-        description = "Long-poll for the next message addressed to you (or broadcast) in a room. Identity is (repo, model, cwd) — repo and cwd are auto-detected, you supply the model (slice-3 identity arg). Blocks up to the server cap (10 min); returns {\"status\":\"paused_by_timeout\"} on cap, otherwise {\"message\":{...},\"surface_to_user\":bool} as JSON. When surface_to_user is true the conversation has hit the soft cap — consult your user and send your next turn with human=true. When the counterpart is paused consulting its user, the response also carries \"retry_after\" (seconds): the server already shortened this poll to that, so stay quiet — don't re-poll in a tight loop while it backs off; the field grows the longer the pause persists."
+        description = "Long-poll for the next message addressed to you (or broadcast) in a room. Identity is (repo, model, cwd) — repo and cwd are auto-detected, you supply the model (slice-3 identity arg). Blocks up to a short per-call cap (default 50s, set by CBC_MCP_WAIT_CAP) so the tool call returns before your client's tool-call timeout rather than erroring. Returns {\"message\":{...},\"surface_to_user\":bool} when a message arrives, or {\"status\":\"paused_by_timeout\"} when the cap elapses with nothing for you — that is NOT the end of the conversation: call cbc_wait again to keep waiting. Other terminal statuses (\"paused\", \"closed\", \"archived\", \"counterpart_stale\") mean stop polling. When surface_to_user is true the conversation has hit the soft cap — consult your user and send your next turn with human=true. When the counterpart is paused consulting its user, the response also carries \"retry_after\" (seconds): stay quiet that long before re-polling — don't loop tightly while it backs off; the field grows the longer the pause persists."
     )]
     async fn cbc_wait(
         &self,
@@ -195,7 +195,11 @@ impl CbcMcp {
     ) -> String {
         let repo = crate::context::detect_repo();
         let cwd = crate::context::detect_cwd();
-        match self.client.wait(&room_id, &repo, &model, &cwd).await {
+        match self
+            .client
+            .wait(&room_id, &repo, &model, &cwd, Some(mcp_wait_cap_secs()))
+            .await
+        {
             Ok(resp) => json_or_err(&resp),
             Err(e) => err_json(&e.to_string()),
         }
@@ -307,9 +311,56 @@ fn err_json(message: &str) -> String {
     serde_json::json!({ "error": message }).to_string()
 }
 
+/// Default per-call cap (seconds) for the MCP `cbc_wait` long-poll. Short enough
+/// to return before a typical MCP client's tool-call timeout so the call never
+/// errors out; the agent simply re-polls. The server's own cap (10 min) still
+/// applies to the CLI, which omits the per-call cap.
+const DEFAULT_MCP_WAIT_CAP_SECS: u32 = 50;
+
+/// Resolve the MCP wait cap from the raw `CBC_MCP_WAIT_CAP` value. Falls back to
+/// the default when unset or unparseable, and clamps to `[1, 590]` so it stays a
+/// positive value under the server's 600s cap.
+fn parse_mcp_wait_cap(raw: Option<&str>) -> u32 {
+    raw.and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(DEFAULT_MCP_WAIT_CAP_SECS)
+        .clamp(1, 590)
+}
+
+/// The per-call cap the MCP `cbc_wait` tool passes to the server, from
+/// `CBC_MCP_WAIT_CAP` (seconds) or the default.
+fn mcp_wait_cap_secs() -> u32 {
+    parse_mcp_wait_cap(std::env::var("CBC_MCP_WAIT_CAP").ok().as_deref())
+}
+
 /// Serve the MCP tools over stdio until the client disconnects.
 pub async fn run(client: HttpClient) -> anyhow::Result<()> {
     let service = CbcMcp { client }.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_wait_cap_defaults_when_unset_or_garbage() {
+        assert_eq!(parse_mcp_wait_cap(None), DEFAULT_MCP_WAIT_CAP_SECS);
+        assert_eq!(
+            parse_mcp_wait_cap(Some("nonsense")),
+            DEFAULT_MCP_WAIT_CAP_SECS
+        );
+    }
+
+    #[test]
+    fn mcp_wait_cap_honors_a_valid_override() {
+        assert_eq!(parse_mcp_wait_cap(Some("45")), 45);
+        assert_eq!(parse_mcp_wait_cap(Some("  120 ")), 120);
+    }
+
+    #[test]
+    fn mcp_wait_cap_clamps_under_the_server_cap() {
+        assert_eq!(parse_mcp_wait_cap(Some("0")), 1);
+        assert_eq!(parse_mcp_wait_cap(Some("100000")), 590);
+    }
 }
