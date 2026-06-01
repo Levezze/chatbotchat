@@ -4,7 +4,7 @@ use crate::lifecycle::{self, LifecycleEvent};
 use crate::message::{Message, MessageType, Severity};
 use crate::participant::Participant;
 use crate::room::{Room, RoomConfig, RoomState};
-use crate::storage::{Storage, StorageError};
+use crate::storage::{RoomSummaryRow, Storage, StorageError};
 use crate::waiter::{backoff_secs, wait_for_message, Hub, WaitOutcome};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -13,9 +13,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chatbotchat_protocol::{
     ErrorEnvelope, JoinRoomRequest, JoinRoomResponse, LifecycleRequest, LifecycleResponse,
-    MessageView, OpenRoomRequest, OpenRoomResponse, ParticipantView, RoomStatus,
-    SendMessageRequest, SendMessageResponse, SignalRequest, SignalResponse, WaitRequest,
-    WaitResponse,
+    MessageView, OpenRoomRequest, OpenRoomResponse, ParticipantView, RoomStatus, RoomSummary,
+    RoomTranscript, SendMessageRequest, SendMessageResponse, SignalRequest, SignalResponse,
+    WaitRequest, WaitResponse,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -67,8 +67,9 @@ impl AppState {
 /// in-process `oneshot` tests and the real daemon binary.
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/rooms", post(open_room))
+        .route("/rooms", post(open_room).get(list_rooms))
         .route("/rooms/{id}", get(get_room))
+        .route("/rooms/{id}/transcript", get(transcript))
         .route("/rooms/{id}/join", post(join_room))
         .route("/rooms/{id}/messages", post(send_message))
         .route("/rooms/{id}/signals", post(signal_room))
@@ -155,6 +156,61 @@ async fn get_room(
         .ok_or(ApiError::NotFound)?;
     let participants = state.storage.list_participants(&id).await?;
     Ok(Json(room_to_status(&room, &participants)?))
+}
+
+/// Query params for `GET /rooms`. `state` deserializes from the same snake_case
+/// names the wire uses (`active`, `closed`, …); an unknown value fails the
+/// extractor and axum returns 400 — no hand-rolled validation. Both default so a
+/// bare `GET /rooms` is valid (no filter, archived hidden).
+#[derive(Debug, serde::Deserialize)]
+struct ListRoomsQuery {
+    #[serde(default)]
+    state: Option<RoomState>,
+    #[serde(default)]
+    all: bool,
+}
+
+/// `GET /rooms` — the browse list. Rooms newest-first, each with its live
+/// participant count. `?state=X` filters to one state; `?all=true` includes
+/// archived; the default hides archived. Backs `cbc list`.
+async fn list_rooms(
+    State(state): State<AppState>,
+    Query(q): Query<ListRoomsQuery>,
+) -> Result<Json<Vec<RoomSummary>>, ApiError> {
+    let rows = state.storage.list_rooms(q.state, q.all).await?;
+    let summaries = rows
+        .iter()
+        .map(room_summary)
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    Ok(Json(summaries))
+}
+
+/// `GET /rooms/:id/transcript` — the full room for `cbc show`: metadata, caps and
+/// their current counters, participants, and every message oldest-first. Separate
+/// from `GET /rooms/:id` (which serves the lighter `RoomStatus`) so neither view
+/// constrains the other.
+async fn transcript(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<RoomTranscript>, ApiError> {
+    let room = state
+        .storage
+        .get_room(&id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let participants = state.storage.list_participants(&id).await?;
+    let messages = state.storage.all_messages(&id).await?;
+    let hard_cap_count = state.storage.count_capped_messages(&id).await?;
+    // The soft-cap run is evaluated at the room's latest message (high-water seq).
+    let high_water = state.storage.current_seq(&id).await?;
+    let soft_cap_consecutive = state.storage.consecutive_msg_count(&id, high_water).await?;
+    Ok(Json(room_to_transcript(
+        &room,
+        &participants,
+        &messages,
+        hard_cap_count,
+        soft_cap_consecutive,
+    )?))
 }
 
 /// Register the caller as a participant. Idempotent on `(room_id, repo, model,
@@ -778,21 +834,23 @@ fn rand_sess_candidates() -> impl Iterator<Item = String> {
     })
 }
 
+fn participant_view(p: &Participant) -> Result<ParticipantView, ApiError> {
+    Ok(ParticipantView {
+        handle: p.handle.clone(),
+        repo: p.repo.clone(),
+        model: p.model.clone(),
+        cwd: p.cwd.clone(),
+        joined_at: p
+            .joined_at
+            .format(&Rfc3339)
+            .map_err(|e| ApiError::Internal(e.to_string()))?,
+    })
+}
+
 fn room_to_status(room: &Room, participants: &[Participant]) -> Result<RoomStatus, ApiError> {
     let participants = participants
         .iter()
-        .map(|p| {
-            Ok(ParticipantView {
-                handle: p.handle.clone(),
-                repo: p.repo.clone(),
-                model: p.model.clone(),
-                cwd: p.cwd.clone(),
-                joined_at: p
-                    .joined_at
-                    .format(&Rfc3339)
-                    .map_err(|e| ApiError::Internal(e.to_string()))?,
-            })
-        })
+        .map(participant_view)
         .collect::<Result<Vec<_>, ApiError>>()?;
 
     Ok(RoomStatus {
@@ -808,6 +866,57 @@ fn room_to_status(room: &Room, participants: &[Participant]) -> Result<RoomStatu
             .format(&Rfc3339)
             .map_err(|e| ApiError::Internal(e.to_string()))?,
         participants,
+    })
+}
+
+fn room_summary(row: &RoomSummaryRow) -> Result<RoomSummary, ApiError> {
+    Ok(RoomSummary {
+        room_id: row.room.id.clone(),
+        state: row.room.state.as_str().to_string(),
+        subject: row.room.subject.clone(),
+        last_activity_at: row
+            .room
+            .last_activity_at
+            .format(&Rfc3339)
+            .map_err(|e| ApiError::Internal(e.to_string()))?,
+        participant_count: row.participant_count,
+    })
+}
+
+fn room_to_transcript(
+    room: &Room,
+    participants: &[Participant],
+    messages: &[Message],
+    hard_cap_count: i64,
+    soft_cap_consecutive: i64,
+) -> Result<RoomTranscript, ApiError> {
+    let participants = participants
+        .iter()
+        .map(participant_view)
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    let messages = messages
+        .iter()
+        .map(message_view)
+        .collect::<Result<Vec<_>, ApiError>>()?;
+
+    Ok(RoomTranscript {
+        id: room.id.clone(),
+        subject: room.subject.clone(),
+        state: room.state.as_str().to_string(),
+        started_at: room
+            .started_at
+            .format(&Rfc3339)
+            .map_err(|e| ApiError::Internal(e.to_string()))?,
+        last_activity_at: room
+            .last_activity_at
+            .format(&Rfc3339)
+            .map_err(|e| ApiError::Internal(e.to_string()))?,
+        hard_cap: room.config.hard_cap,
+        soft_cap: room.config.soft_cap,
+        hard_cap_count,
+        soft_cap_consecutive,
+        participants,
+        messages,
     })
 }
 

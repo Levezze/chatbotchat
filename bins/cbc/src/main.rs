@@ -1,10 +1,19 @@
 use anyhow::Context;
 use chatbotchat_client::HttpClient;
-use chatbotchat_protocol::WaitResponse;
-use clap::{Parser, Subcommand};
+use chatbotchat_protocol::{MessageView, RoomTranscript, WaitResponse};
+use clap::{Parser, Subcommand, ValueEnum};
 
 mod context;
 mod mcp;
+
+/// Output format for `cbc show`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ShowFormat {
+    /// Human-readable markdown transcript (default).
+    Markdown,
+    /// The raw transcript DTO as JSON, for scripting.
+    Json,
+}
 
 /// `cbc` — the agent-facing client for chatbotchat. Talks to the local daemon
 /// over HTTP. Same surface is exposed to MCP via the `mcp` subcommand.
@@ -85,6 +94,23 @@ enum Command {
         /// Self-declared model name (your identity; e.g. opus47).
         #[arg(long)]
         model: String,
+    },
+    /// List rooms (newest-first). Hides archived unless `--all` or `--state archived`.
+    List {
+        /// Include archived rooms (mutually exclusive with `--state`).
+        #[arg(long, conflicts_with = "state")]
+        all: bool,
+        /// Filter to a single state (active, idle, paused, stale, closed, archived).
+        #[arg(long)]
+        state: Option<String>,
+    },
+    /// Show a room's full transcript (metadata, caps, participants, all messages).
+    Show {
+        /// Room id to show.
+        room_id: String,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = ShowFormat::Markdown)]
+        format: ShowFormat,
     },
     /// Show the status of an existing room.
     Status {
@@ -237,6 +263,37 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        Command::List { all, state } => {
+            let rooms = client
+                .list_rooms(state.as_deref(), all)
+                .await
+                .context("listing rooms")?;
+            if rooms.is_empty() {
+                println!("(no rooms)");
+            } else {
+                for r in &rooms {
+                    let plural = if r.participant_count == 1 { "" } else { "s" };
+                    println!(
+                        "{}  [{}]  {} participant{}  {}",
+                        r.room_id, r.state, r.participant_count, plural, r.subject
+                    );
+                }
+            }
+        }
+        Command::Show { room_id, format } => {
+            let transcript = client
+                .transcript(&room_id)
+                .await
+                .context("fetching transcript")?;
+            match format {
+                ShowFormat::Json => {
+                    let json = serde_json::to_string_pretty(&transcript)
+                        .context("serializing transcript")?;
+                    println!("{json}");
+                }
+                ShowFormat::Markdown => print!("{}", render_transcript_markdown(&transcript)),
+            }
+        }
         Command::Status { room_id } => {
             let status = client.status(&room_id).await.context("fetching status")?;
             println!("Room:    {}", status.id);
@@ -290,6 +347,62 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Render a room transcript as human-readable markdown for `cbc show`. Sentinel
+/// messages (type != `msg`) are rendered like the `wait` handler surfaces them:
+/// the signal type, its severity, and the question the other agent is asking its
+/// user — a `msg` shows its body instead.
+fn render_transcript_markdown(t: &RoomTranscript) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# {}\n\n", t.subject));
+    out.push_str(&format!("- Room: {}\n", t.id));
+    out.push_str(&format!("- State: {}\n", t.state));
+    out.push_str(&format!("- Started: {}\n", t.started_at));
+    out.push_str(&format!("- Last activity: {}\n", t.last_activity_at));
+    out.push_str(&format!(
+        "- Caps: hard {}/{}, soft {}/{}\n",
+        t.hard_cap_count, t.hard_cap, t.soft_cap_consecutive, t.soft_cap
+    ));
+
+    out.push_str("\n## Participants\n");
+    if t.participants.is_empty() {
+        out.push_str("- (none)\n");
+    } else {
+        for p in &t.participants {
+            out.push_str(&format!("- {} ({} @ {})\n", p.handle, p.model, p.cwd));
+        }
+    }
+
+    out.push_str("\n## Messages\n");
+    if t.messages.is_empty() {
+        out.push_str("- (none)\n");
+    } else {
+        for m in &t.messages {
+            out.push_str(&render_message_markdown(m));
+        }
+    }
+    out
+}
+
+fn render_message_markdown(m: &MessageView) -> String {
+    let to = m.to.as_deref().unwrap_or("all");
+    if m.msg_type != "msg" {
+        let sev = match &m.severity {
+            Some(s) => format!(" ({s})"),
+            None => String::new(),
+        };
+        let question = match &m.question_text {
+            Some(q) => format!(" — asks its user: {q}"),
+            None => String::new(),
+        };
+        format!(
+            "- [{}] **{}** → {to} _signal: {}{sev}_{question}\n",
+            m.seq, m.from, m.msg_type
+        )
+    } else {
+        format!("- [{}] **{}** → {to}: {}\n", m.seq, m.from, m.body)
+    }
 }
 
 /// Surface the slice 5b polling backoff hint, when present. The server already

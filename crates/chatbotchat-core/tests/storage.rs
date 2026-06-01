@@ -936,3 +936,176 @@ async fn update_room_state_persists_the_detail_field() {
         "the pause reason must survive the events round-trip"
     );
 }
+
+// --- list_rooms + all_messages (browse surface, issue #27) ---
+
+/// A room with an explicit id, state, and last_activity_at so list ordering and
+/// state filtering are deterministic (distinct activity timestamps, no ties).
+fn room_with(id: &str, state: RoomState, last_activity: OffsetDateTime) -> Room {
+    Room {
+        id: id.into(),
+        subject: format!("subject for {id}"),
+        started_at: last_activity,
+        last_activity_at: last_activity,
+        state,
+        state_changed_at: last_activity,
+        config: RoomConfig::default(),
+        prev_room_id: None,
+    }
+}
+
+#[tokio::test]
+async fn list_rooms_orders_newest_first_and_counts_participants() {
+    let storage = fresh_storage().await;
+    let now = OffsetDateTime::now_utc();
+    // older room, two participants; newer room, none.
+    let older = room_with(
+        "older-20260528-1000",
+        RoomState::Active,
+        now - Duration::hours(2),
+    );
+    let newer = room_with("newer-20260528-1200", RoomState::Active, now);
+    storage.create_room(&older).await.expect("create older");
+    storage.create_room(&newer).await.expect("create newer");
+    storage
+        .create_participant(&participant_with_handle(
+            &older.id,
+            "older-opus47-aaaa",
+            "/a",
+        ))
+        .await
+        .expect("p1");
+    storage
+        .create_participant(&participant_with_handle(
+            &older.id,
+            "older-sonnet46-bbbb",
+            "/b",
+        ))
+        .await
+        .expect("p2");
+
+    let rooms = storage
+        .list_rooms(None, false)
+        .await
+        .expect("list_rooms ok");
+
+    // newest-first by last_activity_at.
+    assert_eq!(rooms.len(), 2);
+    assert_eq!(rooms[0].room.id, newer.id, "newest room first");
+    assert_eq!(rooms[1].room.id, older.id);
+    // participant counts are per-room.
+    assert_eq!(rooms[0].participant_count, 0);
+    assert_eq!(rooms[1].participant_count, 2);
+}
+
+#[tokio::test]
+async fn list_rooms_hides_archived_by_default() {
+    let storage = fresh_storage().await;
+    let now = OffsetDateTime::now_utc();
+    storage
+        .create_room(&room_with("live-20260528-1000", RoomState::Active, now))
+        .await
+        .expect("live");
+    storage
+        .create_room(&room_with(
+            "gone-20260528-0900",
+            RoomState::Archived,
+            now - Duration::hours(1),
+        ))
+        .await
+        .expect("archived");
+
+    let rooms = storage.list_rooms(None, false).await.expect("list ok");
+    let ids: Vec<&str> = rooms.iter().map(|r| r.room.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["live-20260528-1000"],
+        "archived hidden by default"
+    );
+}
+
+#[tokio::test]
+async fn list_rooms_all_includes_archived() {
+    let storage = fresh_storage().await;
+    let now = OffsetDateTime::now_utc();
+    storage
+        .create_room(&room_with("live-20260528-1000", RoomState::Active, now))
+        .await
+        .expect("live");
+    storage
+        .create_room(&room_with(
+            "gone-20260528-0900",
+            RoomState::Archived,
+            now - Duration::hours(1),
+        ))
+        .await
+        .expect("archived");
+
+    let rooms = storage.list_rooms(None, true).await.expect("list all ok");
+    assert_eq!(rooms.len(), 2, "--all includes archived");
+}
+
+#[tokio::test]
+async fn list_rooms_state_filter_returns_only_that_state() {
+    let storage = fresh_storage().await;
+    let now = OffsetDateTime::now_utc();
+    storage
+        .create_room(&room_with("active-20260528-1000", RoomState::Active, now))
+        .await
+        .expect("active");
+    storage
+        .create_room(&room_with(
+            "closed-20260528-0900",
+            RoomState::Closed,
+            now - Duration::hours(1),
+        ))
+        .await
+        .expect("closed");
+
+    let rooms = storage
+        .list_rooms(Some(RoomState::Closed), false)
+        .await
+        .expect("filtered ok");
+    let ids: Vec<&str> = rooms.iter().map(|r| r.room.id.as_str()).collect();
+    assert_eq!(ids, vec!["closed-20260528-0900"]);
+}
+
+#[tokio::test]
+async fn list_rooms_empty_when_no_rooms() {
+    let storage = fresh_storage().await;
+    let rooms = storage.list_rooms(None, false).await.expect("list ok");
+    assert!(rooms.is_empty(), "no rooms -> empty list");
+}
+
+#[tokio::test]
+async fn all_messages_returns_every_message_chronological() {
+    let storage = fresh_storage().await;
+    let room = sample_room();
+    storage.create_room(&room).await.expect("create room");
+    let now = OffsetDateTime::now_utc();
+    let m1 = storage
+        .create_message(&room.id, "smoke-test-opus47-aaaa", None, "first", now)
+        .await
+        .expect("m1");
+    let m2 = storage
+        .create_message(&room.id, "smoke-test-opus47-aaaa", None, "second", now)
+        .await
+        .expect("m2");
+    let m3 = storage
+        .create_message(&room.id, "smoke-test-opus47-aaaa", None, "third", now)
+        .await
+        .expect("m3");
+
+    let msgs = storage
+        .all_messages(&room.id)
+        .await
+        .expect("all_messages ok");
+    let seqs: Vec<i64> = msgs.iter().map(|m| m.seq).collect();
+    assert_eq!(
+        seqs,
+        vec![m1.seq, m2.seq, m3.seq],
+        "chronological by seq, all present"
+    );
+    assert_eq!(msgs[0].body, "first");
+    assert_eq!(msgs[2].body, "third");
+}
