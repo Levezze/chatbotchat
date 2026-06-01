@@ -33,6 +33,14 @@ pub struct Storage {
     pool: SqlitePool,
 }
 
+/// One row of the room list: the room plus its live participant count. The count
+/// is computed in the list query (a correlated subquery), not by an N+1 walk.
+#[derive(Debug, Clone)]
+pub struct RoomSummaryRow {
+    pub room: Room,
+    pub participant_count: i64,
+}
+
 impl Storage {
     /// Connect to a SQLite database at `url`, creating the file if needed,
     /// enabling WAL, and applying migrations. Use `sqlite::memory:` for tests.
@@ -427,6 +435,21 @@ impl Storage {
         rows.iter().rev().map(row_to_message).collect()
     }
 
+    /// Every message in a room, oldest-first — the full transcript backing
+    /// `cbc show`. Unlike `recent_messages` (a recency window via `DESC LIMIT`),
+    /// this returns the complete log ordered by `seq`.
+    pub async fn all_messages(&self, room_id: &str) -> Result<Vec<Message>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT seq, room_id, sender, recipient, body, created_at, type, from_human, \
+                    severity, question_text \
+             FROM messages WHERE room_id = ? ORDER BY seq",
+        )
+        .bind(room_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_message).collect()
+    }
+
     /// Refresh a participant's `last_poll_at` (liveness). Called on every `wait`;
     /// consumed by stale-counterpart detection in a later slice.
     pub async fn touch_last_poll(
@@ -640,6 +663,51 @@ impl Storage {
         .await?;
 
         rows.iter().map(row_to_room).collect()
+    }
+
+    /// Rooms for the browse surface (`cbc list`), newest-first by activity, each
+    /// with its live participant count. Filter precedence: an explicit `state`
+    /// wins (`--state X`); else `all` includes every room (`--all`); else the
+    /// default hides terminal `archived` rooms. The participant count is a
+    /// correlated subquery so this stays one round-trip regardless of room count.
+    pub async fn list_rooms(
+        &self,
+        state: Option<RoomState>,
+        all: bool,
+    ) -> Result<Vec<RoomSummaryRow>, StorageError> {
+        const SELECT: &str = "SELECT r.id, r.subject, r.started_at, r.last_activity_at, r.state, \
+                    r.state_changed_at, r.config, r.prev_room_id, \
+                    (SELECT COUNT(*) FROM participants p WHERE p.room_id = r.id) AS participant_count \
+             FROM rooms r";
+        const ORDER: &str = "ORDER BY r.last_activity_at DESC";
+
+        let rows = match (state, all) {
+            (Some(s), _) => {
+                sqlx::query(&format!("{SELECT} WHERE r.state = ? {ORDER}"))
+                    .bind(s.as_str())
+                    .fetch_all(&self.pool)
+                    .await?
+            }
+            (None, true) => {
+                sqlx::query(&format!("{SELECT} {ORDER}"))
+                    .fetch_all(&self.pool)
+                    .await?
+            }
+            (None, false) => {
+                sqlx::query(&format!("{SELECT} WHERE r.state != 'archived' {ORDER}"))
+                    .fetch_all(&self.pool)
+                    .await?
+            }
+        };
+
+        rows.iter()
+            .map(|row| {
+                Ok(RoomSummaryRow {
+                    room: row_to_room(row)?,
+                    participant_count: row.try_get("participant_count")?,
+                })
+            })
+            .collect()
     }
 }
 

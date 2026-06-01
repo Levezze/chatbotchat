@@ -206,6 +206,38 @@ pub struct RoomStatus {
     pub participants: Vec<ParticipantView>,
 }
 
+/// One room in the `GET /rooms` list (backs `cbc list`). A lightweight row:
+/// identity, state, subject, last activity, and live participant count — no
+/// messages. Uses `room_id` (not `id`) to match the CLI column header.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomSummary {
+    pub room_id: String,
+    pub state: String,
+    pub subject: String,
+    pub last_activity_at: String,
+    pub participant_count: i64,
+}
+
+/// Response body for `GET /rooms/:id/transcript` (backs `cbc show`). The full
+/// room: metadata, caps and their current counters, participants, and every
+/// message oldest-first. `hard_cap_count` is the number of cap-counting (`msg`)
+/// rows; `soft_cap_consecutive` is the consecutive autonomous run at the room's
+/// latest message (what the wait path compares against `soft_cap - 1`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomTranscript {
+    pub id: String,
+    pub subject: String,
+    pub state: String,
+    pub started_at: String,
+    pub last_activity_at: String,
+    pub hard_cap: u32,
+    pub soft_cap: u32,
+    pub hard_cap_count: i64,
+    pub soft_cap_consecutive: i64,
+    pub participants: Vec<ParticipantView>,
+    pub messages: Vec<MessageView>,
+}
+
 /// Uniform error body for failed requests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorEnvelope {

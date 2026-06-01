@@ -2050,3 +2050,188 @@ async fn an_archived_room_still_serves_reads() {
     assert_eq!(body["state"].as_str(), Some("archived"));
     assert_eq!(body["subject"].as_str(), Some("archived readable room"));
 }
+
+// --- GET /rooms (list) and GET /rooms/:id/transcript (show) — issue #27 ---
+
+async fn get_rooms(app: &axum::Router, query: &str) -> (StatusCode, Value) {
+    let uri = if query.is_empty() {
+        "/rooms".to_string()
+    } else {
+        format!("/rooms?{query}")
+    };
+    let req = Request::builder()
+        .method("GET")
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = body_json(resp.into_body()).await;
+    (status, body)
+}
+
+async fn get_transcript(app: &axum::Router, room_id: &str) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/rooms/{room_id}/transcript"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = body_json(resp.into_body()).await;
+    (status, body)
+}
+
+#[tokio::test]
+async fn list_rooms_returns_summaries_newest_first() {
+    let app = test_router().await;
+    let older = open_room_id(&app, "older room").await;
+    let newer = open_room_id(&app, "newer room").await;
+    // one participant on the older room — count must be per-room.
+    join(&app, &older, "repo", "opus47", "/a").await;
+
+    let (status, body) = get_rooms(&app, "").await;
+    assert_eq!(status, StatusCode::OK);
+    let rooms = body.as_array().expect("list is a json array");
+    assert_eq!(rooms.len(), 2);
+    // newest-first by last_activity_at.
+    assert_eq!(rooms[0]["room_id"].as_str(), Some(newer.as_str()));
+    assert_eq!(rooms[1]["room_id"].as_str(), Some(older.as_str()));
+    // summary fields present.
+    assert_eq!(rooms[0]["state"].as_str(), Some("active"));
+    assert_eq!(rooms[0]["subject"].as_str(), Some("newer room"));
+    assert!(rooms[0]["last_activity_at"].is_string());
+    assert_eq!(rooms[0]["participant_count"].as_i64(), Some(0));
+    assert_eq!(rooms[1]["participant_count"].as_i64(), Some(1));
+}
+
+#[tokio::test]
+async fn list_rooms_is_empty_array_when_no_rooms() {
+    let app = test_router().await;
+    let (status, body) = get_rooms(&app, "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().map(|a| a.len()), Some(0), "no rooms -> []");
+}
+
+#[tokio::test]
+async fn list_rooms_hides_archived_by_default_but_state_filter_shows_it() {
+    let (app, storage) = test_router_returning_storage().await;
+    let room_id = open_room_id(&app, "to be archived").await;
+    let now = OffsetDateTime::now_utc();
+    storage
+        .update_room_state(&room_id, RoomState::Active, RoomState::Archived, now, None)
+        .await
+        .expect("arrange archived");
+
+    // default hides archived.
+    let (status, body) = get_rooms(&app, "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().map(|a| a.len()), Some(0), "archived hidden");
+
+    // explicit ?state=archived surfaces it.
+    let (status, body) = get_rooms(&app, "state=archived").await;
+    assert_eq!(status, StatusCode::OK);
+    let rooms = body.as_array().expect("array");
+    assert_eq!(rooms.len(), 1);
+    assert_eq!(rooms[0]["room_id"].as_str(), Some(room_id.as_str()));
+
+    // ?all=true also includes it.
+    let (_, body) = get_rooms(&app, "all=true").await;
+    assert_eq!(
+        body.as_array().map(|a| a.len()),
+        Some(1),
+        "--all includes archived"
+    );
+}
+
+#[tokio::test]
+async fn list_rooms_rejects_unknown_state_with_400() {
+    let app = test_router().await;
+    // A query-extractor rejection has a plain-text body, so assert on status
+    // directly rather than going through the JSON-parsing `get_rooms` helper.
+    let req = Request::builder()
+        .method("GET")
+        .uri("/rooms?state=bogus")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "an unknown ?state value is a 400, not a silent empty list"
+    );
+}
+
+#[tokio::test]
+async fn transcript_returns_full_room_with_caps_counters_and_messages() {
+    let app = test_router().await;
+    let room_id = open_with_caps(&app, "transcript room", Some(5), Some(3)).await;
+    join(&app, &room_id, "transcript", "opus47", "/a").await;
+    let (_, p2) = join(&app, &room_id, "transcript", "sonnet46", "/b").await;
+    let p2_handle = p2["handle"].as_str().expect("p2 handle").to_string();
+
+    // a msg, then a waiting_user sentinel, then two more msgs (so the soft-cap
+    // consecutive run at the latest message is 2, and the sentinel is mid-stream).
+    send(&app, &room_id, "transcript", "opus47", "/a", None, "first").await;
+    signal(
+        &app,
+        &room_id,
+        "transcript",
+        "sonnet46",
+        "/b",
+        "waiting_user",
+        Some("high"),
+        Some("which label fits 0-100?"),
+    )
+    .await;
+    send(
+        &app,
+        &room_id,
+        "transcript",
+        "sonnet46",
+        "/b",
+        None,
+        "second",
+    )
+    .await;
+    send(&app, &room_id, "transcript", "opus47", "/a", None, "third").await;
+
+    let (status, body) = get_transcript(&app, &room_id).await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert_eq!(body["id"].as_str(), Some(room_id.as_str()));
+    assert_eq!(body["state"].as_str(), Some("active"));
+    assert_eq!(body["hard_cap"].as_i64(), Some(5));
+    assert_eq!(body["soft_cap"].as_i64(), Some(3));
+    // three `msg` rows count toward the hard cap; the sentinel does not.
+    assert_eq!(body["hard_cap_count"].as_i64(), Some(3));
+    // two autonomous msgs since the waiting_user boundary.
+    assert_eq!(body["soft_cap_consecutive"].as_i64(), Some(2));
+    assert_eq!(body["participants"].as_array().map(|a| a.len()), Some(2));
+
+    let messages = body["messages"].as_array().expect("messages array");
+    assert_eq!(
+        messages.len(),
+        4,
+        "all messages incl. the sentinel, chronological"
+    );
+    assert_eq!(messages[0]["body"].as_str(), Some("first"));
+    // the sentinel carries its severity and question_text.
+    let sentinel = messages
+        .iter()
+        .find(|m| m["type"].as_str() == Some("waiting_user"))
+        .expect("a waiting_user sentinel in the transcript");
+    assert_eq!(sentinel["from"].as_str(), Some(p2_handle.as_str()));
+    assert_eq!(sentinel["severity"].as_str(), Some("high"));
+    assert_eq!(
+        sentinel["question_text"].as_str(),
+        Some("which label fits 0-100?")
+    );
+}
+
+#[tokio::test]
+async fn transcript_for_missing_room_is_404() {
+    let app = test_router().await;
+    let (status, _) = get_transcript(&app, "no-such-room-20260101-0000").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

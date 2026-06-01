@@ -3,8 +3,8 @@
 
 use chatbotchat_protocol::{
     ErrorEnvelope, JoinRoomRequest, JoinRoomResponse, LifecycleRequest, LifecycleResponse,
-    OpenRoomRequest, OpenRoomResponse, RoomStatus, SendMessageRequest, SendMessageResponse,
-    SignalRequest, SignalResponse, WaitRequest, WaitResponse,
+    OpenRoomRequest, OpenRoomResponse, RoomStatus, RoomSummary, RoomTranscript, SendMessageRequest,
+    SendMessageResponse, SignalRequest, SignalResponse, WaitRequest, WaitResponse,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -167,6 +167,35 @@ impl HttpClient {
         let resp = self
             .http
             .get(format!("{}/rooms/{room_id}", self.base_url))
+            .send()
+            .await?;
+        decode(resp).await
+    }
+
+    /// List rooms (`cbc list`). `state` filters to one state; `all` includes
+    /// archived. With neither, the server hides archived by default.
+    pub async fn list_rooms(
+        &self,
+        state: Option<&str>,
+        all: bool,
+    ) -> Result<Vec<RoomSummary>, ClientError> {
+        let mut req = self.http.get(format!("{}/rooms", self.base_url));
+        if let Some(s) = state {
+            req = req.query(&[("state", s)]);
+        }
+        if all {
+            req = req.query(&[("all", "true")]);
+        }
+        let resp = req.send().await?;
+        decode(resp).await
+    }
+
+    /// Fetch a room's full transcript (`cbc show`): metadata, caps and counters,
+    /// participants, and every message oldest-first.
+    pub async fn transcript(&self, room_id: &str) -> Result<RoomTranscript, ClientError> {
+        let resp = self
+            .http
+            .get(format!("{}/rooms/{room_id}/transcript", self.base_url))
             .send()
             .await?;
         decode(resp).await

@@ -278,3 +278,188 @@ fn status_reports_open_room() {
     assert!(status_out.contains("active"));
     assert!(status_out.contains("status check"));
 }
+
+// --- list + show (browse surface, issue #27) ---
+
+/// Send a `msg` over the CLI (helper for transcript tests).
+fn send(base: &str, room_id: &str, model: &str, body: &str) {
+    Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["send", room_id, "--model", model, body])
+        .env("CBC_SERVER", base)
+        .assert()
+        .success();
+}
+
+#[test]
+fn list_shows_open_rooms_with_state_and_subject() {
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "list me");
+    join(&base, &room_id, "opus47");
+
+    let listed = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["list"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(listed.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains(&room_id),
+        "list should show the room id; got:\n{out}"
+    );
+    assert!(
+        out.contains("active"),
+        "list should show the state; got:\n{out}"
+    );
+    assert!(
+        out.contains("list me"),
+        "list should show the subject; got:\n{out}"
+    );
+}
+
+#[test]
+fn list_with_no_rooms_prints_placeholder() {
+    let base = spawn_daemon();
+    let listed = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["list"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(listed.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("(no rooms)"),
+        "an empty list should print a placeholder, not nothing; got:\n{out}"
+    );
+}
+
+#[test]
+fn list_state_filter_narrows_results() {
+    let base = spawn_daemon();
+    let active_room = open_room(&base, "stays active");
+    let closed_room = open_room(&base, "gets closed");
+    join(&base, &closed_room, "opus47");
+    Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["close", &closed_room, "--model", "opus47"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+
+    let listed = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["list", "--state", "closed"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(listed.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains(&closed_room),
+        "closed filter should show the closed room; got:\n{out}"
+    );
+    assert!(
+        !out.contains(&active_room),
+        "closed filter must exclude the active room; got:\n{out}"
+    );
+}
+
+#[test]
+fn list_unknown_state_exits_nonzero() {
+    let base = spawn_daemon();
+    Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["list", "--state", "bogus"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .failure();
+}
+
+#[test]
+fn show_renders_markdown_transcript_with_sentinel() {
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "show me");
+    join(&base, &room_id, "opus47");
+    join(&base, &room_id, "sonnet46");
+    send(&base, &room_id, "opus47", "the message body");
+    Command::cargo_bin("cbc")
+        .unwrap()
+        .args([
+            "signal",
+            &room_id,
+            "--model",
+            "sonnet46",
+            "--type",
+            "waiting_user",
+            "--severity",
+            "high",
+            "--question",
+            "should I merge?",
+        ])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+
+    let shown = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["show", &room_id])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(shown.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("show me"),
+        "markdown should carry the subject; got:\n{out}"
+    );
+    assert!(
+        out.contains("the message body"),
+        "markdown should carry the message; got:\n{out}"
+    );
+    assert!(
+        out.contains("waiting_user"),
+        "markdown should render the sentinel type; got:\n{out}"
+    );
+    assert!(
+        out.contains("high"),
+        "markdown should render the sentinel severity; got:\n{out}"
+    );
+    assert!(
+        out.contains("should I merge?"),
+        "markdown should render the question; got:\n{out}"
+    );
+}
+
+#[test]
+fn show_json_format_outputs_parseable_json() {
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "show json");
+    join(&base, &room_id, "opus47");
+    send(&base, &room_id, "opus47", "jsonable");
+
+    let shown = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["show", &room_id, "--format", "json"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(shown.get_output().stdout.clone()).unwrap();
+    let v: serde_json::Value =
+        serde_json::from_str(&out).expect("show --format json must emit valid JSON");
+    assert_eq!(v["id"].as_str(), Some(room_id.as_str()));
+    assert!(
+        v["messages"].is_array(),
+        "transcript json carries a messages array"
+    );
+    assert_eq!(v["messages"][0]["body"].as_str(), Some("jsonable"));
+}
+
+#[test]
+fn show_unknown_room_exits_nonzero() {
+    let base = spawn_daemon();
+    Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["show", "no-such-room-20260101-0000"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .failure();
+}
