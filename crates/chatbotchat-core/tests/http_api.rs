@@ -507,6 +507,47 @@ async fn a_busy_counterpart_who_read_my_message_yields_retry_after() {
 }
 
 #[tokio::test]
+async fn a_busy_wait_still_parks_the_full_cap_and_does_not_short_circuit() {
+    // Guards the load-bearing scope constraint that busy does NOT collapse the
+    // long-poll: busy is consulted only for the post-park `retry_after` hint, never
+    // in the cap-decision tree, so a busy waiter must still park ~the full cap and
+    // time out — not return early the way the ghost/zero-cap branch does. (The
+    // *shortening* case — busy mistakenly `min`-ed into the cap like waiting_user —
+    // is unobservable in a fast test because the Med backoff floor is 20s, far
+    // above any test cap; this catches the cheaper, real regression: busy wired to
+    // zero/short-circuit the park.) A 200ms cap with no reply must take ~200ms; an
+    // early return (≈0ms) would mean busy was miswired into the cap path.
+    let app = test_router_with_cap(std::time::Duration::from_millis(200)).await;
+    let room_id = open_room_id(&app, "busy parks").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    join(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+
+    // A asks; B reads it → A is busy with nothing left to deliver.
+    send(&app, &room_id, "repo-a", "opus47", "/work/a", None, "q").await;
+    wait(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+
+    let start = std::time::Instant::now();
+    let (status, body) = wait(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    let elapsed = start.elapsed();
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["status"].as_str(),
+        Some("paused_by_timeout"),
+        "got {body}"
+    );
+    assert_eq!(
+        body["retry_after"].as_u64(),
+        Some(20),
+        "the busy hint still rides the full-cap timeout, got {body}"
+    );
+    assert!(
+        elapsed >= std::time::Duration::from_millis(120),
+        "a busy wait must park ~the full 200ms cap, not short-circuit; took {elapsed:?}"
+    );
+}
+
+#[tokio::test]
 async fn the_busy_hint_clears_once_the_counterpart_replies() {
     // User-facing behaviour: once B replies, A's delivery of that reply must carry
     // no `retry_after` — the conversation moved on, don't tell A to back off.
