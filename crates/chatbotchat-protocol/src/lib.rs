@@ -156,13 +156,22 @@ pub struct WaitRequest {
 /// `{ "status": "paused_by_timeout" }`. `surface_to_user` is the soft-cap signal:
 /// `true` when this delivery is the (soft_cap − 1)th consecutive autonomous turn,
 /// telling the receiving agent to fold its user in before replying.
-/// `retry_after` (slice 5b) is the server-computed polling backoff in seconds:
-/// present (on either variant) only while the counterpart is parked behind an
-/// active `waiting_user` sentinel, telling the receiver how long it just backed
-/// off and roughly how long to stay quiet. `skip_serializing_if` keeps it *off
-/// the wire* — not `null` — when no sentinel is active, which is the contract.
-/// Untagged disambiguation is unaffected: `message`/`status` stay the keys that
-/// pick the variant.
+/// `retry_after` is the server-computed polling backoff in seconds: present (on
+/// either variant) while the counterpart is *engaged* and the receiver should
+/// space out its re-polls. Two cases set it, in precedence order. First (slice
+/// 5b): the counterpart is parked behind an active `waiting_user` sentinel —
+/// consulting its human — with a severity-scaled, time-decayed value. Otherwise:
+/// the counterpart is *busy* — it has read the receiver's latest message and not
+/// yet replied (a long autonomous compose emits no sentinel, so the server infers
+/// this from the read cursor), reusing the same decay curve at a fixed Med
+/// severity and growing the longer the counterpart stays silent. In both cases
+/// the meaning to the receiver is identical: the conversation is alive, stay quiet
+/// roughly this long, keep waiting — do not abandon it or pull a human in to
+/// relay. `counterpart_stale` never carries it (the peer is gone, not engaged).
+/// `skip_serializing_if` keeps it *off the wire* — not `null` — when the
+/// counterpart is neither paused nor busy, which is the contract. Untagged
+/// disambiguation is unaffected: `message`/`status` stay the keys that pick the
+/// variant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum WaitResponse {

@@ -745,7 +745,16 @@ async fn wait_room(
     // cleared the pause would carry a stale one. The `counterpart_stale` arm
     // deliberately carries no hint: the counterpart is gone, not paused, so there
     // is nothing to back off behind.
-    let retry_after = active_sentinel_backoff(&state.storage, &id, &caller.handle).await?;
+    //
+    // Precedence: an explicit `waiting_user` sentinel (counterpart consulting its
+    // human) is the more specific state and wins; otherwise fall back to the
+    // inferred *busy* hint (counterpart read my latest and is composing a reply).
+    // The `ghosted` arm below overrides this to `None`, so a busy hint never leaks
+    // into a `counterpart_stale` response — which keeps ghost behaviour unchanged.
+    let retry_after = match active_sentinel_backoff(&state.storage, &id, &caller.handle).await? {
+        Some(secs) => Some(secs),
+        None => counterpart_busy_backoff(&state.storage, &id, &caller.handle).await?,
+    };
 
     Ok(Json(match outcome {
         WaitOutcome::Message(m) => {
@@ -812,6 +821,56 @@ async fn active_sentinel_backoff(
             _ => None,
         },
     )
+}
+
+/// The polling backoff (seconds) implied by a *busy* counterpart — one that has
+/// **read my latest message and not yet replied** — or `None` when the ball is
+/// not in the counterpart's court. This is the silent-compose case the
+/// `waiting_user` sentinel can't cover: an agent composing a long autonomous
+/// reply emits no signal, but the server can still infer it is engaged from
+/// `last_read_seq`, which is durably advanced when a message is claimed and does
+/// not decay with polling.
+///
+/// Busy ⟺ the room's latest message is the caller's *and* the counterpart's read
+/// cursor has reached it. It self-clears the moment the counterpart sends (the
+/// latest message is then theirs) or the caller sends something new the
+/// counterpart has not yet read. Reuses the `waiting_user` decay curve at a fixed
+/// `Med` severity (no agent-supplied severity exists for an inferred state),
+/// measuring elapsed from the unanswered message's `created_at`, so the backoff
+/// grows the longer the counterpart stays silent. Unlike `active_sentinel_backoff`
+/// this never shortens the park — the caller only attaches it as the response
+/// hint, so a busy wait keeps its full long-poll (delivering instantly on the
+/// reply) while telling the waiter to space out its empty re-polls.
+async fn counterpart_busy_backoff(
+    storage: &Storage,
+    room_id: &str,
+    handle: &str,
+) -> Result<Option<u32>, StorageError> {
+    let Some(latest) = storage.room_latest_message(room_id).await? else {
+        return Ok(None);
+    };
+    // The counterpart spoke last (or nobody has) — the ball is in my court, not
+    // theirs. Not busy. In 2-agent v1 this is redundant with the read-cursor guard
+    // below (a participant can never claim its own message, so a non-caller latest
+    // sender always fails the cursor check too); it stays as an explicit statement
+    // of intent and a safeguard if claim semantics or participant count change.
+    if latest.sender != handle {
+        return Ok(None);
+    }
+    // Has the counterpart (the other participant — 2-agent v1) read my latest?
+    // Known v1 limitation: if I send a *second* message while the counterpart is
+    // still composing a reply to the first, `last_read_seq` falls behind my new
+    // latest and busy reads as false until the counterpart catches up — acceptable
+    // for the turn-based two-agent exchange this targets.
+    let participants = storage.list_participants(room_id).await?;
+    let Some(counterpart) = participants.iter().find(|p| p.handle != handle) else {
+        return Ok(None);
+    };
+    if counterpart.last_read_seq < latest.seq {
+        return Ok(None);
+    }
+    let elapsed = (OffsetDateTime::now_utc() - latest.created_at).whole_seconds();
+    Ok(Some(backoff_secs(Severity::Med, elapsed)))
 }
 
 fn message_view(m: &Message) -> Result<MessageView, ApiError> {
