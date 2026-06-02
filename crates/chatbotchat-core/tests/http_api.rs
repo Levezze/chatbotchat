@@ -464,6 +464,243 @@ async fn wait_without_an_active_sentinel_omits_retry_after() {
 }
 
 #[tokio::test]
+async fn a_busy_counterpart_who_read_my_message_yields_retry_after() {
+    // The dogfood gap: A asked a dense question, B consumed it and is composing a
+    // long autonomous reply (no `waiting_user` sentinel — B isn't consulting a
+    // human, just thinking). With nothing unread, A's wait parks and times out —
+    // but because B has *read* A's latest and not yet replied (the ball is in B's
+    // court, tracked by `last_read_seq`), the timeout now carries a `retry_after`
+    // so A stays autonomous instead of giving up and pinging its human.
+    let app = test_router_with_cap(std::time::Duration::from_millis(80)).await;
+    let room_id = open_room_id(&app, "busy room").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    join(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+
+    // A asks; B consumes it (B's cursor advances past A's message).
+    send(
+        &app,
+        &room_id,
+        "repo-a",
+        "opus47",
+        "/work/a",
+        None,
+        "9-part question",
+    )
+    .await;
+    let (_, got) = wait(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+    assert_eq!(got["message"]["body"].as_str(), Some("9-part question"));
+
+    // A waits again. B has read A's latest and not replied → busy. The timeout
+    // carries the Med-base busy backoff (20s) even though no sentinel was posted.
+    let (status, body) = wait(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["status"].as_str(),
+        Some("paused_by_timeout"),
+        "got {body}"
+    );
+    assert_eq!(
+        body["retry_after"].as_u64(),
+        Some(20),
+        "a busy counterpart (read-but-not-replied) yields the Med-base busy backoff, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_busy_wait_still_parks_the_full_cap_and_does_not_short_circuit() {
+    // Guards the load-bearing scope constraint that busy does NOT collapse the
+    // long-poll: busy is consulted only for the post-park `retry_after` hint, never
+    // in the cap-decision tree, so a busy waiter must still park ~the full cap and
+    // time out — not return early the way the ghost/zero-cap branch does. (The
+    // *shortening* case — busy mistakenly `min`-ed into the cap like waiting_user —
+    // is unobservable in a fast test because the Med backoff floor is 20s, far
+    // above any test cap; this catches the cheaper, real regression: busy wired to
+    // zero/short-circuit the park.) A 200ms cap with no reply must take ~200ms; an
+    // early return (≈0ms) would mean busy was miswired into the cap path.
+    let app = test_router_with_cap(std::time::Duration::from_millis(200)).await;
+    let room_id = open_room_id(&app, "busy parks").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    join(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+
+    // A asks; B reads it → A is busy with nothing left to deliver.
+    send(&app, &room_id, "repo-a", "opus47", "/work/a", None, "q").await;
+    wait(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+
+    let start = std::time::Instant::now();
+    let (status, body) = wait(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    let elapsed = start.elapsed();
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["status"].as_str(),
+        Some("paused_by_timeout"),
+        "got {body}"
+    );
+    assert_eq!(
+        body["retry_after"].as_u64(),
+        Some(20),
+        "the busy hint still rides the full-cap timeout, got {body}"
+    );
+    assert!(
+        elapsed >= std::time::Duration::from_millis(120),
+        "a busy wait must park ~the full 200ms cap, not short-circuit; took {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_busy_hint_clears_once_the_counterpart_replies() {
+    // User-facing behaviour: once B replies, A's delivery of that reply must carry
+    // no `retry_after` — the conversation moved on, don't tell A to back off.
+    // (Mechanism note: in 2-agent v1 it is the read-cursor guard that clears it —
+    // B cannot claim its own reply, so its `last_read_seq` stays below the reply's
+    // seq. The `latest.sender != handle` guard in `counterpart_busy_backoff` is a
+    // redundant-but-explicit safeguard in v1, not what this test isolates. This
+    // test pins the behaviour; tests 4 and 5 give the individual guards teeth.)
+    let app = test_router_with_cap(std::time::Duration::from_millis(80)).await;
+    let room_id = open_room_id(&app, "busy clears").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    join(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+
+    // A asks; B consumes it; B replies.
+    send(
+        &app, &room_id, "repo-a", "opus47", "/work/a", None, "question",
+    )
+    .await;
+    wait(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+    send(
+        &app, &room_id, "repo-b", "sonnet46", "/work/b", None, "answer",
+    )
+    .await;
+
+    // A waits and receives B's reply — no busy backoff, the conversation moved on.
+    let (status, body) = wait(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["message"]["body"].as_str(),
+        Some("answer"),
+        "got {body}"
+    );
+    assert!(
+        body.get("retry_after").is_none(),
+        "once the counterpart replies the busy hint must clear, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn no_busy_hint_until_the_counterpart_has_read_my_message() {
+    // Busy is gated on the counterpart's *read cursor*, not merely on my having
+    // spoken. If B has not yet claimed A's message (last_read_seq < its seq), B is
+    // not yet "sitting on" a reply obligation, so A's wait carries no hint.
+    let app = test_router_with_cap(std::time::Duration::from_millis(80)).await;
+    let room_id = open_room_id(&app, "unread room").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    join(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+
+    // A speaks but B never waits, so B's cursor stays behind A's message.
+    send(
+        &app, &room_id, "repo-a", "opus47", "/work/a", None, "unread",
+    )
+    .await;
+
+    let (status, body) = wait(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["status"].as_str(),
+        Some("paused_by_timeout"),
+        "got {body}"
+    );
+    assert!(
+        body.get("retry_after").is_none(),
+        "an unread message is not yet a busy obligation, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn an_active_waiting_user_takes_precedence_over_the_busy_hint() {
+    // Both states can hold at once: B signalled `waiting_user` (consulting its
+    // human), A replied anyway, and B read that reply — so A is "busy-eligible"
+    // (it spoke last, B read it) AND B still has an active away-signal. The
+    // explicit, more-specific `waiting_user` must win: A's timeout carries the
+    // severity-scaled sentinel backoff (high = 45), not the Med busy base (20).
+    let app = test_router_with_cap(std::time::Duration::from_millis(80)).await;
+    let room_id = open_room_id(&app, "precedence room").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    join(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+
+    // B says it is consulting its user.
+    signal(
+        &app,
+        &room_id,
+        "repo-b",
+        "sonnet46",
+        "/work/b",
+        "waiting_user",
+        Some("high"),
+        Some("merge?"),
+    )
+    .await;
+    // A consumes the sentinel, then replies anyway.
+    wait(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    send(
+        &app, &room_id, "repo-a", "opus47", "/work/a", None, "my reply",
+    )
+    .await;
+    // B reads A's reply (cursor advances past it) — A is now busy-eligible too.
+    wait(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+
+    // A waits again: the active away-signal wins over the inferred busy hint.
+    let (status, body) = wait(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["status"].as_str(),
+        Some("paused_by_timeout"),
+        "got {body}"
+    );
+    assert_eq!(
+        body["retry_after"].as_u64(),
+        Some(45),
+        "waiting_user (45) must win over the Med busy base (20), got {body}"
+    );
+}
+
+#[tokio::test]
+async fn the_busy_backoff_grows_the_longer_the_counterpart_stays_silent() {
+    // The busy hint reuses the `waiting_user` decay curve at a fixed Med severity,
+    // measured from the unanswered message's `created_at`. A fresh obligation sits
+    // at the Med base (20, asserted elsewhere); one ~7 minutes old has decayed two
+    // ×1.5 steps past the 5-minute flat zone → 20·1.5² = 45. We backdate the
+    // message via storage because the HTTP send path always stamps "now".
+    let (app, storage) =
+        test_router_with_cap_returning_storage(std::time::Duration::from_millis(80)).await;
+    let room_id = open_room_id(&app, "decay room").await;
+    let (_, a) = join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    join(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+    let a_handle = a["handle"].as_str().expect("a handle").to_string();
+
+    // A's question, backdated 7 minutes (in the n=2 decay window [420s, 480s)).
+    let seven_min_ago = OffsetDateTime::now_utc() - time::Duration::minutes(7);
+    storage
+        .create_message(&room_id, &a_handle, None, "old question", seven_min_ago)
+        .await
+        .expect("inject backdated message");
+    // B reads it (cursor advances past A's message) so A is busy.
+    wait(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+
+    let (status, body) = wait(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["status"].as_str(),
+        Some("paused_by_timeout"),
+        "got {body}"
+    );
+    assert_eq!(
+        body["retry_after"].as_u64(),
+        Some(45),
+        "a 7-min-old busy obligation has decayed past the Med base (20) to 45, got {body}"
+    );
+}
+
+#[tokio::test]
 async fn a_wait_parked_when_a_sentinel_arrives_gains_the_backoff_hint() {
     // Live hot path: B is already long-polling an empty room when A pauses to
     // consult its user. B wakes on the sentinel — and that delivery must carry

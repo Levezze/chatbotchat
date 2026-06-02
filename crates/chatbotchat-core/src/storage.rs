@@ -352,6 +352,33 @@ impl Storage {
         }
     }
 
+    /// The room's single most-recent message of *any* sender, or `None` for an
+    /// empty room. The busy-backoff driver (slice: presence-aware wait) reads this
+    /// to tell "I spoke last and the counterpart owes a reply" (latest sender is
+    /// the caller) from "the counterpart spoke last" (ball in my court). Unlike
+    /// `latest_message_from_other`, it does *not* filter the caller out — the
+    /// sender identity is the signal.
+    pub async fn room_latest_message(
+        &self,
+        room_id: &str,
+    ) -> Result<Option<Message>, StorageError> {
+        let row = sqlx::query(
+            "SELECT seq, room_id, sender, recipient, body, created_at, type, from_human, \
+                    severity, question_text \
+             FROM messages \
+             WHERE room_id = ? \
+             ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(room_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            None => Ok(None),
+            Some(row) => Ok(Some(row_to_message(&row)?)),
+        }
+    }
+
     /// The highest message `seq` in a room, or 0 if it has none. Used to seed a
     /// new participant's read cursor at join, so `wait` only delivers messages
     /// that arrive *after* they joined — the pre-join backlog is the log view

@@ -418,12 +418,14 @@ fn render_message_markdown(m: &MessageView) -> String {
     }
 }
 
-/// Surface the slice 5b polling backoff hint, when present. The server already
-/// held this poll for `secs` because the counterpart is parked behind a
-/// `waiting_user` sentinel; tell the agent so it stays quiet rather than
-/// hammering the room while the other side consults its user.
+/// Surface the polling backoff hint, when present. The counterpart is engaged —
+/// either paused behind a `waiting_user` sentinel (consulting its user) or
+/// composing a reply it has already read (server-inferred from the read cursor) —
+/// so tell the agent to space out its re-polls rather than hammering the room.
 fn print_backoff(retry_after: Option<u32>) {
     if let Some(secs) = retry_after {
-        println!("[backoff] Counterpart is paused; server held this poll ~{secs}s.");
+        println!(
+            "[backoff] Counterpart is engaged (paused or composing); wait ~{secs}s before re-polling."
+        );
     }
 }

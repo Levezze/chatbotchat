@@ -454,6 +454,51 @@ async fn latest_message_from_other_excludes_the_callers_own_rows() {
 }
 
 #[tokio::test]
+async fn room_latest_message_returns_the_highest_seq_row_of_any_sender() {
+    let storage = fresh_storage().await;
+    let room = sample_room();
+    storage.create_room(&room).await.expect("create_room ok");
+    let now = OffsetDateTime::now_utc();
+
+    // Unlike `latest_message_from_other`, this returns the latest row regardless
+    // of sender — the busy-backoff driver needs to know whether *I* spoke last
+    // (counterpart owes a reply) vs. the counterpart did. "viewer" sent the most
+    // recent row here, so it must come back even though "sender" also spoke.
+    storage
+        .create_message(&room.id, "sender", None, "first", now)
+        .await
+        .expect("create m0");
+    let mine = storage
+        .create_message(&room.id, "viewer", None, "second", now)
+        .await
+        .expect("create m1");
+
+    let latest = storage
+        .room_latest_message(&room.id)
+        .await
+        .expect("query ok")
+        .expect("the room has messages");
+    assert_eq!(latest.seq, mine.seq, "the highest-seq row must come back");
+    assert_eq!(latest.sender, "viewer");
+}
+
+#[tokio::test]
+async fn room_latest_message_is_none_for_an_empty_room() {
+    let storage = fresh_storage().await;
+    let room = sample_room();
+    storage.create_room(&room).await.expect("create_room ok");
+
+    assert!(
+        storage
+            .room_latest_message(&room.id)
+            .await
+            .expect("query ok")
+            .is_none(),
+        "a room with no messages has no latest message"
+    );
+}
+
+#[tokio::test]
 async fn create_message_capped_gate_ignores_sentinel_rows() {
     let storage = fresh_storage().await;
     let room = sample_room();
