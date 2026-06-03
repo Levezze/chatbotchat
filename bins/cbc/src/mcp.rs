@@ -36,6 +36,11 @@ pub struct JoinRoomArgs {
     pub room_id: String,
     #[schemars(description = "Self-declared model name, e.g. opus47, sonnet46, codex53")]
     pub model: String,
+    #[schemars(
+        description = "Optional identity label. Auto-derived per session when omitted; two agents in the same repo+model+dir MUST pass distinct values to be seen as separate participants. Reuse the same label from another terminal/client/dir to resume or hand off this identity."
+    )]
+    #[serde(default, rename = "as")]
+    pub identity: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -56,6 +61,11 @@ pub struct SendArgs {
     )]
     #[serde(default)]
     pub human: bool,
+    #[schemars(
+        description = "Optional identity label (see cbc_join_room). Pass the same value you joined with."
+    )]
+    #[serde(default, rename = "as")]
+    pub identity: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -79,6 +89,11 @@ pub struct SignalArgs {
     )]
     #[serde(default)]
     pub question_text: Option<String>,
+    #[schemars(
+        description = "Optional identity label (see cbc_join_room). Pass the same value you joined with."
+    )]
+    #[serde(default, rename = "as")]
+    pub identity: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -89,6 +104,11 @@ pub struct WaitArgs {
         description = "Self-declared model name (your identity; e.g. opus47). repo and cwd are auto-detected from the server's working directory."
     )]
     pub model: String,
+    #[schemars(
+        description = "Optional identity label (see cbc_join_room). Pass the same value you joined with."
+    )]
+    #[serde(default, rename = "as")]
+    pub identity: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -99,6 +119,11 @@ pub struct CloseArgs {
         description = "Self-declared model name (your identity; e.g. opus47). repo and cwd are auto-detected from the server's working directory."
     )]
     pub model: String,
+    #[schemars(
+        description = "Optional identity label (see cbc_join_room). Pass the same value you joined with."
+    )]
+    #[serde(default, rename = "as")]
+    pub identity: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -112,6 +137,11 @@ pub struct PauseArgs {
     #[schemars(description = "Optional free-text reason, recorded in the room's audit log")]
     #[serde(default)]
     pub reason: Option<String>,
+    #[schemars(
+        description = "Optional identity label (see cbc_join_room). Pass the same value you joined with."
+    )]
+    #[serde(default, rename = "as")]
+    pub identity: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -122,6 +152,11 @@ pub struct WakeArgs {
         description = "Self-declared model name (your identity; e.g. opus47). repo and cwd are auto-detected from the server's working directory."
     )]
     pub model: String,
+    #[schemars(
+        description = "Optional identity label (see cbc_join_room). Pass the same value you joined with."
+    )]
+    #[serde(default, rename = "as")]
+    pub identity: Option<String>,
 }
 
 #[derive(Clone)]
@@ -151,11 +186,20 @@ impl CbcMcp {
     )]
     async fn cbc_join_room(
         &self,
-        Parameters(JoinRoomArgs { room_id, model }): Parameters<JoinRoomArgs>,
+        Parameters(JoinRoomArgs {
+            room_id,
+            model,
+            identity,
+        }): Parameters<JoinRoomArgs>,
     ) -> String {
         let repo = crate::context::detect_repo();
         let cwd = crate::context::detect_cwd();
-        match self.client.join_room(&room_id, &repo, &model, &cwd).await {
+        let instance = crate::context::detect_instance(identity.as_deref());
+        match self
+            .client
+            .join_room(&room_id, &repo, &model, &cwd, &instance)
+            .await
+        {
             Ok(resp) => json_or_err(&resp),
             Err(e) => err_json(&e.to_string()),
         }
@@ -172,13 +216,24 @@ impl CbcMcp {
             body,
             to,
             human,
+            identity,
         }): Parameters<SendArgs>,
     ) -> String {
         let repo = crate::context::detect_repo();
         let cwd = crate::context::detect_cwd();
+        let instance = crate::context::detect_instance(identity.as_deref());
         match self
             .client
-            .send_message(&room_id, &repo, &model, &cwd, to.as_deref(), &body, human)
+            .send_message(
+                &room_id,
+                &repo,
+                &model,
+                &cwd,
+                &instance,
+                to.as_deref(),
+                &body,
+                human,
+            )
             .await
         {
             Ok(resp) => json_or_err(&resp),
@@ -191,13 +246,25 @@ impl CbcMcp {
     )]
     async fn cbc_wait(
         &self,
-        Parameters(WaitArgs { room_id, model }): Parameters<WaitArgs>,
+        Parameters(WaitArgs {
+            room_id,
+            model,
+            identity,
+        }): Parameters<WaitArgs>,
     ) -> String {
         let repo = crate::context::detect_repo();
         let cwd = crate::context::detect_cwd();
+        let instance = crate::context::detect_instance(identity.as_deref());
         match self
             .client
-            .wait(&room_id, &repo, &model, &cwd, Some(mcp_wait_cap_secs()))
+            .wait(
+                &room_id,
+                &repo,
+                &model,
+                &cwd,
+                &instance,
+                Some(mcp_wait_cap_secs()),
+            )
             .await
         {
             Ok(resp) => json_or_err(&resp),
@@ -216,10 +283,12 @@ impl CbcMcp {
             signal_type,
             severity,
             question_text,
+            identity,
         }): Parameters<SignalArgs>,
     ) -> String {
         let repo = crate::context::detect_repo();
         let cwd = crate::context::detect_cwd();
+        let instance = crate::context::detect_instance(identity.as_deref());
         match self
             .client
             .signal(
@@ -227,6 +296,7 @@ impl CbcMcp {
                 &repo,
                 &model,
                 &cwd,
+                &instance,
                 &signal_type,
                 severity.as_deref(),
                 question_text.as_deref(),
@@ -243,11 +313,20 @@ impl CbcMcp {
     )]
     async fn cbc_close(
         &self,
-        Parameters(CloseArgs { room_id, model }): Parameters<CloseArgs>,
+        Parameters(CloseArgs {
+            room_id,
+            model,
+            identity,
+        }): Parameters<CloseArgs>,
     ) -> String {
         let repo = crate::context::detect_repo();
         let cwd = crate::context::detect_cwd();
-        match self.client.close(&room_id, &repo, &model, &cwd).await {
+        let instance = crate::context::detect_instance(identity.as_deref());
+        match self
+            .client
+            .close(&room_id, &repo, &model, &cwd, &instance)
+            .await
+        {
             Ok(resp) => json_or_err(&resp),
             Err(e) => err_json(&e.to_string()),
         }
@@ -262,13 +341,15 @@ impl CbcMcp {
             room_id,
             model,
             reason,
+            identity,
         }): Parameters<PauseArgs>,
     ) -> String {
         let repo = crate::context::detect_repo();
         let cwd = crate::context::detect_cwd();
+        let instance = crate::context::detect_instance(identity.as_deref());
         match self
             .client
-            .pause(&room_id, &repo, &model, &cwd, reason.as_deref())
+            .pause(&room_id, &repo, &model, &cwd, &instance, reason.as_deref())
             .await
         {
             Ok(resp) => json_or_err(&resp),
@@ -281,11 +362,20 @@ impl CbcMcp {
     )]
     async fn cbc_wake(
         &self,
-        Parameters(WakeArgs { room_id, model }): Parameters<WakeArgs>,
+        Parameters(WakeArgs {
+            room_id,
+            model,
+            identity,
+        }): Parameters<WakeArgs>,
     ) -> String {
         let repo = crate::context::detect_repo();
         let cwd = crate::context::detect_cwd();
-        match self.client.wake(&room_id, &repo, &model, &cwd).await {
+        let instance = crate::context::detect_instance(identity.as_deref());
+        match self
+            .client
+            .wake(&room_id, &repo, &model, &cwd, &instance)
+            .await
+        {
             Ok(resp) => json_or_err(&resp),
             Err(e) => err_json(&e.to_string()),
         }

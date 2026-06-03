@@ -150,16 +150,16 @@ async fn mcp_send_and_wait_round_trip() {
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
         .collect();
 
-    // Two participants in one session, kept distinct by model. The acceptance
-    // criterion says "two sessions in different repos", but delivery is
-    // process-agnostic (one daemon, one Hub) and distinct handles come from any
-    // differing tuple field — two models prove the cross-identity round-trip
-    // without the cost of a second child process.
+    // Two participants in one MCP session, kept distinct by an explicit `as`
+    // label (identity is now the instance token, so two agents sharing this one
+    // child process's cwd/session must differ on `as`). Delivery is
+    // process-agnostic (one daemon, one Hub), so this proves the cross-identity
+    // round-trip without a second child process.
     for model in ["opus47", "sonnet46"] {
         client
             .call_tool(
                 CallToolRequestParams::new("cbc_join_room").with_arguments(
-                    serde_json::json!({ "room_id": room_id, "model": model })
+                    serde_json::json!({ "room_id": room_id, "model": model, "as": model })
                         .as_object()
                         .unwrap()
                         .clone(),
@@ -174,7 +174,7 @@ async fn mcp_send_and_wait_round_trip() {
     client
         .call_tool(
             CallToolRequestParams::new("cbc_send").with_arguments(
-                serde_json::json!({ "room_id": room_id, "model": "opus47", "body": "ping from opus" })
+                serde_json::json!({ "room_id": room_id, "model": "opus47", "as": "opus47", "body": "ping from opus" })
                     .as_object()
                     .unwrap()
                     .clone(),
@@ -187,7 +187,7 @@ async fn mcp_send_and_wait_round_trip() {
     let waited = client
         .call_tool(
             CallToolRequestParams::new("cbc_wait").with_arguments(
-                serde_json::json!({ "room_id": room_id, "model": "sonnet46" })
+                serde_json::json!({ "room_id": room_id, "model": "sonnet46", "as": "sonnet46" })
                     .as_object()
                     .unwrap()
                     .clone(),
@@ -247,7 +247,7 @@ async fn mcp_signal_and_wait_round_trip() {
         client
             .call_tool(
                 CallToolRequestParams::new("cbc_join_room").with_arguments(
-                    serde_json::json!({ "room_id": room_id, "model": model })
+                    serde_json::json!({ "room_id": room_id, "model": model, "as": model })
                         .as_object()
                         .unwrap()
                         .clone(),
@@ -264,6 +264,7 @@ async fn mcp_signal_and_wait_round_trip() {
                 serde_json::json!({
                     "room_id": room_id,
                     "model": "opus47",
+                    "as": "opus47",
                     "type": "waiting_user",
                     "severity": "high",
                     "question_text": "should I merge to production?"
@@ -280,7 +281,7 @@ async fn mcp_signal_and_wait_round_trip() {
     let waited = client
         .call_tool(
             CallToolRequestParams::new("cbc_wait").with_arguments(
-                serde_json::json!({ "room_id": room_id, "model": "sonnet46" })
+                serde_json::json!({ "room_id": room_id, "model": "sonnet46", "as": "sonnet46" })
                     .as_object()
                     .unwrap()
                     .clone(),

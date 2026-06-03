@@ -33,6 +33,7 @@ async fn join(storage: &Storage, room_id: &str, handle: &str, cwd: &str) {
         repo: "wait-test".into(),
         model: "opus47".into(),
         cwd: cwd.into(),
+        instance: handle.into(),
         joined_at: now,
         last_poll_at: now,
         last_read_seq: 0,

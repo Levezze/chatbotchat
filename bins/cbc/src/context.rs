@@ -1,6 +1,7 @@
-//! Caller-environment detection shared by the CLI and MCP surfaces. The
-//! `(repo, cwd)` half of a participant's identity tuple is auto-detected here so
-//! the human only ever supplies `--model`.
+//! Caller-environment detection shared by the CLI and MCP surfaces. `repo`/`cwd`
+//! are auto-detected here (so the human only supplies `--model`), and the
+//! `instance` identity key is resolved from the explicit `--as` label, the
+//! environment, or a per-process floor.
 
 use std::path::Path;
 use std::process::Command;
@@ -52,6 +53,56 @@ fn basename(path: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// The identity key for this caller. Two agents sharing `(repo, model, cwd)` are
+/// told apart by this value, so it must be distinct per live agent and stable
+/// across that agent's calls. Resolution (first non-empty wins):
+///
+/// 1. an explicit `--as` / `as:` label — also the way to *resume or hand off* an
+///    identity: reuse the same label from another terminal/client/dir;
+/// 2. `CBC_INSTANCE` — whole-process override (tests, power users);
+/// 3. `CLAUDE_CODE_SESSION_ID` — best-effort: stable per Claude Code session
+///    (and inherited by the long-lived `cbc mcp` child), survives resume within
+///    Claude Code;
+/// 4. a per-process floor (the PID) — guarantees a non-empty, distinct-per-live-
+///    process value when nothing else is set. Least preferred: a new process
+///    (a restart, or each one-shot CLI invocation outside a session) gets a new
+///    value, so deliberate continuity should use the `--as` label.
+pub fn detect_instance(explicit: Option<&str>) -> String {
+    let cbc = std::env::var("CBC_INSTANCE").ok();
+    let session = std::env::var("CLAUDE_CODE_SESSION_ID").ok();
+    resolve_instance(
+        explicit,
+        cbc.as_deref(),
+        session.as_deref(),
+        &process_floor(),
+    )
+}
+
+/// Pure resolution of the instance key from its candidate sources, split out so
+/// the precedence and never-empty guarantee are unit-testable without touching
+/// the environment. `floor` must itself be non-empty.
+fn resolve_instance(
+    explicit: Option<&str>,
+    cbc_instance: Option<&str>,
+    session_id: Option<&str>,
+    floor: &str,
+) -> String {
+    [explicit, cbc_instance, session_id]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .unwrap_or(floor)
+        .to_string()
+}
+
+/// Per-process identity floor: the OS process id. Constant for a process's life
+/// (so every call from one long-lived `cbc mcp` server agrees) and distinct
+/// among concurrently-live processes (so two separate sessions never collide).
+fn process_floor() -> String {
+    format!("pid-{}", std::process::id())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,5 +134,49 @@ mod tests {
         assert_eq!(basename("/a/b/c/"), Some("c".to_string()));
         assert_eq!(basename("/"), None);
         assert_eq!(basename(""), None);
+    }
+
+    #[test]
+    fn resolve_instance_prefers_explicit_label_over_everything() {
+        let got = resolve_instance(
+            Some("concierge"),
+            Some("cbc-env"),
+            Some("session-id"),
+            "pid-1",
+        );
+        assert_eq!(got, "concierge");
+    }
+
+    #[test]
+    fn resolve_instance_precedence_falls_through_cbc_then_session_then_floor() {
+        assert_eq!(
+            resolve_instance(None, Some("cbc-env"), Some("session-id"), "pid-1"),
+            "cbc-env"
+        );
+        assert_eq!(
+            resolve_instance(None, None, Some("session-id"), "pid-1"),
+            "session-id"
+        );
+        assert_eq!(resolve_instance(None, None, None, "pid-1"), "pid-1");
+    }
+
+    #[test]
+    fn resolve_instance_skips_blank_candidates_and_never_returns_empty() {
+        // An explicit empty/whitespace label must not shadow the real sources,
+        // and the floor guarantees a non-empty result.
+        assert_eq!(
+            resolve_instance(Some("   "), Some(""), Some("session-id"), "pid-9"),
+            "session-id"
+        );
+        assert_eq!(
+            resolve_instance(Some(""), Some(""), Some(""), "pid-9"),
+            "pid-9"
+        );
+        assert!(!resolve_instance(None, None, None, "pid-9").is_empty());
+    }
+
+    #[test]
+    fn process_floor_is_non_empty() {
+        assert!(!process_floor().is_empty());
     }
 }

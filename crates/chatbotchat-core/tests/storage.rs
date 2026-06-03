@@ -63,6 +63,7 @@ fn sample_participant(room_id: &str, cwd: &str) -> Participant {
         repo: "smoke-test".into(),
         model: "opus47".into(),
         cwd: cwd.into(),
+        instance: cwd.into(),
         joined_at: now,
         last_poll_at: now,
         last_read_seq: 0,
@@ -98,6 +99,53 @@ async fn participant_create_get_by_tuple_and_list_round_trip() {
     assert_eq!(listed, vec![p]);
 }
 
+#[tokio::test]
+async fn two_participants_identical_tuple_distinct_instance_coexist() {
+    // The regression at the storage layer: same repo+model+cwd, different
+    // `instance`. The old UNIQUE (room_id, repo, model, cwd) rejected the second
+    // insert; UNIQUE (room_id, instance) admits both, and the room lists two.
+    let storage = fresh_storage().await;
+    let room = sample_room();
+    storage.create_room(&room).await.expect("create_room ok");
+
+    let now = OffsetDateTime::now_utc();
+    let mk = |handle: &str, instance: &str| Participant {
+        handle: handle.into(),
+        room_id: room.id.clone(),
+        repo: "mvp-api".into(),
+        model: "opus48".into(),
+        cwd: "/work/mvp".into(),
+        instance: instance.into(),
+        joined_at: now,
+        last_poll_at: now,
+        last_read_seq: 0,
+    };
+    let one = mk("mvp-api-opus48-aaaa", "session-one");
+    let two = mk("mvp-api-opus48-bbbb", "session-two");
+    storage.create_participant(&one).await.expect("create one");
+    storage
+        .create_participant(&two)
+        .await
+        .expect("second identical-tuple participant must insert");
+
+    // Each resolves to its own row by instance.
+    let r1 = storage
+        .get_participant_by_instance(&room.id, "session-one")
+        .await
+        .expect("get one")
+        .expect("one exists");
+    let r2 = storage
+        .get_participant_by_instance(&room.id, "session-two")
+        .await
+        .expect("get two")
+        .expect("two exists");
+    assert_eq!(r1.handle, "mvp-api-opus48-aaaa");
+    assert_eq!(r2.handle, "mvp-api-opus48-bbbb");
+
+    let listed = storage.list_participants(&room.id).await.expect("list ok");
+    assert_eq!(listed.len(), 2, "both agents appear in the room");
+}
+
 fn participant_with_handle(room_id: &str, handle: &str, cwd: &str) -> Participant {
     let now = OffsetDateTime::now_utc();
     Participant {
@@ -106,6 +154,7 @@ fn participant_with_handle(room_id: &str, handle: &str, cwd: &str) -> Participan
         repo: "smoke-test".into(),
         model: "opus47".into(),
         cwd: cwd.into(),
+        instance: cwd.into(),
         joined_at: now,
         last_poll_at: now,
         last_read_seq: 0,

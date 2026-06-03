@@ -237,15 +237,16 @@ async fn join_room(
     let start_seq = state.storage.current_seq(&id).await?;
 
     let ident = JoinIdentity {
+        instance: effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
         repo: req.repo,
         model: req.model,
         cwd: req.cwd,
     };
 
-    // Fast path: an existing matching participant resumes its handle.
+    // Fast path: an existing participant with this instance resumes its handle.
     if let Some(p) = state
         .storage
-        .get_participant_by_tuple(&id, &ident.repo, &ident.model, &ident.cwd)
+        .get_participant_by_instance(&id, &ident.instance)
         .await?
     {
         return Ok(join_response(p.handle, true, &room, recent));
@@ -258,7 +259,7 @@ async fn join_room(
         let existing = state.storage.list_participants(&id).await?;
         let handle = match derive_handle(&ident, &existing, rand_sess_candidates()) {
             // Reused shouldn't occur after the fast-path lookup, but if a
-            // concurrent join inserted the same tuple, honor it as resumed.
+            // concurrent join inserted the same instance, honor it as resumed.
             HandleOutcome::Reused(h) => return Ok(join_response(h, true, &room, recent.clone())),
             HandleOutcome::Created(h) => h,
         };
@@ -270,6 +271,7 @@ async fn join_room(
             repo: ident.repo.clone(),
             model: ident.model.clone(),
             cwd: ident.cwd.clone(),
+            instance: ident.instance.clone(),
             joined_at: now,
             last_poll_at: now,
             last_read_seq: start_seq,
@@ -278,11 +280,11 @@ async fn join_room(
         match state.storage.create_participant(&participant).await {
             Ok(()) => return Ok(join_response(handle, false, &room, recent.clone())),
             Err(e) if e.is_unique_violation() && attempt < MAX_ATTEMPTS => {
-                // Either a concurrent join took our tuple (refetch → resume) or
-                // the random sess collided (refetch returns None → retry).
+                // Either a concurrent join took our instance (refetch → resume)
+                // or the random sess collided (refetch returns None → retry).
                 if let Some(p) = state
                     .storage
-                    .get_participant_by_tuple(&id, &ident.repo, &ident.model, &ident.cwd)
+                    .get_participant_by_instance(&id, &ident.instance)
                     .await?
                 {
                     return Ok(join_response(p.handle, true, &room, recent.clone()));
@@ -291,6 +293,45 @@ async fn join_room(
             }
             Err(e) => return Err(e.into()),
         }
+    }
+}
+
+/// The identity key for a request. An explicit, non-empty `instance` (resolved
+/// client-side from an `as` label / harness session id / per-process nonce) wins.
+/// A legacy caller that sends none gets one synthesized from the tuple, so its
+/// identity is the same `(repo, model, cwd)`-equivalent it always had — the exact
+/// expression migration 0009 backfills existing rows with.
+fn effective_instance(repo: &str, model: &str, cwd: &str, instance: &str) -> String {
+    if instance.is_empty() {
+        format!("{repo}\n{model}\n{cwd}")
+    } else {
+        instance.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_instance_passes_through_an_explicit_value() {
+        assert_eq!(
+            effective_instance("mvp-api", "opus48", "/work/mvp", "concierge"),
+            "concierge"
+        );
+    }
+
+    #[test]
+    fn effective_instance_synthesis_matches_the_migration_backfill_expression() {
+        // Load-bearing: a legacy/old-binary client sends empty instance, so the
+        // server must synthesize the SAME string migration 0009 backfilled
+        // existing rows with — `repo || char(10) || model || char(10) || cwd`
+        // (char(10) == '\n') — or those participants fail to resume. Pin the
+        // exact bytes so a future edit to either side can't drift silently.
+        assert_eq!(
+            effective_instance("mvp-api", "opus48", "/work/mvp", ""),
+            "mvp-api\nopus48\n/work/mvp"
+        );
     }
 }
 
@@ -350,7 +391,10 @@ async fn send_message(
 
     let sender = state
         .storage
-        .get_participant_by_tuple(&id, &req.repo, &req.model, &req.cwd)
+        .get_participant_by_instance(
+            &id,
+            &effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
+        )
         .await?
         .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
 
@@ -439,7 +483,10 @@ async fn signal_room(
 
     let sender = state
         .storage
-        .get_participant_by_tuple(&id, &req.repo, &req.model, &req.cwd)
+        .get_participant_by_instance(
+            &id,
+            &effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
+        )
         .await?
         .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
 
@@ -609,7 +656,10 @@ async fn apply_transition(
     // Lifecycle ops are participant-driven — uniform with send/signal/wait.
     state
         .storage
-        .get_participant_by_tuple(id, &req.repo, &req.model, &req.cwd)
+        .get_participant_by_instance(
+            id,
+            &effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
+        )
         .await?
         .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
 
@@ -666,7 +716,10 @@ async fn wait_room(
 
     let caller = state
         .storage
-        .get_participant_by_tuple(&id, &req.repo, &req.model, &req.cwd)
+        .get_participant_by_instance(
+            &id,
+            &effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
+        )
         .await?
         .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
 

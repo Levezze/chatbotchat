@@ -65,10 +65,15 @@ fn open_room(base: &str, subject: &str) -> String {
         .to_string()
 }
 
+// Identity within a room is the `instance` token. These tests run as
+// subprocesses that all inherit one `CLAUDE_CODE_SESSION_ID`, so to simulate N
+// *distinct* agents (and to stay deterministic when no session id is set) each
+// call passes an explicit `--as <model>`: same model ⇒ same agent (resumes),
+// different model ⇒ a separate participant.
 fn join(base: &str, room_id: &str, model: &str) -> String {
     let assert = Command::cargo_bin("cbc")
         .unwrap()
-        .args(["join", room_id, "--model", model])
+        .args(["join", room_id, "--model", model, "--as", model])
         .env("CBC_SERVER", base)
         .assert()
         .success();
@@ -135,7 +140,15 @@ fn send_then_wait_round_trips_over_cli() {
     // (the real daemon's cap is 10 minutes — a test must never park on it).
     Command::cargo_bin("cbc")
         .unwrap()
-        .args(["send", &room_id, "--model", "opus47", "hello over cli"])
+        .args([
+            "send",
+            &room_id,
+            "--model",
+            "opus47",
+            "--as",
+            "opus47",
+            "hello over cli",
+        ])
         .env("CBC_SERVER", &base)
         .assert()
         .success();
@@ -143,7 +156,7 @@ fn send_then_wait_round_trips_over_cli() {
     // sonnet46 waits and receives the message.
     let waited = Command::cargo_bin("cbc")
         .unwrap()
-        .args(["wait", &room_id, "--model", "sonnet46"])
+        .args(["wait", &room_id, "--model", "sonnet46", "--as", "sonnet46"])
         .env("CBC_SERVER", &base)
         .assert()
         .success();
@@ -152,6 +165,144 @@ fn send_then_wait_round_trips_over_cli() {
         out.contains("hello over cli"),
         "wait stdout should carry the delivered message body; got:\n{out}"
     );
+}
+
+/// THE REPORTED BUG, end-to-end: two agents in the *same* repo+model+cwd that
+/// previously collapsed onto one handle (and so were invisible to each other).
+/// Distinguished only by `--as`, they must be two participants, both visible in
+/// status, each able to receive the other's message — and re-joining with the
+/// same `--as` resumes the identity (the handoff/continuity contract).
+fn join_as(base: &str, room_id: &str, model: &str, as_label: &str) -> String {
+    let assert = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["join", room_id, "--model", model, "--as", as_label])
+        .env("CBC_SERVER", base)
+        .assert()
+        .success();
+    String::from_utf8(assert.get_output().stdout.clone()).unwrap()
+}
+
+fn handle_of(join_out: &str) -> String {
+    join_out
+        .lines()
+        .find_map(|l| l.strip_prefix("Handle:"))
+        .map(str::trim)
+        .expect("Handle line")
+        .to_string()
+}
+
+#[test]
+fn same_model_distinct_as_are_separate_participants_that_can_talk() {
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "same model distinct as");
+
+    // Same model, same (auto-detected) repo+cwd — only `--as` differs.
+    let alpha_out = join_as(&base, &room_id, "opus48", "alpha");
+    let beta_out = join_as(&base, &room_id, "opus48", "beta");
+    let alpha = handle_of(&alpha_out);
+    let beta = handle_of(&beta_out);
+    assert_ne!(
+        alpha, beta,
+        "same tuple, distinct --as must mint distinct handles; got {alpha} / {beta}"
+    );
+    assert!(
+        beta_out.contains("Resumed: false"),
+        "the second distinct identity is a fresh participant, not a resume; got:\n{beta_out}"
+    );
+
+    // status lists both.
+    let status = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["status", &room_id])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let status_out = String::from_utf8(status.get_output().stdout.clone()).unwrap();
+    assert!(
+        status_out.contains(&alpha) && status_out.contains(&beta),
+        "status must list both agents; got:\n{status_out}"
+    );
+
+    // alpha broadcasts; beta receives it (it is NOT filtered as beta's own).
+    Command::cargo_bin("cbc")
+        .unwrap()
+        .args([
+            "send",
+            &room_id,
+            "--model",
+            "opus48",
+            "--as",
+            "alpha",
+            "hi from alpha",
+        ])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let waited = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["wait", &room_id, "--model", "opus48", "--as", "beta"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(waited.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("hi from alpha"),
+        "beta must receive alpha's message; got:\n{out}"
+    );
+
+    // Handoff/continuity: re-joining with the same --as resumes alpha's handle,
+    // even though a fresh process (new pid) issues the call.
+    let resumed = join_as(&base, &room_id, "opus48", "alpha");
+    assert!(
+        resumed.contains("Resumed: true") && resumed.contains(&alpha),
+        "re-joining with the same --as must resume the same handle; got:\n{resumed}"
+    );
+}
+
+#[test]
+fn distinct_sessions_auto_derive_distinct_identities_without_as() {
+    // The incident exactly: two agents, same model, same repo+cwd, and NO
+    // explicit `--as`. They must still be separate participants — auto-derived
+    // from a distinct CLAUDE_CODE_SESSION_ID per process (CBC_INSTANCE removed so
+    // the session-id rung is the one exercised). This guards the code path that
+    // actually failed, not the explicit-label path.
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "auto identity");
+
+    let join_sess = |sess: &str| {
+        let assert = Command::cargo_bin("cbc")
+            .unwrap()
+            .args(["join", &room_id, "--model", "opus48"])
+            .env("CBC_SERVER", &base)
+            .env_remove("CBC_INSTANCE")
+            .env("CLAUDE_CODE_SESSION_ID", sess)
+            .assert()
+            .success();
+        handle_of(&String::from_utf8(assert.get_output().stdout.clone()).unwrap())
+    };
+
+    let a = join_sess("sess-a");
+    let b = join_sess("sess-b");
+    assert_ne!(
+        a, b,
+        "two sessions sharing repo+model+cwd must auto-derive distinct handles; got {a} / {b}"
+    );
+
+    let status = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["status", &room_id])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let status_out = String::from_utf8(status.get_output().stdout.clone()).unwrap();
+    assert!(
+        status_out.contains(&a) && status_out.contains(&b),
+        "both auto-derived agents must appear in status; got:\n{status_out}"
+    );
+
+    // Same session id re-joining resumes (idempotent on the auto path too).
+    let a_again = join_sess("sess-a");
+    assert_eq!(a, a_again, "same session id must resume the same handle");
 }
 
 #[test]
@@ -170,6 +321,8 @@ fn signal_then_wait_surfaces_the_question_over_cli() {
             &room_id,
             "--model",
             "opus47",
+            "--as",
+            "opus47",
             "--type",
             "waiting_user",
             "--severity",
@@ -184,7 +337,7 @@ fn signal_then_wait_surfaces_the_question_over_cli() {
     // sonnet46 waits and sees the sentinel + its question.
     let waited = Command::cargo_bin("cbc")
         .unwrap()
-        .args(["wait", &room_id, "--model", "sonnet46"])
+        .args(["wait", &room_id, "--model", "sonnet46", "--as", "sonnet46"])
         .env("CBC_SERVER", &base)
         .assert()
         .success();
@@ -213,6 +366,8 @@ fn pause_wake_close_round_trip_over_cli() {
             &room_id,
             "--model",
             "opus47",
+            "--as",
+            "opus47",
             "--reason",
             "stepping away",
         ])
@@ -228,7 +383,7 @@ fn pause_wake_close_round_trip_over_cli() {
     // wake brings it back to active.
     let woken = Command::cargo_bin("cbc")
         .unwrap()
-        .args(["wake", &room_id, "--model", "opus47"])
+        .args(["wake", &room_id, "--model", "opus47", "--as", "opus47"])
         .env("CBC_SERVER", &base)
         .assert()
         .success();
@@ -241,7 +396,7 @@ fn pause_wake_close_round_trip_over_cli() {
     // close ends it.
     let closed = Command::cargo_bin("cbc")
         .unwrap()
-        .args(["close", &room_id, "--model", "opus47"])
+        .args(["close", &room_id, "--model", "opus47", "--as", "opus47"])
         .env("CBC_SERVER", &base)
         .assert()
         .success();
@@ -288,7 +443,7 @@ fn status_reports_open_room() {
 fn send(base: &str, room_id: &str, model: &str, body: &str) {
     Command::cargo_bin("cbc")
         .unwrap()
-        .args(["send", room_id, "--model", model, body])
+        .args(["send", room_id, "--model", model, "--as", model, body])
         .env("CBC_SERVER", base)
         .assert()
         .success();
@@ -345,7 +500,7 @@ fn list_state_filter_narrows_results() {
     join(&base, &closed_room, "opus47");
     Command::cargo_bin("cbc")
         .unwrap()
-        .args(["close", &closed_room, "--model", "opus47"])
+        .args(["close", &closed_room, "--model", "opus47", "--as", "opus47"])
         .env("CBC_SERVER", &base)
         .assert()
         .success();
@@ -391,6 +546,8 @@ fn show_renders_markdown_transcript_with_sentinel() {
             "signal",
             &room_id,
             "--model",
+            "sonnet46",
+            "--as",
             "sonnet46",
             "--type",
             "waiting_user",
@@ -531,6 +688,8 @@ fn port_override_round_trips_across_both_binaries() {
             &room_id,
             "--model",
             "opus47",
+            "--as",
+            "opus47",
             "hello on a custom port",
         ])
         .env("CBC_SERVER", &base)
@@ -539,7 +698,7 @@ fn port_override_round_trips_across_both_binaries() {
 
     let waited = Command::cargo_bin("cbc")
         .unwrap()
-        .args(["wait", &room_id, "--model", "sonnet46"])
+        .args(["wait", &room_id, "--model", "sonnet46", "--as", "sonnet46"])
         .env("CBC_SERVER", &base)
         .assert()
         .success();

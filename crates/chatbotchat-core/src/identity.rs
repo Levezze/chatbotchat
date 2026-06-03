@@ -9,13 +9,17 @@ use crate::ids::kebab;
 use crate::participant::Participant;
 use std::collections::HashSet;
 
-/// The identity a caller presents on join. The handle is derived from this
-/// tuple, and rejoining with the same tuple is idempotent.
+/// The identity a caller presents on join. `instance` is the identity key:
+/// rejoining with the same `instance` is idempotent (returns the same handle),
+/// regardless of `repo`/`model`/`cwd` — those are descriptive and form the
+/// handle prefix only. Two agents sharing `(repo, model, cwd)` but with
+/// different `instance` are distinct participants.
 #[derive(Debug, Clone)]
 pub struct JoinIdentity {
     pub repo: String,
     pub model: String,
     pub cwd: String,
+    pub instance: String,
 }
 
 /// Outcome of resolving a handle for a join. `Reused` means an existing
@@ -29,7 +33,9 @@ pub enum HandleOutcome {
 
 /// Resolve the handle for a join.
 ///
-/// - If an existing participant matches `(repo, model, cwd)`, reuse its handle.
+/// - If an existing participant matches `instance`, reuse its handle (idempotent
+///   identity — independent of `repo`/`model`/`cwd`, which may drift across a
+///   resume or handoff).
 /// - Otherwise mint `<repo>-<model>-<sess>` from the first candidate sess that
 ///   does not collide with an existing handle in the room.
 pub fn derive_handle(
@@ -37,10 +43,7 @@ pub fn derive_handle(
     existing: &[Participant],
     sess_candidates: impl Iterator<Item = String>,
 ) -> HandleOutcome {
-    if let Some(p) = existing
-        .iter()
-        .find(|p| p.repo == id.repo && p.model == id.model && p.cwd == id.cwd)
-    {
+    if let Some(p) = existing.iter().find(|p| p.instance == id.instance) {
         return HandleOutcome::Reused(p.handle.clone());
     }
 
@@ -67,15 +70,22 @@ mod tests {
     use super::*;
     use time::macros::datetime;
 
-    fn ident(repo: &str, model: &str, cwd: &str) -> JoinIdentity {
+    fn ident(repo: &str, model: &str, cwd: &str, instance: &str) -> JoinIdentity {
         JoinIdentity {
             repo: repo.into(),
             model: model.into(),
             cwd: cwd.into(),
+            instance: instance.into(),
         }
     }
 
-    fn participant(handle: &str, repo: &str, model: &str, cwd: &str) -> Participant {
+    fn participant(
+        handle: &str,
+        repo: &str,
+        model: &str,
+        cwd: &str,
+        instance: &str,
+    ) -> Participant {
         let now = datetime!(2026-05-28 15:00 UTC);
         Participant {
             handle: handle.into(),
@@ -83,6 +93,7 @@ mod tests {
             repo: repo.into(),
             model: model.into(),
             cwd: cwd.into(),
+            instance: instance.into(),
             joined_at: now,
             last_poll_at: now,
             last_read_seq: 0,
@@ -91,7 +102,7 @@ mod tests {
 
     #[test]
     fn mints_handle_from_first_candidate_when_room_empty() {
-        let id = ident("mvp-engine", "opus47", "/work/mvp");
+        let id = ident("mvp-engine", "opus47", "/work/mvp", "inst-a");
         let outcome = derive_handle(&id, &[], ["a3f2".to_string()].into_iter());
         assert_eq!(
             outcome,
@@ -100,16 +111,17 @@ mod tests {
     }
 
     #[test]
-    fn reuses_existing_handle_for_same_tuple() {
-        let id = ident("mvp-engine", "opus47", "/work/mvp");
+    fn reuses_existing_handle_for_same_instance() {
+        let id = ident("mvp-engine", "opus47", "/work/mvp", "inst-a");
         let existing = [participant(
             "mvp-engine-opus47-a3f2",
             "mvp-engine",
             "opus47",
             "/work/mvp",
+            "inst-a",
         )];
-        // A fresh candidate is offered, but the matching tuple must win — no new
-        // handle, no candidate consumed.
+        // A fresh candidate is offered, but the matching instance must win — no
+        // new handle, no candidate consumed.
         let outcome = derive_handle(&id, &existing, ["zzzz".to_string()].into_iter());
         assert_eq!(
             outcome,
@@ -118,15 +130,38 @@ mod tests {
     }
 
     #[test]
+    fn distinct_instances_with_identical_tuple_mint_distinct_handles() {
+        // THE BUG: two agents in the same repo+model+cwd. Under the old
+        // tuple-keyed identity they collapsed onto one handle (Reused) and went
+        // invisible to each other. Keyed on `instance`, the second agent must
+        // mint its *own* handle.
+        let existing = [participant(
+            "mvp-api-opus48-088a",
+            "mvp-api",
+            "opus48",
+            "/work/mvp",
+            "session-one",
+        )];
+        let id = ident("mvp-api", "opus48", "/work/mvp", "session-two");
+        let outcome = derive_handle(&id, &existing, ["b7c1".to_string()].into_iter());
+        assert_eq!(
+            outcome,
+            HandleOutcome::Created("mvp-api-opus48-b7c1".into()),
+            "a different instance with the same tuple must be a distinct participant"
+        );
+    }
+
+    #[test]
     fn skips_candidate_that_collides_with_an_existing_handle() {
-        // A different participant (different cwd ⇒ different tuple) already holds
-        // the handle the first candidate would mint. Must skip to the next.
-        let id = ident("mvp-engine", "opus47", "/work/mvp");
+        // A different participant (different instance) already holds the handle
+        // the first candidate would mint. Must skip to the next.
+        let id = ident("mvp-engine", "opus47", "/work/mvp", "inst-b");
         let existing = [participant(
             "mvp-engine-opus47-a3f2",
             "mvp-engine",
             "opus47",
             "/other/cwd",
+            "inst-a",
         )];
         let outcome = derive_handle(
             &id,
