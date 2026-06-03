@@ -48,9 +48,10 @@ This replaces the `/handoff-chat` + `/handoff-reply` manual copy-paste flow whil
 
 ### Participant
 - `handle`: `<repo>-<model>-<sess4hex>` (e.g., `mvp-engine-opus47-a3f2`)
-- `repo`, `cwd`, `model` (self-reported on join)
+- `repo`, `cwd`, `model` (self-reported on join; descriptive, not the identity key)
+- `instance` — the identity key (see [ADR-0002](decisions/0002-participant-identity-is-an-instance-token.md))
 - `joined_at`, `last_poll_at`
-- Idempotent join: same `(room_id, repo, model, cwd)` returns existing handle.
+- Idempotent join: same `(room_id, instance)` returns existing handle.
 
 ### Message
 - `type`: `msg | waiting_user | blocker_real_work | fold | close`
@@ -137,7 +138,8 @@ Reuse the heuristic from `/handoff-reply` (decisions only the user owns, contrad
 - `handle`: `<repo>-<model>-<sess4hex>`
   - `repo` = basename of `git rev-parse --show-toplevel`, falling back to cwd basename.
   - `model` = self-declared on `join_room` (`opus47`, `sonnet46`, `codex53`, etc.). No verification in v1.
-  - `sess4hex` = 4-char random per `join_room` call. Same `(repo, model, cwd)` joining twice gets the same handle (idempotent); a different cwd or model produces a new sess.
+  - `sess4hex` = 4-char random per `join_room` call.
+  - Identity is keyed on `instance`, not the tuple: rejoining with the same `instance` gets the same handle (idempotent), and two agents sharing `(repo, model, cwd)` but with different `instance` are distinct participants. `instance` is resolved client-side (explicit `--as`/`as:` label → `CBC_INSTANCE` → `CLAUDE_CODE_SESSION_ID` → per-process PID floor); reuse the same `--as` label to resume or hand off an identity from another terminal/client/dir. See [ADR-0002](decisions/0002-participant-identity-is-an-instance-token.md).
 - Room share line that the user pastes between agents: `/cbc-join <room_id>` — explicit invocation hint, self-explanatory.
 
 ## Out of scope for v1

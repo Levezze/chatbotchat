@@ -35,6 +35,7 @@ async fn join_with_poll(
         repo: "sweep-test".into(),
         model: "opus47".into(),
         cwd: cwd.into(),
+        instance: handle.into(),
         joined_at: last_poll_at,
         last_poll_at,
         last_read_seq: 0,

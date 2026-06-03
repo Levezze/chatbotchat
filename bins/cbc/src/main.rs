@@ -54,6 +54,11 @@ enum Command {
         /// Self-declared model name, e.g. opus47, sonnet46, codex53.
         #[arg(long)]
         model: String,
+        /// Optional identity label. Auto-derived per session when omitted; two
+        /// agents in the same repo+model+dir must pass distinct values. Reuse
+        /// the same label from another terminal/client/dir to resume or hand off.
+        #[arg(long = "as")]
+        identity: Option<String>,
     },
     /// Post a message to a room; repo and cwd are auto-detected.
     Send {
@@ -70,6 +75,9 @@ enum Command {
         /// Fold your user's input into this turn; resets the soft-cap counter.
         #[arg(long)]
         human: bool,
+        /// Optional identity label (see `join --as`); pass the value you joined with.
+        #[arg(long = "as")]
+        identity: Option<String>,
     },
     /// Emit a sentinel (out-of-band signal) to a room; repo and cwd are auto-detected.
     Signal {
@@ -87,6 +95,9 @@ enum Command {
         /// The question you are asking your user (waiting_user only).
         #[arg(long)]
         question: Option<String>,
+        /// Optional identity label (see `join --as`); pass the value you joined with.
+        #[arg(long = "as")]
+        identity: Option<String>,
     },
     /// Long-poll for the next message addressed to you (or broadcast).
     Wait {
@@ -95,6 +106,9 @@ enum Command {
         /// Self-declared model name (your identity; e.g. opus47).
         #[arg(long)]
         model: String,
+        /// Optional identity label (see `join --as`); pass the value you joined with.
+        #[arg(long = "as")]
+        identity: Option<String>,
     },
     /// List rooms (newest-first). Hides archived unless `--all` or `--state archived`.
     List {
@@ -125,6 +139,9 @@ enum Command {
         /// Self-declared model name (your identity; e.g. opus47).
         #[arg(long)]
         model: String,
+        /// Optional identity label (see `join --as`); pass the value you joined with.
+        #[arg(long = "as")]
+        identity: Option<String>,
     },
     /// Pause a room; repo and cwd are auto-detected.
     Pause {
@@ -136,6 +153,9 @@ enum Command {
         /// Optional reason, recorded in the room's audit log.
         #[arg(long)]
         reason: Option<String>,
+        /// Optional identity label (see `join --as`); pass the value you joined with.
+        #[arg(long = "as")]
+        identity: Option<String>,
     },
     /// Wake a paused (or idle) room back to active; repo and cwd are auto-detected.
     Wake {
@@ -144,6 +164,9 @@ enum Command {
         /// Self-declared model name (your identity; e.g. opus47).
         #[arg(long)]
         model: String,
+        /// Optional identity label (see `join --as`); pass the value you joined with.
+        #[arg(long = "as")]
+        identity: Option<String>,
     },
     /// Run as an MCP stdio server (wired in a later cycle).
     Mcp,
@@ -178,11 +201,16 @@ async fn main() -> anyhow::Result<()> {
             println!();
             println!("Tell the other agent: {}", resp.share_line);
         }
-        Command::Join { room_id, model } => {
+        Command::Join {
+            room_id,
+            model,
+            identity,
+        } => {
             let repo = context::detect_repo();
             let cwd = context::detect_cwd();
+            let instance = context::detect_instance(identity.as_deref());
             let resp = client
-                .join_room(&room_id, &repo, &model, &cwd)
+                .join_room(&room_id, &repo, &model, &cwd, &instance)
                 .await
                 .context("joining room")?;
             println!("Handle:  {}", resp.handle);
@@ -195,11 +223,22 @@ async fn main() -> anyhow::Result<()> {
             body,
             to,
             human,
+            identity,
         } => {
             let repo = context::detect_repo();
             let cwd = context::detect_cwd();
+            let instance = context::detect_instance(identity.as_deref());
             let resp = client
-                .send_message(&room_id, &repo, &model, &cwd, to.as_deref(), &body, human)
+                .send_message(
+                    &room_id,
+                    &repo,
+                    &model,
+                    &cwd,
+                    &instance,
+                    to.as_deref(),
+                    &body,
+                    human,
+                )
                 .await
                 .context("sending message")?;
             println!("Sent: seq {}", resp.seq);
@@ -210,15 +249,18 @@ async fn main() -> anyhow::Result<()> {
             signal_type,
             severity,
             question,
+            identity,
         } => {
             let repo = context::detect_repo();
             let cwd = context::detect_cwd();
+            let instance = context::detect_instance(identity.as_deref());
             let resp = client
                 .signal(
                     &room_id,
                     &repo,
                     &model,
                     &cwd,
+                    &instance,
                     &signal_type,
                     severity.as_deref(),
                     question.as_deref(),
@@ -227,11 +269,16 @@ async fn main() -> anyhow::Result<()> {
                 .context("sending signal")?;
             println!("Signal sent: seq {}", resp.seq);
         }
-        Command::Wait { room_id, model } => {
+        Command::Wait {
+            room_id,
+            model,
+            identity,
+        } => {
             let repo = context::detect_repo();
             let cwd = context::detect_cwd();
+            let instance = context::detect_instance(identity.as_deref());
             let resp = client
-                .wait(&room_id, &repo, &model, &cwd, None)
+                .wait(&room_id, &repo, &model, &cwd, &instance, None)
                 .await
                 .context("waiting for message")?;
             match resp {
@@ -320,11 +367,16 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Command::Close { room_id, model } => {
+        Command::Close {
+            room_id,
+            model,
+            identity,
+        } => {
             let repo = context::detect_repo();
             let cwd = context::detect_cwd();
+            let instance = context::detect_instance(identity.as_deref());
             let resp = client
-                .close(&room_id, &repo, &model, &cwd)
+                .close(&room_id, &repo, &model, &cwd, &instance)
                 .await
                 .context("closing room")?;
             println!("State: {}", resp.state);
@@ -333,20 +385,27 @@ async fn main() -> anyhow::Result<()> {
             room_id,
             model,
             reason,
+            identity,
         } => {
             let repo = context::detect_repo();
             let cwd = context::detect_cwd();
+            let instance = context::detect_instance(identity.as_deref());
             let resp = client
-                .pause(&room_id, &repo, &model, &cwd, reason.as_deref())
+                .pause(&room_id, &repo, &model, &cwd, &instance, reason.as_deref())
                 .await
                 .context("pausing room")?;
             println!("State: {}", resp.state);
         }
-        Command::Wake { room_id, model } => {
+        Command::Wake {
+            room_id,
+            model,
+            identity,
+        } => {
             let repo = context::detect_repo();
             let cwd = context::detect_cwd();
+            let instance = context::detect_instance(identity.as_deref());
             let resp = client
-                .wake(&room_id, &repo, &model, &cwd)
+                .wake(&room_id, &repo, &model, &cwd, &instance)
                 .await
                 .context("waking room")?;
             println!("State: {}", resp.state);

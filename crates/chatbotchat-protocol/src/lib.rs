@@ -23,14 +23,21 @@ pub struct OpenRoomResponse {
     pub share_line: String,
 }
 
-/// Request body for `POST /rooms/:id/join`. `repo` and `cwd` are self-reported
-/// by the caller (auto-detected from the shell / MCP working directory); the
-/// `(room_id, repo, model, cwd)` tuple keys idempotent identity.
+/// Request body for `POST /rooms/:id/join`. `repo`/`model`/`cwd` are
+/// self-reported by the caller (auto-detected from the shell / MCP working
+/// directory) and are descriptive only. `instance` is the identity key:
+/// `(room_id, instance)` keys idempotent identity, so two agents sharing
+/// `(repo, model, cwd)` but with distinct `instance` are distinct participants.
+/// Resolved client-side (explicit `as` label → harness session id → per-process
+/// nonce); an empty value is synthesized server-side from the tuple for legacy
+/// callers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JoinRoomRequest {
     pub repo: String,
     pub model: String,
     pub cwd: String,
+    #[serde(default)]
+    pub instance: String,
 }
 
 fn default_msg_type() -> String {
@@ -66,6 +73,10 @@ pub struct SendMessageRequest {
     pub repo: String,
     pub model: String,
     pub cwd: String,
+    /// Identity key — same resolution as `JoinRoomRequest::instance`. The sender
+    /// is resolved by `(room_id, instance)`, not the tuple.
+    #[serde(default)]
+    pub instance: String,
     #[serde(default)]
     pub to: Option<String>,
     pub body: String,
@@ -95,6 +106,9 @@ pub struct SignalRequest {
     pub repo: String,
     pub model: String,
     pub cwd: String,
+    /// Identity key — same resolution as `JoinRoomRequest::instance`.
+    #[serde(default)]
+    pub instance: String,
     #[serde(rename = "type")]
     pub signal_type: String,
     #[serde(default)]
@@ -124,6 +138,9 @@ pub struct LifecycleRequest {
     pub repo: String,
     pub model: String,
     pub cwd: String,
+    /// Identity key — same resolution as `JoinRoomRequest::instance`.
+    #[serde(default)]
+    pub instance: String,
     #[serde(default)]
     pub reason: Option<String>,
 }
@@ -141,6 +158,9 @@ pub struct WaitRequest {
     pub repo: String,
     pub model: String,
     pub cwd: String,
+    /// Identity key — same resolution as `JoinRoomRequest::instance`.
+    #[serde(default)]
+    pub instance: String,
     /// Optional per-call upper bound (seconds) on the long-poll, capped by the
     /// server's own wait cap. The MCP `cbc_wait` tool sets this below the
     /// client's tool-call timeout so the poll returns `paused_by_timeout` (for a

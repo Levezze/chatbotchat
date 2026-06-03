@@ -118,14 +118,15 @@ impl Storage {
 
         sqlx::query(
             "INSERT INTO participants \
-             (handle, room_id, repo, model, cwd, joined_at, last_poll_at, last_read_seq) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             (handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&p.handle)
         .bind(&p.room_id)
         .bind(&p.repo)
         .bind(&p.model)
         .bind(&p.cwd)
+        .bind(&p.instance)
         .bind(joined_at)
         .bind(last_poll_at)
         .bind(p.last_read_seq)
@@ -544,6 +545,34 @@ impl Storage {
         Ok(cursor)
     }
 
+    /// Resolve a participant by its identity key `(room_id, instance)`. This is
+    /// the canonical "who is calling" lookup for send/signal/wait/lifecycle and
+    /// the join fast-path: it tells two agents sharing `(repo, model, cwd)` apart
+    /// by their distinct `instance`.
+    pub async fn get_participant_by_instance(
+        &self,
+        room_id: &str,
+        instance: &str,
+    ) -> Result<Option<Participant>, StorageError> {
+        let row = sqlx::query(
+            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq \
+             FROM participants \
+             WHERE room_id = ? AND instance = ?",
+        )
+        .bind(room_id)
+        .bind(instance)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            None => Ok(None),
+            Some(row) => Ok(Some(row_to_participant(&row)?)),
+        }
+    }
+
+    /// Resolve a participant by the `(room_id, repo, model, cwd)` tuple. Retained
+    /// as a descriptive-attribute query (not the identity key — see
+    /// `get_participant_by_instance`).
     pub async fn get_participant_by_tuple(
         &self,
         room_id: &str,
@@ -552,7 +581,7 @@ impl Storage {
         cwd: &str,
     ) -> Result<Option<Participant>, StorageError> {
         let row = sqlx::query(
-            "SELECT handle, room_id, repo, model, cwd, joined_at, last_poll_at, last_read_seq \
+            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq \
              FROM participants \
              WHERE room_id = ? AND repo = ? AND model = ? AND cwd = ?",
         )
@@ -571,7 +600,7 @@ impl Storage {
 
     pub async fn list_participants(&self, room_id: &str) -> Result<Vec<Participant>, StorageError> {
         let rows = sqlx::query(
-            "SELECT handle, room_id, repo, model, cwd, joined_at, last_poll_at, last_read_seq \
+            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq \
              FROM participants WHERE room_id = ? ORDER BY joined_at",
         )
         .bind(room_id)
@@ -805,6 +834,7 @@ fn row_to_participant(row: &sqlx::sqlite::SqliteRow) -> Result<Participant, Stor
         repo: row.try_get("repo")?,
         model: row.try_get("model")?,
         cwd: row.try_get("cwd")?,
+        instance: row.try_get("instance")?,
         joined_at: parse_ts(&row.try_get::<String, _>("joined_at")?)?,
         last_poll_at: parse_ts(&row.try_get::<String, _>("last_poll_at")?)?,
         last_read_seq: row.try_get("last_read_seq")?,

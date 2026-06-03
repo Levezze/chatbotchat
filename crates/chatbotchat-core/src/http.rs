@@ -237,15 +237,16 @@ async fn join_room(
     let start_seq = state.storage.current_seq(&id).await?;
 
     let ident = JoinIdentity {
+        instance: effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
         repo: req.repo,
         model: req.model,
         cwd: req.cwd,
     };
 
-    // Fast path: an existing matching participant resumes its handle.
+    // Fast path: an existing participant with this instance resumes its handle.
     if let Some(p) = state
         .storage
-        .get_participant_by_tuple(&id, &ident.repo, &ident.model, &ident.cwd)
+        .get_participant_by_instance(&id, &ident.instance)
         .await?
     {
         return Ok(join_response(p.handle, true, &room, recent));
@@ -258,7 +259,7 @@ async fn join_room(
         let existing = state.storage.list_participants(&id).await?;
         let handle = match derive_handle(&ident, &existing, rand_sess_candidates()) {
             // Reused shouldn't occur after the fast-path lookup, but if a
-            // concurrent join inserted the same tuple, honor it as resumed.
+            // concurrent join inserted the same instance, honor it as resumed.
             HandleOutcome::Reused(h) => return Ok(join_response(h, true, &room, recent.clone())),
             HandleOutcome::Created(h) => h,
         };
@@ -270,6 +271,7 @@ async fn join_room(
             repo: ident.repo.clone(),
             model: ident.model.clone(),
             cwd: ident.cwd.clone(),
+            instance: ident.instance.clone(),
             joined_at: now,
             last_poll_at: now,
             last_read_seq: start_seq,
@@ -278,11 +280,11 @@ async fn join_room(
         match state.storage.create_participant(&participant).await {
             Ok(()) => return Ok(join_response(handle, false, &room, recent.clone())),
             Err(e) if e.is_unique_violation() && attempt < MAX_ATTEMPTS => {
-                // Either a concurrent join took our tuple (refetch → resume) or
-                // the random sess collided (refetch returns None → retry).
+                // Either a concurrent join took our instance (refetch → resume)
+                // or the random sess collided (refetch returns None → retry).
                 if let Some(p) = state
                     .storage
-                    .get_participant_by_tuple(&id, &ident.repo, &ident.model, &ident.cwd)
+                    .get_participant_by_instance(&id, &ident.instance)
                     .await?
                 {
                     return Ok(join_response(p.handle, true, &room, recent.clone()));
@@ -291,6 +293,105 @@ async fn join_room(
             }
             Err(e) => return Err(e.into()),
         }
+    }
+}
+
+/// The identity key for a request. An explicit, non-empty `instance` (resolved
+/// client-side from an `as` label / harness session id / per-process nonce) wins.
+/// A legacy caller that sends none gets one synthesized from the tuple, so its
+/// identity is the same `(repo, model, cwd)`-equivalent it always had — the exact
+/// expression migration 0009 backfills existing rows with.
+fn effective_instance(repo: &str, model: &str, cwd: &str, instance: &str) -> String {
+    if instance.is_empty() {
+        format!("{repo}\n{model}\n{cwd}")
+    } else {
+        instance.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_instance_passes_through_an_explicit_value() {
+        assert_eq!(
+            effective_instance("mvp-api", "opus48", "/work/mvp", "concierge"),
+            "concierge"
+        );
+    }
+
+    #[test]
+    fn effective_instance_synthesis_matches_the_migration_backfill_expression() {
+        // Load-bearing: a legacy/old-binary client sends empty instance, so the
+        // server must synthesize the SAME string migration 0009 backfilled
+        // existing rows with — `repo || char(10) || model || char(10) || cwd`
+        // (char(10) == '\n') — or those participants fail to resume. Pin the
+        // exact bytes so a future edit to the Rust side can't drift silently.
+        assert_eq!(
+            effective_instance("mvp-api", "opus48", "/work/mvp", ""),
+            "mvp-api\nopus48\n/work/mvp"
+        );
+    }
+
+    /// Defense-in-depth for the same coupling, from the SQL side: execute the
+    /// REAL migration 0009 text against a seeded pre-0009 row and assert the
+    /// backfilled `instance` byte-equals the server-side empty-instance
+    /// synthesis. The literal pin above guards the Rust side; this guards the
+    /// migration's `char(10)` backfill expression, which that literal can't see.
+    /// Also confirms the table recreate preserves `last_read_seq`.
+    #[tokio::test]
+    async fn migration_0009_backfill_matches_effective_instance_synthesis() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        // Pre-0009 schema: rooms (FK target) + the old tuple-keyed participants.
+        for ddl in [
+            "CREATE TABLE rooms (id TEXT PRIMARY KEY)",
+            "CREATE TABLE participants (\
+                 handle TEXT PRIMARY KEY, \
+                 room_id TEXT NOT NULL REFERENCES rooms(id), \
+                 repo TEXT NOT NULL, model TEXT NOT NULL, cwd TEXT NOT NULL, \
+                 joined_at TEXT NOT NULL, last_poll_at TEXT NOT NULL, \
+                 last_read_seq INTEGER NOT NULL DEFAULT 0, \
+                 UNIQUE (room_id, repo, model, cwd))",
+            "INSERT INTO rooms (id) VALUES ('r1')",
+            "INSERT INTO participants \
+                 (handle, room_id, repo, model, cwd, joined_at, last_poll_at, last_read_seq) \
+                 VALUES ('mvp-api-opus48-088a','r1','mvp-api','opus48','/work/mvp','t0','t0',7)",
+        ] {
+            sqlx::query(ddl)
+                .execute(&pool)
+                .await
+                .expect("seed pre-0009");
+        }
+
+        // Apply the actual migration. `raw_sql` runs the whole multi-statement
+        // script (and tolerates its leading comment block) the way the migrator
+        // would — a naive split on ';' would feed the comment prose to the parser.
+        let sql = include_str!("../migrations/0009_participant_instance.sql");
+        sqlx::raw_sql(sql)
+            .execute(&pool)
+            .await
+            .expect("run migration 0009");
+
+        let (instance, last_read): (String, i64) = sqlx::query_as(
+            "SELECT instance, last_read_seq FROM participants WHERE handle = 'mvp-api-opus48-088a'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("the seeded row survives the recreate");
+
+        assert_eq!(
+            instance,
+            effective_instance("mvp-api", "opus48", "/work/mvp", ""),
+            "0009 backfill must byte-match the empty-instance synthesis so legacy clients resume"
+        );
+        assert_eq!(
+            last_read, 7,
+            "last_read_seq must survive the table recreate"
+        );
     }
 }
 
@@ -350,7 +451,10 @@ async fn send_message(
 
     let sender = state
         .storage
-        .get_participant_by_tuple(&id, &req.repo, &req.model, &req.cwd)
+        .get_participant_by_instance(
+            &id,
+            &effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
+        )
         .await?
         .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
 
@@ -439,7 +543,10 @@ async fn signal_room(
 
     let sender = state
         .storage
-        .get_participant_by_tuple(&id, &req.repo, &req.model, &req.cwd)
+        .get_participant_by_instance(
+            &id,
+            &effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
+        )
         .await?
         .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
 
@@ -609,7 +716,10 @@ async fn apply_transition(
     // Lifecycle ops are participant-driven — uniform with send/signal/wait.
     state
         .storage
-        .get_participant_by_tuple(id, &req.repo, &req.model, &req.cwd)
+        .get_participant_by_instance(
+            id,
+            &effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
+        )
         .await?
         .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
 
@@ -666,7 +776,10 @@ async fn wait_room(
 
     let caller = state
         .storage
-        .get_participant_by_tuple(&id, &req.repo, &req.model, &req.cwd)
+        .get_participant_by_instance(
+            &id,
+            &effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
+        )
         .await?
         .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
 

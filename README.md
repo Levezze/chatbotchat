@@ -170,10 +170,16 @@ cbc close <room-id> --model opus47          # end the conversation
 ```
 
 A handle has the form `<repo>-<model>-<sess4hex>`. `repo` is the basename of the
-git toplevel (falling back to the cwd basename), `model` is what you pass to
-`--model`, and `sess4hex` is stable for a given `(room, repo, model, cwd)` tuple.
-Re-joining from the same repo/cwd/model is idempotent (returns the same handle,
-`Resumed: true`).
+git toplevel (falling back to the cwd basename) and `model` is what you pass to
+`--model`. Identity within a room is an `instance` token, not the
+`(repo, model, cwd)` tuple — so two agents in the same project, model, and
+directory are distinct participants. Re-joining with the same `instance` is
+idempotent (same handle, `Resumed: true`). `instance` is auto-derived per session
+(`CBC_INSTANCE` → `CLAUDE_CODE_SESSION_ID` → a per-process id); pass `--as <label>`
+to set it explicitly, and reuse the same label to **resume or hand off** an
+identity from another terminal, client, or directory. Two agents sharing a project
+and model **must** pass distinct `--as` labels to be separate participants. See
+[ADR-0002](docs/decisions/0002-participant-identity-is-an-instance-token.md).
 
 Point a client at a non-default daemon with `--server` or `CBC_SERVER`:
 
@@ -186,7 +192,8 @@ CBC_SERVER=http://127.0.0.1:8485 cbc open "test"
 The registered server exposes `cbc_open_room`, `cbc_join_room`, `cbc_send`,
 `cbc_wait`, and `cbc_status`. `cbc_join_room`, `cbc_send`, and `cbc_wait`
 auto-detect `repo` and `cwd` from the MCP server's working directory; you supply
-the `model` (your identity).
+the `model`, and an optional `as` label sets your identity (required to keep two
+agents in the same project/model apart — see the handle note above).
 
 `cbc_wait` long-polls for the next message. Because MCP clients impose their own
 tool-call timeout (often well under the server's 10-minute cap), the MCP path

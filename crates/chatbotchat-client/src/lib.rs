@@ -57,12 +57,14 @@ impl HttpClient {
         decode(resp).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn join_room(
         &self,
         room_id: &str,
         repo: &str,
         model: &str,
         cwd: &str,
+        instance: &str,
     ) -> Result<JoinRoomResponse, ClientError> {
         let resp = self
             .http
@@ -71,6 +73,7 @@ impl HttpClient {
                 repo: repo.to_string(),
                 model: model.to_string(),
                 cwd: cwd.to_string(),
+                instance: instance.to_string(),
             })
             .send()
             .await?;
@@ -87,6 +90,7 @@ impl HttpClient {
         repo: &str,
         model: &str,
         cwd: &str,
+        instance: &str,
         to: Option<&str>,
         body: &str,
         from_human: bool,
@@ -98,6 +102,7 @@ impl HttpClient {
                 repo: repo.to_string(),
                 model: model.to_string(),
                 cwd: cwd.to_string(),
+                instance: instance.to_string(),
                 to: to.map(str::to_string),
                 body: body.to_string(),
                 from_human,
@@ -112,12 +117,14 @@ impl HttpClient {
     /// cap (the MCP path uses this to return before a client tool-call timeout);
     /// `None` gets the full server cap. The per-request HTTP timeout sits just
     /// above the effective cap so the client never abandons the call early.
+    #[allow(clippy::too_many_arguments)]
     pub async fn wait(
         &self,
         room_id: &str,
         repo: &str,
         model: &str,
         cwd: &str,
+        instance: &str,
         max_wait_secs: Option<u32>,
     ) -> Result<WaitResponse, ClientError> {
         let http_timeout = match max_wait_secs {
@@ -131,6 +138,7 @@ impl HttpClient {
                 repo: repo.to_string(),
                 model: model.to_string(),
                 cwd: cwd.to_string(),
+                instance: instance.to_string(),
                 max_wait_secs,
             })
             .timeout(http_timeout)
@@ -150,6 +158,7 @@ impl HttpClient {
         repo: &str,
         model: &str,
         cwd: &str,
+        instance: &str,
         signal_type: &str,
         severity: Option<&str>,
         question_text: Option<&str>,
@@ -161,6 +170,7 @@ impl HttpClient {
                 repo: repo.to_string(),
                 model: model.to_string(),
                 cwd: cwd.to_string(),
+                instance: instance.to_string(),
                 signal_type: signal_type.to_string(),
                 severity: severity.map(str::to_string),
                 question_text: question_text.map(str::to_string),
@@ -217,8 +227,9 @@ impl HttpClient {
         repo: &str,
         model: &str,
         cwd: &str,
+        instance: &str,
     ) -> Result<LifecycleResponse, ClientError> {
-        self.lifecycle(room_id, "close", repo, model, cwd, None)
+        self.lifecycle(room_id, "close", repo, model, cwd, instance, None)
             .await
     }
 
@@ -230,26 +241,29 @@ impl HttpClient {
         repo: &str,
         model: &str,
         cwd: &str,
+        instance: &str,
         reason: Option<&str>,
     ) -> Result<LifecycleResponse, ClientError> {
-        self.lifecycle(room_id, "pause", repo, model, cwd, reason)
+        self.lifecycle(room_id, "pause", repo, model, cwd, instance, reason)
             .await
     }
 
-    /// Wake a paused (or idle) room back to active. Identity is the
-    /// `(repo, model, cwd)` tuple; the caller must be a participant.
+    /// Wake a paused (or idle) room back to active. Identity is the caller's
+    /// `instance`; the caller must be a participant.
     pub async fn wake(
         &self,
         room_id: &str,
         repo: &str,
         model: &str,
         cwd: &str,
+        instance: &str,
     ) -> Result<LifecycleResponse, ClientError> {
-        self.lifecycle(room_id, "wake", repo, model, cwd, None)
+        self.lifecycle(room_id, "wake", repo, model, cwd, instance, None)
             .await
     }
 
     /// Shared POST for the close/pause/wake lifecycle endpoints.
+    #[allow(clippy::too_many_arguments)]
     async fn lifecycle(
         &self,
         room_id: &str,
@@ -257,6 +271,7 @@ impl HttpClient {
         repo: &str,
         model: &str,
         cwd: &str,
+        instance: &str,
         reason: Option<&str>,
     ) -> Result<LifecycleResponse, ClientError> {
         let resp = self
@@ -266,6 +281,7 @@ impl HttpClient {
                 repo: repo.to_string(),
                 model: model.to_string(),
                 cwd: cwd.to_string(),
+                instance: instance.to_string(),
                 reason: reason.map(str::to_string),
             })
             .send()
