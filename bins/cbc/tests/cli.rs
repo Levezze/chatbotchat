@@ -71,13 +71,9 @@ fn open_room(base: &str, subject: &str) -> String {
 // call passes an explicit `--as <model>`: same model ⇒ same agent (resumes),
 // different model ⇒ a separate participant.
 fn join(base: &str, room_id: &str, model: &str) -> String {
-    let assert = Command::cargo_bin("cbc")
-        .unwrap()
-        .args(["join", room_id, "--model", model, "--as", model])
-        .env("CBC_SERVER", base)
-        .assert()
-        .success();
-    String::from_utf8(assert.get_output().stdout.clone()).unwrap()
+    // Same agent ⇒ `--as <model>`; this is just `join_as` with the label fixed
+    // to the model (defined below, used by the multi-identity tests).
+    join_as(base, room_id, model, model)
 }
 
 #[test]

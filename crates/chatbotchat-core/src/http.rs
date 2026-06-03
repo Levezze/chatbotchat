@@ -327,10 +327,70 @@ mod tests {
         // server must synthesize the SAME string migration 0009 backfilled
         // existing rows with — `repo || char(10) || model || char(10) || cwd`
         // (char(10) == '\n') — or those participants fail to resume. Pin the
-        // exact bytes so a future edit to either side can't drift silently.
+        // exact bytes so a future edit to the Rust side can't drift silently.
         assert_eq!(
             effective_instance("mvp-api", "opus48", "/work/mvp", ""),
             "mvp-api\nopus48\n/work/mvp"
+        );
+    }
+
+    /// Defense-in-depth for the same coupling, from the SQL side: execute the
+    /// REAL migration 0009 text against a seeded pre-0009 row and assert the
+    /// backfilled `instance` byte-equals the server-side empty-instance
+    /// synthesis. The literal pin above guards the Rust side; this guards the
+    /// migration's `char(10)` backfill expression, which that literal can't see.
+    /// Also confirms the table recreate preserves `last_read_seq`.
+    #[tokio::test]
+    async fn migration_0009_backfill_matches_effective_instance_synthesis() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connect in-memory sqlite");
+
+        // Pre-0009 schema: rooms (FK target) + the old tuple-keyed participants.
+        for ddl in [
+            "CREATE TABLE rooms (id TEXT PRIMARY KEY)",
+            "CREATE TABLE participants (\
+                 handle TEXT PRIMARY KEY, \
+                 room_id TEXT NOT NULL REFERENCES rooms(id), \
+                 repo TEXT NOT NULL, model TEXT NOT NULL, cwd TEXT NOT NULL, \
+                 joined_at TEXT NOT NULL, last_poll_at TEXT NOT NULL, \
+                 last_read_seq INTEGER NOT NULL DEFAULT 0, \
+                 UNIQUE (room_id, repo, model, cwd))",
+            "INSERT INTO rooms (id) VALUES ('r1')",
+            "INSERT INTO participants \
+                 (handle, room_id, repo, model, cwd, joined_at, last_poll_at, last_read_seq) \
+                 VALUES ('mvp-api-opus48-088a','r1','mvp-api','opus48','/work/mvp','t0','t0',7)",
+        ] {
+            sqlx::query(ddl)
+                .execute(&pool)
+                .await
+                .expect("seed pre-0009");
+        }
+
+        // Apply the actual migration. `raw_sql` runs the whole multi-statement
+        // script (and tolerates its leading comment block) the way the migrator
+        // would — a naive split on ';' would feed the comment prose to the parser.
+        let sql = include_str!("../migrations/0009_participant_instance.sql");
+        sqlx::raw_sql(sql)
+            .execute(&pool)
+            .await
+            .expect("run migration 0009");
+
+        let (instance, last_read): (String, i64) = sqlx::query_as(
+            "SELECT instance, last_read_seq FROM participants WHERE handle = 'mvp-api-opus48-088a'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("the seeded row survives the recreate");
+
+        assert_eq!(
+            instance,
+            effective_instance("mvp-api", "opus48", "/work/mvp", ""),
+            "0009 backfill must byte-match the empty-instance synthesis so legacy clients resume"
+        );
+        assert_eq!(
+            last_read, 7,
+            "last_read_seq must survive the table recreate"
         );
     }
 }
