@@ -81,7 +81,7 @@ async fn open_room_then_status_round_trips() {
         open_body["share_line"]
             .as_str()
             .expect("share_line present"),
-        format!("/cbc-join {room_id}")
+        format!("Join CBC room {room_id}")
     );
 
     // GET /rooms/:id
@@ -1130,12 +1130,38 @@ async fn join_returns_recent_messages() {
 }
 
 #[tokio::test]
+async fn wait_with_no_counterpart_returns_awaiting_counterpart_immediately() {
+    // A long cap proves the early return: if the handler parked, this lone-waiter
+    // wait would hang the full second and report `paused_by_timeout` instead. The
+    // opener is the only participant — nobody has been told the room id yet — so
+    // the server must short-circuit, not silently long-poll.
+    let app = test_router_with_cap(std::time::Duration::from_secs(1)).await;
+    let room_id = open_room_id(&app, "alone").await;
+    join(&app, &room_id, "mvp-engine", "opus47", "/work/a").await;
+
+    let (status, body) = wait(&app, &room_id, "mvp-engine", "opus47", "/work/a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["status"].as_str(),
+        Some("awaiting_counterpart"),
+        "a sole participant must get awaiting_counterpart, not a parked timeout; got {body}"
+    );
+    assert!(
+        body.get("retry_after").is_none(),
+        "awaiting_counterpart carries no backoff hint; got {body}"
+    );
+}
+
+#[tokio::test]
 async fn wait_times_out_with_paused_by_timeout() {
     let app = test_router_with_cap(std::time::Duration::from_millis(80)).await;
     let room_id = open_room_id(&app, "timeout").await;
+    // Two participants joined: the counterpart exists (so we are past the
+    // awaiting_counterpart gate), but neither has sent — wait parks until the
+    // (short) cap, then reports paused_by_timeout.
     join(&app, &room_id, "mvp-engine", "opus47", "/work/a").await;
+    join(&app, &room_id, "mvp-api", "sonnet46", "/work/b").await;
 
-    // Nothing has been sent: wait parks until the (short) cap, then reports it.
     let (status, body) = wait(&app, &room_id, "mvp-engine", "opus47", "/work/a").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"].as_str(), Some("paused_by_timeout"));

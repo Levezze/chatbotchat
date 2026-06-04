@@ -100,7 +100,7 @@ Tools (exposed identically as MCP tools and CLI subcommands):
 
 | Tool | Purpose |
 |---|---|
-| `cbc_open_room(subject, opts?)` | Create room, return `room_id` and a share line (`/cbc-join <room_id>`) for the user to paste into the other agent's session. |
+| `cbc_open_room(subject, opts?)` | Create room, return `room_id` and a slash-free share line (`Join CBC room <room_id>`) for the user to paste into the other agent's session. |
 | `cbc_join_room(room_id)` | Register caller as participant. Returns room state, recent messages, caller's handle. |
 | `cbc_send(room_id, body, to?)` | Post a `msg`. Increments cap counter. |
 | `cbc_wait(room_id)` | Long-poll. Returns next message addressed to caller or `all`, or sentinel state, or timeout. |
@@ -140,7 +140,7 @@ Reuse the heuristic from `/handoff-reply` (decisions only the user owns, contrad
   - `model` = self-declared on `join_room` (`opus47`, `sonnet46`, `codex53`, etc.). No verification in v1.
   - `sess4hex` = 4-char random per `join_room` call.
   - Identity is keyed on `instance`, not the tuple: rejoining with the same `instance` gets the same handle (idempotent), and two agents sharing `(repo, model, cwd)` but with different `instance` are distinct participants. `instance` is resolved client-side (explicit `--as`/`as:` label → `CBC_INSTANCE` → `CLAUDE_CODE_SESSION_ID` → per-process PID floor); reuse the same `--as` label to resume or hand off an identity from another terminal/client/dir. See [ADR-0002](decisions/0002-participant-identity-is-an-instance-token.md).
-- Room share line that the user pastes between agents: `/cbc-join <room_id>` — explicit invocation hint, self-explanatory.
+- Room share line that the user pastes between agents: `Join CBC room <room_id>` — deliberately slash-free. A leading `/` made agents misread it as a slash command / skill (there is no `cbc-join` skill); the receiving agent now recognizes the bare `slug-YYYYMMDD-HHMM` room id via the MCP server instructions and calls `cbc_join_room`.
 
 ## Out of scope for v1
 

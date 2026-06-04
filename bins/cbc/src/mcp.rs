@@ -6,8 +6,13 @@
 //! which keeps the smoke surface simple for slice 1.
 
 use chatbotchat_client::HttpClient;
+use chatbotchat_protocol::WaitResponse;
 use rmcp::{
-    handler::server::wrapper::Parameters, schemars, tool, tool_router, transport::stdio, ServiceExt,
+    handler::server::wrapper::Parameters,
+    model::{ServerCapabilities, ServerInfo},
+    schemars, tool, tool_handler, tool_router,
+    transport::stdio,
+    ServerHandler, ServiceExt,
 };
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -164,7 +169,7 @@ pub struct CbcMcp {
     client: HttpClient,
 }
 
-#[tool_router(server_handler)]
+#[tool_router]
 impl CbcMcp {
     #[tool(description = "Open a new chatbotchat room; returns {room_id, share_line} as JSON")]
     async fn cbc_open_room(
@@ -176,7 +181,13 @@ impl CbcMcp {
         }): Parameters<OpenRoomArgs>,
     ) -> String {
         match self.client.open_room(&subject, hard_cap, soft_cap).await {
-            Ok(resp) => json_or_err(&resp),
+            Ok(resp) => {
+                let next = format!(
+                    "Opening the room did NOT join you or post anything. Do this now, in order: (1) cbc_join_room({0}, model); (2) cbc_send your opening question so it is queued and waiting when the other agent joins; (3) show your user this room id on its own line, exactly:\n\n{0}\n\nNo slash prefix — it is NOT a command. Ask them to paste it to the other agent. Then END YOUR TURN; call cbc_wait only after they confirm the other agent has joined.",
+                    resp.room_id
+                );
+                json_with_next(&resp, next)
+            }
             Err(e) => err_json(&e.to_string()),
         }
     }
@@ -200,7 +211,14 @@ impl CbcMcp {
             .join_room(&room_id, &repo, &model, &cwd, &instance)
             .await
         {
-            Ok(resp) => json_or_err(&resp),
+            Ok(resp) => {
+                let n = resp.recent_messages.len();
+                let next = format!(
+                    "Joined as {}. {n} recent message(s) are included in this response. Now call cbc_wait to receive the next message, or cbc_send to speak first.",
+                    resp.handle
+                );
+                json_with_next(&resp, next)
+            }
             Err(e) => err_json(&e.to_string()),
         }
     }
@@ -236,13 +254,16 @@ impl CbcMcp {
             )
             .await
         {
-            Ok(resp) => json_or_err(&resp),
+            Ok(resp) => json_with_next(
+                &resp,
+                "Posted. Now call cbc_wait to await the reply — the counterpart may take a while; honor any retry_after and do not bail to your user to relay.",
+            ),
             Err(e) => err_json(&e.to_string()),
         }
     }
 
     #[tool(
-        description = "Long-poll for the next message addressed to you (or broadcast) in a room. Identity is (repo, model, cwd) — repo and cwd are auto-detected, you supply the model (slice-3 identity arg). Blocks up to a short per-call cap (default 50s, set by CBC_MCP_WAIT_CAP) so the tool call returns before your client's tool-call timeout rather than erroring. Returns {\"message\":{...},\"surface_to_user\":bool} when a message arrives, or {\"status\":\"paused_by_timeout\"} when the cap elapses with nothing for you — that is NOT the end of the conversation: call cbc_wait again to keep waiting. Other terminal statuses (\"paused\", \"closed\", \"archived\", \"counterpart_stale\") mean stop polling. When surface_to_user is true the conversation has hit the soft cap — consult your user and send your next turn with human=true. The response may also carry \"retry_after\" (seconds): the counterpart is engaged — either paused consulting its user, or it has read your last message and is composing a reply (a long autonomous turn emits no signal, so the server infers this). Either way the conversation is alive: stay quiet that long, then call cbc_wait again. Do NOT loop tightly, and do NOT give up or ask your human to ping the other side — keep waiting. The field grows the longer the counterpart stays silent."
+        description = "Long-poll for the next message addressed to you (or broadcast) in a room. Identity is (repo, model, cwd) — repo and cwd are auto-detected, you supply the model (slice-3 identity arg). Blocks up to a short per-call cap (default 50s, set by CBC_MCP_WAIT_CAP) so the tool call returns before your client's tool-call timeout rather than erroring. Returns {\"message\":{...},\"surface_to_user\":bool} when a message arrives, or {\"status\":\"paused_by_timeout\"} when the cap elapses with nothing for you — that is NOT the end of the conversation: call cbc_wait again to keep waiting. Other terminal statuses (\"paused\", \"closed\", \"archived\", \"counterpart_stale\") mean stop polling. The status \"awaiting_counterpart\" is NOT terminal: the other agent has not joined yet — surface the room id to your user and end your turn, then resume cbc_wait after they confirm the join; do not abandon the room and do not tight-loop. When surface_to_user is true the conversation has hit the soft cap — consult your user and send your next turn with human=true. The response may also carry \"retry_after\" (seconds): the counterpart is engaged — either paused consulting its user, or it has read your last message and is composing a reply (a long autonomous turn emits no signal, so the server infers this). Either way the conversation is alive: stay quiet that long, then call cbc_wait again. Do NOT loop tightly, and do NOT give up or ask your human to ping the other side — keep waiting. The field grows the longer the counterpart stays silent."
     )]
     async fn cbc_wait(
         &self,
@@ -267,7 +288,10 @@ impl CbcMcp {
             )
             .await
         {
-            Ok(resp) => json_or_err(&resp),
+            Ok(resp) => {
+                let next = wait_next(&resp);
+                json_with_next(&resp, next)
+            }
             Err(e) => err_json(&e.to_string()),
         }
     }
@@ -303,7 +327,14 @@ impl CbcMcp {
             )
             .await
         {
-            Ok(resp) => json_or_err(&resp),
+            Ok(resp) => {
+                let next = match signal_type.as_str() {
+                    "waiting_user" => "Signaled that you are consulting your user. The counterpart's cbc_wait will now back off while you are away. Go get your answer, then post your reply with cbc_send(human=true).",
+                    "fold" => "Fold signaled — the soft-cap counter is reset. Continue the conversation with cbc_send / cbc_wait.",
+                    _ => "Signal posted. Continue with cbc_send / cbc_wait as appropriate.",
+                };
+                json_with_next(&resp, next)
+            }
             Err(e) => err_json(&e.to_string()),
         }
     }
@@ -327,8 +358,14 @@ impl CbcMcp {
             .close(&room_id, &repo, &model, &cwd, &instance)
             .await
         {
-            Ok(resp) => json_or_err(&resp),
-            Err(e) => err_json(&e.to_string()),
+            Ok(resp) => json_with_next(
+                &resp,
+                "Room closed — the conversation is over. Stop calling cbc_wait.",
+            ),
+            Err(e) => err_with_next(
+                &e.to_string(),
+                "If this failed because the room was already closed, no action is needed — just stop polling.",
+            ),
         }
     }
 
@@ -352,8 +389,14 @@ impl CbcMcp {
             .pause(&room_id, &repo, &model, &cwd, &instance, reason.as_deref())
             .await
         {
-            Ok(resp) => json_or_err(&resp),
-            Err(e) => err_json(&e.to_string()),
+            Ok(resp) => json_with_next(
+                &resp,
+                "Room paused — it will not deliver messages until an explicit cbc_wake.",
+            ),
+            Err(e) => err_with_next(
+                &e.to_string(),
+                "If the room was already paused, no action is needed.",
+            ),
         }
     }
 
@@ -376,8 +419,14 @@ impl CbcMcp {
             .wake(&room_id, &repo, &model, &cwd, &instance)
             .await
         {
-            Ok(resp) => json_or_err(&resp),
-            Err(e) => err_json(&e.to_string()),
+            Ok(resp) => json_with_next(
+                &resp,
+                "Room is active again. Resume the cbc_send / cbc_wait loop.",
+            ),
+            Err(e) => err_with_next(
+                &e.to_string(),
+                "If the room was already active, just resume cbc_wait.",
+            ),
         }
     }
 
@@ -387,18 +436,116 @@ impl CbcMcp {
         Parameters(StatusArgs { room_id }): Parameters<StatusArgs>,
     ) -> String {
         match self.client.status(&room_id).await {
-            Ok(status) => json_or_err(&status),
+            Ok(status) => json_with_next(
+                &status,
+                "Room status above (state + participants). Use it to decide whether to join, send, wait, or close.",
+            ),
             Err(e) => err_json(&e.to_string()),
         }
     }
 }
 
-fn json_or_err<T: serde::Serialize>(value: &T) -> String {
-    serde_json::to_string(value).unwrap_or_else(|e| err_json(&e.to_string()))
+/// Server-level onboarding the MCP client surfaces to the agent once at connect
+/// (rmcp `ServerInfo::instructions`). It teaches the conversation loop and the
+/// room-id recognition that kills the `/cbc-join` slash misread; the just-in-time
+/// next step for each call rides in the per-response `next` field instead, so this
+/// stays a concise mental model rather than an exhaustive manual.
+const CBC_INSTRUCTIONS: &str = "\
+chatbotchat (CBC) is a local message bus that lets AI agents in different repos or sessions talk to each other through shared rooms.
+
+IF YOUR USER GIVES YOU A BARE TOKEN shaped like `slug-YYYYMMDD-HHMM` (e.g. `slider-labels-20260604-1933`), that is a CBC room id: call cbc_join_room(room_id, model) then cbc_wait(room_id, model). There is NO `/cbc-join` skill or slash command — never try to invoke one. A leading-slash form you may see in older text is not a command; ignore the slash and use the id.
+
+The loop: cbc_open_room -> cbc_join_room + cbc_send your opening question -> surface the bare room id to your user and END YOUR TURN -> (the other agent joins and answers) -> cbc_send / cbc_wait ping-pong -> cbc_close when done.
+
+cbc_open_room only creates the room — it does NOT join you or post anything. So after opening: cbc_join_room, then cbc_send your opening question (so it is queued for the other agent), then output the room id verbatim on its own line, no slash prefix, so your user can paste it to the other agent. Then stop — do NOT call cbc_wait until your user confirms the other agent joined. (If you wait while still alone, cbc_wait returns status `awaiting_counterpart`: surface the id and end your turn.)
+
+Waiting (cbc_wait long-polls ~50s server-side):
+- status `paused_by_timeout` -> nothing yet, the conversation is alive: call cbc_wait again.
+- a `retry_after` (seconds) on any response -> the counterpart is busy or away: stay quiet that long, then call cbc_wait again. Never tight-loop; never ask your user to ping the other side.
+- status `awaiting_counterpart` -> the other agent has not joined yet: surface the room id, end your turn, resume cbc_wait once they join. NOT terminal — do not abandon the room.
+- status `paused` / `closed` / `archived` / `counterpart_stale` -> stop polling.
+- `surface_to_user: true` -> consult your user, then send your next turn with human=true.
+
+When YOU step away to research or consult your user, FIRST call cbc_signal(type=waiting_user, severity, question_text) so the counterpart's cbc_wait backs off the right amount. Fold your user's input back in with cbc_send(human=true).
+
+Every tool response carries a `next` field with the exact next action — follow it.";
+
+#[tool_handler]
+impl ServerHandler for CbcMcp {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_instructions(CBC_INSTRUCTIONS)
+    }
 }
 
 fn err_json(message: &str) -> String {
     serde_json::json!({ "error": message }).to_string()
+}
+
+/// Serialize `value` and splice in a `next` field — the deterministic, just-in-time
+/// instruction telling the calling agent what to do with this result. Keeps the
+/// raw response shape intact (the agent still sees room_id/seq/status/etc.) and
+/// adds the coaching the bare DTO never carried. Falls back to a plain error
+/// string if `value` does not serialize to a JSON object.
+fn json_with_next<T: serde::Serialize>(value: &T, next: impl Into<String>) -> String {
+    match serde_json::to_value(value) {
+        Ok(serde_json::Value::Object(mut map)) => {
+            map.insert("next".into(), serde_json::Value::String(next.into()));
+            serde_json::Value::Object(map).to_string()
+        }
+        // Non-object payloads have nowhere to hang `next`; return them as-is.
+        Ok(other) => other.to_string(),
+        Err(e) => err_json(&e.to_string()),
+    }
+}
+
+/// An error response that also carries recovery guidance in `next`, so a failed
+/// (often non-idempotent: already-closed / already-paused) call still tells the
+/// agent how to proceed instead of leaving it to flail.
+fn err_with_next(message: &str, next: impl Into<String>) -> String {
+    serde_json::json!({ "error": message, "next": next.into() }).to_string()
+}
+
+/// The deterministic `next` step for a `cbc_wait` result, derived from the runtime
+/// variant/status so the agent is told exactly what to do — reinforcing the
+/// (static) tool description with state the description can't know.
+fn wait_next(resp: &WaitResponse) -> String {
+    match resp {
+        WaitResponse::Message {
+            surface_to_user: true,
+            ..
+        } => "A message arrived and the soft cap is reached: surface it to your user, get their input, then reply with cbc_send(human=true)."
+            .to_string(),
+        WaitResponse::Message { .. } => {
+            "A message arrived. Read it and reply with cbc_send, or end the conversation with cbc_close if you are done."
+                .to_string()
+        }
+        WaitResponse::Timeout {
+            status,
+            retry_after,
+        } => {
+            let prefix = retry_after
+                .map(|s| format!("Stay quiet ~{s}s, then "))
+                .unwrap_or_default();
+            match status.as_str() {
+                "paused_by_timeout" => format!(
+                    "{prefix}call cbc_wait again — nothing arrived yet but the conversation is alive. Do not give up."
+                ),
+                "awaiting_counterpart" => {
+                    "The other agent has not joined yet. Surface the room id to your user and END YOUR TURN; resume cbc_wait only after they confirm the join. Do not abandon the room and do not tight-loop."
+                        .to_string()
+                }
+                "counterpart_stale" => {
+                    "The other agent has gone silent (>15 min with no poll). Stop polling and tell your user the counterpart is unresponsive."
+                        .to_string()
+                }
+                "paused" | "closed" | "archived" => {
+                    format!("The room is {status}. Stop polling.")
+                }
+                other => format!("Room status: {other}. Stop polling unless you know how to resume."),
+            }
+        }
+    }
 }
 
 /// Default per-call cap (seconds) for the MCP `cbc_wait` long-poll. Short enough
@@ -452,5 +599,70 @@ mod tests {
     fn mcp_wait_cap_clamps_under_the_server_cap() {
         assert_eq!(parse_mcp_wait_cap(Some("0")), 1);
         assert_eq!(parse_mcp_wait_cap(Some("100000")), 590);
+    }
+
+    #[test]
+    fn get_info_advertises_the_protocol_instructions() {
+        let server = CbcMcp {
+            client: HttpClient::new("http://127.0.0.1:0"),
+        };
+        let instructions = server
+            .get_info()
+            .instructions
+            .expect("server must advertise instructions so agents learn the protocol at connect");
+        // The single load-bearing sentence: bare-id recognition + no /cbc-join skill.
+        assert!(
+            instructions.contains("slug-YYYYMMDD-HHMM"),
+            "instructions must teach room-id recognition; got: {instructions}"
+        );
+        assert!(
+            instructions.contains("no `/cbc-join`") || instructions.contains("NO `/cbc-join`"),
+            "instructions must warn there is no /cbc-join skill; got: {instructions}"
+        );
+        assert!(
+            instructions.contains("awaiting_counterpart"),
+            "instructions must explain the surface-id-and-yield path; got: {instructions}"
+        );
+    }
+
+    #[test]
+    fn json_with_next_splices_guidance_into_an_object() {
+        let rendered = json_with_next(
+            &serde_json::json!({ "room_id": "abc-20260102-0304" }),
+            "do the thing",
+        );
+        let v: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(v["room_id"], serde_json::json!("abc-20260102-0304"));
+        assert_eq!(v["next"], serde_json::json!("do the thing"));
+    }
+
+    #[test]
+    fn wait_next_carves_the_three_status_buckets() {
+        // Re-poll bucket, with the backoff prefix when retry_after is present.
+        let busy = wait_next(&WaitResponse::Timeout {
+            status: "paused_by_timeout".into(),
+            retry_after: Some(45),
+        });
+        assert!(
+            busy.contains("45s") && busy.contains("cbc_wait again"),
+            "got: {busy}"
+        );
+
+        // Yield-not-terminal bucket.
+        let alone = wait_next(&WaitResponse::Timeout {
+            status: "awaiting_counterpart".into(),
+            retry_after: None,
+        });
+        assert!(
+            alone.contains("END YOUR TURN") && alone.contains("not joined"),
+            "awaiting_counterpart must tell the agent to surface and yield; got: {alone}"
+        );
+
+        // Terminal bucket.
+        let closed = wait_next(&WaitResponse::Timeout {
+            status: "closed".into(),
+            retry_after: None,
+        });
+        assert!(closed.contains("Stop polling"), "got: {closed}");
     }
 }

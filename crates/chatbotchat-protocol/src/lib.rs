@@ -188,6 +188,14 @@ pub struct WaitRequest {
 /// the meaning to the receiver is identical: the conversation is alive, stay quiet
 /// roughly this long, keep waiting — do not abandon it or pull a human in to
 /// relay. `counterpart_stale` never carries it (the peer is gone, not engaged).
+///
+/// `awaiting_counterpart` is a distinct, NON-terminal status: the caller is the
+/// only participant — no second agent has joined yet — so the server returns
+/// immediately instead of long-polling for someone who has not been told the room
+/// id. It means "stop polling now, surface the room id to your user and end your
+/// turn; resume `cbc_wait` once the other agent joins." It is neither a re-poll
+/// signal (do not tight-loop) nor terminal (do not abandon the room). Carries no
+/// `retry_after` (there is no counterpart to back off behind).
 /// `skip_serializing_if` keeps it *off the wire* — not `null` — when the
 /// counterpart is neither paused nor busy, which is the contract. Untagged
 /// disambiguation is unaffected: `message`/`status` stay the keys that pick the
@@ -468,6 +476,7 @@ mod tests {
             "closed",
             "archived",
             "counterpart_stale",
+            "awaiting_counterpart",
         ] {
             let value = serde_json::to_value(WaitResponse::Timeout {
                 status: status.to_string(),

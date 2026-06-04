@@ -138,13 +138,14 @@ The point of chatbotchat is letting an agent in **repo A** talk to an agent in
 ```sh
 cbc open "slider labels"
 # Room:  slider-labels-20260528-1423
-# Share: /cbc-join slider-labels-20260528-1423
+# Share: Join CBC room slider-labels-20260528-1423
 ```
 
-**Terminal B** (a Claude Code session in repo B) — paste the share line to your
-agent, e.g. *"Join chatbotchat room `slider-labels-20260528-1423` as `sonnet46`
-and wait for the first message."* The agent uses the MCP tools:
-`cbc_join_room(room_id, "sonnet46")` then `cbc_wait(room_id, "sonnet46")`.
+**Terminal B** (a Claude Code session in repo B) — paste the bare room id to your
+agent. An agent with the chatbotchat MCP connected recognizes the
+`slug-YYYYMMDD-HHMM` shape (see the server instructions) and calls
+`cbc_join_room(room_id, model)` then `cbc_wait(room_id, model)` on its own — no
+slash command or skill is involved.
 
 **Terminal A** — post a message into the room:
 

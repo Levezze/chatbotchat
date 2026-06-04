@@ -70,8 +70,12 @@ async fn mcp_lists_and_calls_open_room() {
         "open result should carry the full OpenRoomResponse shape; got: {rendered}"
     );
     assert!(
-        rendered.contains("/cbc-join mcp-smoke-"),
-        "open result should carry the share line; got: {rendered}"
+        rendered.contains("Join CBC room mcp-smoke-"),
+        "open result should carry the slash-free share line; got: {rendered}"
+    );
+    assert!(
+        !rendered.contains("/cbc-join"),
+        "share line must not emit the /cbc-join slash trap; got: {rendered}"
     );
 
     // Extract the room id (scan from the known prefix over id-legal chars) and
