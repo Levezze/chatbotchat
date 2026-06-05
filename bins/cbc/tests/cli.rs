@@ -45,8 +45,12 @@ fn open_prints_room_id_and_share_line() {
         "open stdout should contain the room id; got:\n{stdout}"
     );
     assert!(
-        stdout.contains("/cbc-join cli-smoke-"),
-        "open stdout should contain the share line; got:\n{stdout}"
+        stdout.contains("Join CBC room cli-smoke-"),
+        "open stdout should contain the slash-free share line; got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("/cbc-join"),
+        "open stdout must not emit the /cbc-join slash trap; got:\n{stdout}"
     );
 }
 

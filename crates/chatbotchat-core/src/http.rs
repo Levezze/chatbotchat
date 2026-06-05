@@ -798,6 +798,21 @@ async fn wait_room(
         }));
     }
 
+    // Sole-participant gate: when no counterpart has joined yet, do not long-poll.
+    // The opener silently blocking here — waiting for someone who has not even been
+    // told the room id — is the original "it just polls, I have to hit escape" bug.
+    // Return immediately with the non-terminal `awaiting_counterpart` so the agent
+    // surfaces the room id to its user and ends its turn; it resumes the wait once
+    // the other agent joins. Distinct from `counterpart_stale` (a counterpart
+    // joined, then went silent past GHOST_AFTER). Carries no hint — there is no
+    // counterpart to back off behind.
+    if !has_counterpart(&state.storage, &id, &caller.handle).await? {
+        return Ok(Json(WaitResponse::Timeout {
+            status: "awaiting_counterpart".to_string(),
+            retry_after: None,
+        }));
+    }
+
     // Decide the park duration up front from the counterpart's current signal —
     // ghost detection (slice 6c) layered on the polling backoff (slice 5b):
     //
@@ -893,6 +908,21 @@ async fn wait_room(
             retry_after,
         },
     }))
+}
+
+/// True when at least one participant other than `handle` has joined the room
+/// (2-agent v1: the counterpart exists). False for a lone opener, which gates the
+/// `awaiting_counterpart` short-circuit in the wait path.
+async fn has_counterpart(
+    storage: &Storage,
+    room_id: &str,
+    handle: &str,
+) -> Result<bool, StorageError> {
+    Ok(storage
+        .list_participants(room_id)
+        .await?
+        .iter()
+        .any(|p| p.handle != handle))
 }
 
 /// True when the room's counterpart — the other participant, 2-agent v1 — has
