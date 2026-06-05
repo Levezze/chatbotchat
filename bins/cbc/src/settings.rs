@@ -4,11 +4,12 @@
 //!
 //! Why this is needed: Claude Code's `auto` permission mode routes any tool call
 //! NOT covered by a `permissions.allow` rule to a safety classifier that inspects
-//! the call and its arguments. `cbc_send` posting into a room whose subject reads
-//! like client work trips the "sending data to an external endpoint" guard, so the
-//! call stalls for approval — even though the bus is a local loopback to the
-//! daemon. An explicit `allow` rule is evaluated *first* and resolves immediately,
-//! short-circuiting the classifier. See `permission-modes.md`.
+//! the call and its arguments. A `cbc_send` into a room whose subject reads like
+//! client work can read to that classifier as outbound external comms or an
+//! escalation beyond the user's request, so the call stalls for approval — even
+//! though the bus is a local loopback to the daemon. An explicit `allow` rule is
+//! evaluated *first* and resolves immediately, short-circuiting the classifier.
+//! See `permission-modes.md`.
 //!
 //! Layering mirrors `install.rs`: the merge is a pure, FS-free seam
 //! ([`ensure_allow_rule`]) so every settings shape is unit-tested; the read/back

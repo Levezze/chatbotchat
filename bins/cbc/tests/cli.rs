@@ -752,3 +752,32 @@ fn allow_tools_writes_the_rule_into_user_settings_and_is_idempotent() {
         "second run should detect the existing rule; got:\n{out2}"
     );
 }
+
+#[test]
+fn allow_tools_degrades_to_a_snippet_on_unparseable_settings() {
+    // A hand-maintained settings file we can't parse must not be clobbered, and
+    // the command must still exit cleanly with a manual fix rather than crash.
+    let home = tempfile::tempdir().unwrap();
+    let claude = home.path().join(".claude");
+    std::fs::create_dir_all(&claude).unwrap();
+    let settings = claude.join("settings.json");
+    let corrupt = "{ not valid json // trailing comment\n";
+    std::fs::write(&settings, corrupt).unwrap();
+
+    let assert = Command::cargo_bin("cbc")
+        .unwrap()
+        .arg("allow-tools")
+        .env("HOME", home.path())
+        .assert()
+        .success();
+    let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("by hand") && out.contains("mcp__chatbotchat"),
+        "an unparseable file must degrade to the manual snippet; got:\n{out}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&settings).unwrap(),
+        corrupt,
+        "the corrupt file must be left exactly as-is, never overwritten"
+    );
+}

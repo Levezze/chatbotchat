@@ -127,10 +127,10 @@ cbc allow-tools
 Under Claude Code's `auto` permission mode, any tool call not covered by a
 `permissions.allow` rule is routed to a safety classifier that inspects the call
 and its arguments. A `cbc_send` posting into a room whose subject reads like
-client work trips the classifier's "sending data to an external endpoint" guard,
-so the call stalls for per-call approval — even though the bus is a local
-loopback to the daemon. An explicit allow rule is evaluated *first* and resolves
-immediately, short-circuiting the classifier.
+client work can read to that classifier as outbound external comms — or an
+escalation beyond your request — so the call stalls for per-call approval, even
+though the bus is a local loopback to the daemon. An explicit allow rule is
+evaluated *first* and resolves immediately, short-circuiting the classifier.
 
 `cbc allow-tools` adds `"mcp__chatbotchat"` to `permissions.allow` in
 `~/.claude/settings.json` (the Claude Code *user* scope, so it applies in every
