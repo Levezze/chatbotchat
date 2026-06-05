@@ -711,3 +711,44 @@ fn port_override_round_trips_across_both_binaries() {
     child.kill().ok();
     child.wait().ok();
 }
+
+#[test]
+fn allow_tools_writes_the_rule_into_user_settings_and_is_idempotent() {
+    // No daemon needed: `allow-tools` only edits ~/.claude/settings.json, which
+    // we redirect by overriding HOME at a tempdir.
+    let home = tempfile::tempdir().unwrap();
+
+    let first = Command::cargo_bin("cbc")
+        .unwrap()
+        .arg("allow-tools")
+        .env("HOME", home.path())
+        .assert()
+        .success();
+    let out = String::from_utf8(first.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("Claude Code settings"),
+        "first run should report it granted approval; got:\n{out}"
+    );
+
+    let settings = home.path().join(".claude").join("settings.json");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(
+        v["permissions"]["allow"][0],
+        serde_json::json!("mcp__chatbotchat"),
+        "the server-wide allow rule must land in user settings"
+    );
+
+    // Second run is a no-op and says so, rather than duplicating the rule.
+    let second = Command::cargo_bin("cbc")
+        .unwrap()
+        .arg("allow-tools")
+        .env("HOME", home.path())
+        .assert()
+        .success();
+    let out2 = String::from_utf8(second.get_output().stdout.clone()).unwrap();
+    assert!(
+        out2.contains("already auto-approved"),
+        "second run should detect the existing rule; got:\n{out2}"
+    );
+}

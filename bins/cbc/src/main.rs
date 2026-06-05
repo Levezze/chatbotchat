@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 mod context;
 mod install;
 mod mcp;
+mod settings;
 
 /// Output format for `cbc show`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -179,6 +180,10 @@ enum Command {
         #[arg(long)]
         plist_dir: Option<std::path::PathBuf>,
     },
+    /// Grant the chatbotchat MCP tools standing auto-approval in Claude Code's
+    /// user settings (~/.claude/settings.json), so the bus stops stalling for
+    /// per-call approval. Idempotent; backs up the file before editing.
+    AllowTools,
 }
 
 #[tokio::main]
@@ -415,6 +420,18 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::InstallDaemon { port, plist_dir } => {
             install::run(port, plist_dir).context("installing the launchd daemon")?;
+        }
+        Command::AllowTools => {
+            let path = settings::settings_path()?;
+            match settings::apply_allow_rule(&path) {
+                Ok(outcome) => settings::print_allow_outcome(&path, &outcome),
+                Err(e) => {
+                    // Degrade, don't crash: a hand-maintained settings file we
+                    // can't parse must not be clobbered — print the manual fix.
+                    eprintln!("Could not edit {} automatically: {e:#}", path.display());
+                    settings::print_manual_snippet();
+                }
+            }
         }
     }
 

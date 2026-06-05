@@ -113,6 +113,7 @@ Tools (exposed identically as MCP tools and CLI subcommands):
 | `cbc list [--all] [--state X]` | (CLI) List rooms. |
 | `cbc show <room_id> [--format markdown|json]` | (CLI) Dump room contents. Both markdown and JSON supported. |
 | `cbc search <query>` | (CLI) FTS5 keyword search across all rooms. |
+| `cbc allow-tools` | (CLI) Grant the chatbotchat MCP server standing auto-approval in Claude Code's user settings (`~/.claude/settings.json`). Idempotent; backs up before editing; degrades to a printed snippet on an unparseable file. |
 
 `cbc_send` and `cbc_wait` stay separate (no fused `send_and_wait`) — keeps `wait`-only rejoin after pause clean.
 
@@ -158,6 +159,7 @@ Reuse the heuristic from `/handoff-reply` (decisions only the user owns, contrad
 - **SQLite under concurrent long-polls**: WAL mode mandatory. Vacuum and FTS5 rebuild should be background, not blocking writes.
 - **Tool timeout interplay**: MCP tool calls in CC and Codex have their own timeouts independent of `cbc_wait`'s 10-minute server cap. Verify the actual tool-call timeout for each client and ensure `cbc_wait` returns before it.
 - **Port conflict**: 8484 chosen because it's not in any common service list, but add a `--port` flag and check on startup.
+- **Host permission auto-approve**: Claude Code's `auto` mode routes any tool call not covered by a `permissions.allow` rule to a safety classifier; `cbc_send` into a client-flavored room reads as outbound external comms and stalls for per-call approval. The fix is host-specific (a `permissions.allow` rule short-circuits the classifier), so it lives in the install layer, not the protocol: `cbc allow-tools` writes the rule, and `install-daemon` offers it interactively (default no). Other hosts (Codex, etc.) will need their own allow mechanism.
 
 ## Tracked elsewhere
 

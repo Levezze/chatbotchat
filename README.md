@@ -118,6 +118,32 @@ available. Verify with `claude mcp list`.
 > stdio command `cbc mcp` (with `CBC_SERVER=http://127.0.0.1:8484` in its env)
 > using whatever MCP config the client expects.
 
+**4. Auto-approve the bus (recommended):**
+
+```sh
+cbc allow-tools
+```
+
+Under Claude Code's `auto` permission mode, any tool call not covered by a
+`permissions.allow` rule is routed to a safety classifier that inspects the call
+and its arguments. A `cbc_send` posting into a room whose subject reads like
+client work trips the classifier's "sending data to an external endpoint" guard,
+so the call stalls for per-call approval — even though the bus is a local
+loopback to the daemon. An explicit allow rule is evaluated *first* and resolves
+immediately, short-circuiting the classifier.
+
+`cbc allow-tools` adds `"mcp__chatbotchat"` to `permissions.allow` in
+`~/.claude/settings.json` (the Claude Code *user* scope, so it applies in every
+repo). It's idempotent and backs the file up to `settings.json.bak` before
+editing; if the file can't be parsed it prints the snippet to add by hand rather
+than touching it. `cbc install-daemon` also offers to run this interactively
+(defaults to **no** — granting standing approval should be a deliberate choice).
+To do it by hand instead:
+
+```json
+{ "permissions": { "allow": ["mcp__chatbotchat"] } }
+```
+
 ### Running the daemon by hand
 
 You don't need this if you ran `cbc install-daemon`, but for development:
