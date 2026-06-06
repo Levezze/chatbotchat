@@ -118,8 +118,8 @@ impl Storage {
 
         sqlx::query(
             "INSERT INTO participants \
-             (handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&p.handle)
         .bind(&p.room_id)
@@ -130,9 +130,26 @@ impl Storage {
         .bind(joined_at)
         .bind(last_poll_at)
         .bind(p.last_read_seq)
+        .bind(&p.nickname)
         .execute(&self.pool)
         .await?;
 
+        Ok(())
+    }
+
+    /// Set (or clear) a participant's display nickname. Identity is untouched —
+    /// the handle and `(room_id, instance)` key are unaffected. Used on a re-join
+    /// that supplies a fresh nickname.
+    pub async fn set_nickname(
+        &self,
+        handle: &str,
+        nickname: Option<&str>,
+    ) -> Result<(), StorageError> {
+        sqlx::query("UPDATE participants SET nickname = ? WHERE handle = ?")
+            .bind(nickname)
+            .bind(handle)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -445,22 +462,43 @@ impl Storage {
 
     /// The most recent `limit` messages in a room, returned oldest-first. This
     /// is the log view (every sender), surfaced to a joining participant.
-    pub async fn recent_messages(
+    /// The most recent messages in a room at or before `max_seq`, oldest-first
+    /// (a recency window via `DESC LIMIT`, capped at `seq <= max_seq`).
+    ///
+    /// The `max_seq` bound is what keeps the join "recent context" from
+    /// overlapping a participant's *inbox*: a joiner is shown only messages it has
+    /// already consumed (`seq <= last_read_seq`), so the unread tail (seq >
+    /// cursor) is delivered exclusively by `wait` and never double-surfaced. A
+    /// fresh joiner passes its high-water cursor here, recovering the full backlog.
+    pub async fn recent_messages_up_to(
         &self,
         room_id: &str,
+        max_seq: i64,
         limit: i64,
     ) -> Result<Vec<Message>, StorageError> {
         let rows = sqlx::query(
             "SELECT seq, room_id, sender, recipient, body, created_at, type, from_human, \
                     severity, question_text \
-             FROM messages WHERE room_id = ? ORDER BY seq DESC LIMIT ?",
+             FROM messages WHERE room_id = ? AND seq <= ? ORDER BY seq DESC LIMIT ?",
         )
         .bind(room_id)
+        .bind(max_seq)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
         // Fetched newest-first for the LIMIT; hand back chronological.
         rows.iter().rev().map(row_to_message).collect()
+    }
+
+    /// The most recent messages in a room, oldest-first, with no seq bound — the
+    /// recency window over the whole log. Thin wrapper over
+    /// [`Self::recent_messages_up_to`] with an unbounded ceiling.
+    pub async fn recent_messages(
+        &self,
+        room_id: &str,
+        limit: i64,
+    ) -> Result<Vec<Message>, StorageError> {
+        self.recent_messages_up_to(room_id, i64::MAX, limit).await
     }
 
     /// Every message in a room, oldest-first — the full transcript backing
@@ -555,7 +593,7 @@ impl Storage {
         instance: &str,
     ) -> Result<Option<Participant>, StorageError> {
         let row = sqlx::query(
-            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq \
+            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname \
              FROM participants \
              WHERE room_id = ? AND instance = ?",
         )
@@ -581,7 +619,7 @@ impl Storage {
         cwd: &str,
     ) -> Result<Option<Participant>, StorageError> {
         let row = sqlx::query(
-            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq \
+            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname \
              FROM participants \
              WHERE room_id = ? AND repo = ? AND model = ? AND cwd = ?",
         )
@@ -600,7 +638,7 @@ impl Storage {
 
     pub async fn list_participants(&self, room_id: &str) -> Result<Vec<Participant>, StorageError> {
         let rows = sqlx::query(
-            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq \
+            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname \
              FROM participants WHERE room_id = ? ORDER BY joined_at",
         )
         .bind(room_id)
@@ -838,6 +876,7 @@ fn row_to_participant(row: &sqlx::sqlite::SqliteRow) -> Result<Participant, Stor
         joined_at: parse_ts(&row.try_get::<String, _>("joined_at")?)?,
         last_poll_at: parse_ts(&row.try_get::<String, _>("last_poll_at")?)?,
         last_read_seq: row.try_get("last_read_seq")?,
+        nickname: row.try_get("nickname")?,
     })
 }
 

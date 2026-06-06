@@ -2614,3 +2614,293 @@ async fn max_wait_secs_caps_below_the_counterpart_backoff() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"].as_str(), Some("paused_by_timeout"));
 }
+
+// --- Ghost-robust coordination (2-live-max + harmless dead "ghost" rows) ---
+//
+// A room may accrue extra participant rows when an agent churns identity (a new
+// session id on /clear, fork, or crash) or simply dies, leaving its old row
+// behind. We support 2 LIVE agents at a time; any extra row must be an inert
+// ghost (last_poll_at older than GHOST_AFTER). These tests pin that a single
+// ghost cannot poison the 2-agent coordination of the live pair.
+
+#[tokio::test]
+async fn a_live_counterpart_with_a_ghost_row_is_not_stale() {
+    // A (caller), B (live), and a third row C that has gone dark. The OLD
+    // `counterpart_is_stale` used `.any(stale)`, so C alone flipped A's wait to
+    // `counterpart_stale` — telling A to STOP polling a conversation in which B is
+    // very much alive. The fix is `.all(stale)` over the others: A must park
+    // normally (`paused_by_timeout`), because a live counterpart still exists.
+    let (app, storage) =
+        test_router_with_cap_returning_storage(std::time::Duration::from_millis(200)).await;
+    let room_id = open_room_id(&app, "ghost not stale room").await;
+
+    join(&app, &room_id, "repo-a", "opus47", "/a").await; // caller
+    join(&app, &room_id, "repo-b", "opus47", "/b").await; // live counterpart
+    let (_, c) = join(&app, &room_id, "repo-c", "opus47", "/c").await; // ghost-to-be
+    let c_handle = c["handle"].as_str().expect("c handle").to_string();
+
+    // C went dark 20 min ago (past GHOST_AFTER); B just joined and is fresh.
+    let stale = OffsetDateTime::now_utc() - time::Duration::minutes(20);
+    storage
+        .touch_last_poll(&c_handle, stale)
+        .await
+        .expect("backdate C's last poll");
+
+    let (status, body) = wait(&app, &room_id, "repo-a", "opus47", "/a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["status"].as_str(),
+        Some("paused_by_timeout"),
+        "one ghost row must not abandon a live counterpart, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn an_all_ghost_room_still_reports_counterpart_stale() {
+    // Regression guard for the `.all` fix: if EVERY other participant is dark,
+    // the room is genuinely stale and the wait must still short-circuit to
+    // `counterpart_stale` (the `.all` must not over-suppress).
+    let (app, storage) =
+        test_router_with_cap_returning_storage(std::time::Duration::from_millis(200)).await;
+    let room_id = open_room_id(&app, "all ghost room").await;
+
+    join(&app, &room_id, "repo-a", "opus47", "/a").await; // caller
+    let (_, b) = join(&app, &room_id, "repo-b", "opus47", "/b").await;
+    let (_, c) = join(&app, &room_id, "repo-c", "opus47", "/c").await;
+    let stale = OffsetDateTime::now_utc() - time::Duration::minutes(20);
+    for h in [&b["handle"], &c["handle"]] {
+        storage
+            .touch_last_poll(h.as_str().expect("handle"), stale)
+            .await
+            .expect("backdate poll");
+    }
+
+    let (status, body) = wait(&app, &room_id, "repo-a", "opus47", "/a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["status"].as_str(),
+        Some("counterpart_stale"),
+        "all others dark must still be counterpart_stale, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn busy_hint_survives_a_ghost_that_never_read_my_message() {
+    // The busy hint must follow the LIVE counterpart, not an arbitrary row. The
+    // OLD `counterpart_busy_backoff` did `.find(first non-caller)`, and
+    // `list_participants` is `ORDER BY joined_at`, so it deterministically picked
+    // the oldest row — the ghost C (it joined first), whose frozen low cursor
+    // never reached A's latest. That wrongly cleared the busy hint. The fix asks
+    // "did ANY other read my latest?" so the live B's advanced cursor counts.
+    let (app, _storage) =
+        test_router_with_cap_returning_storage(std::time::Duration::from_millis(80)).await;
+    let room_id = open_room_id(&app, "busy with ghost room").await;
+
+    // C joins FIRST (so the old `.find` picks it), never reads anything.
+    join(&app, &room_id, "repo-c", "opus47", "/c").await;
+    join(&app, &room_id, "repo-b", "opus47", "/b").await; // live counterpart
+    join(&app, &room_id, "repo-a", "opus47", "/a").await; // caller
+
+    // A asks a question; B reads it (cursor advances); C's cursor stays behind.
+    send(&app, &room_id, "repo-a", "opus47", "/a", None, "ping?").await;
+    wait(&app, &room_id, "repo-b", "opus47", "/b").await;
+
+    let (status, body) = wait(&app, &room_id, "repo-a", "opus47", "/a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["status"].as_str(),
+        Some("paused_by_timeout"),
+        "got {body}"
+    );
+    assert_eq!(
+        body["retry_after"].as_u64(),
+        Some(20),
+        "B read A's latest, so A is busy-eligible (Med base 20) despite the ghost C, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_paused_counterpart_is_still_detected_with_a_ghost_present() {
+    // A live-but-paused counterpart (not polling because it is consulting its
+    // human) must still be read as paused, not confused with the dead ghost. B
+    // posts a `waiting_user`; A consumes it; on A's next wait the sentinel backoff
+    // (high = 45) must win and the response must NOT be `counterpart_stale`, even
+    // though a stale ghost row C is present.
+    let (app, storage) =
+        test_router_with_cap_returning_storage(std::time::Duration::from_millis(150)).await;
+    let room_id = open_room_id(&app, "paused with ghost room").await;
+
+    join(&app, &room_id, "repo-a", "opus47", "/a").await; // caller
+    join(&app, &room_id, "repo-b", "opus47", "/b").await; // live, will pause
+    let (_, c) = join(&app, &room_id, "repo-c", "opus47", "/c").await; // ghost
+    let stale = OffsetDateTime::now_utc() - time::Duration::minutes(20);
+    storage
+        .touch_last_poll(c["handle"].as_str().expect("c handle"), stale)
+        .await
+        .expect("backdate C");
+
+    signal(
+        &app,
+        &room_id,
+        "repo-b",
+        "opus47",
+        "/b",
+        "waiting_user",
+        Some("high"),
+        Some("merge?"),
+    )
+    .await;
+    // A consumes the sentinel.
+    wait(&app, &room_id, "repo-a", "opus47", "/a").await;
+
+    // A waits again: the sentinel is still B's latest → backoff wins; not stale.
+    let (status, body) = wait(&app, &room_id, "repo-a", "opus47", "/a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["status"].as_str(),
+        Some("paused_by_timeout"),
+        "a paused counterpart with a ghost present must not read as counterpart_stale, got {body}"
+    );
+    assert_eq!(
+        body["retry_after"].as_u64(),
+        Some(45),
+        "the high-severity sentinel backoff must survive a ghost row, got {body}"
+    );
+}
+
+// --- Re-join must not resurface the unread inbox (Bug B) ---
+
+#[tokio::test]
+async fn resume_does_not_resurface_unread_inbox_messages() {
+    // The MCP loop re-joins before sending, so a stable agent re-joins often. A
+    // re-join's `recent_messages` must be bounded to the participant's read cursor:
+    // a message it has NOT yet consumed via `wait` (seq > cursor) must arrive ONLY
+    // through `wait`, never also as "recent context" — otherwise the agent acts on
+    // it from the join response and then `wait` re-delivers the same seq.
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "resume replay room").await;
+
+    // A joins (cursor = 0, room empty); B joins and sends one message.
+    join(&app, &room_id, "repo-a", "opus47", "/a").await;
+    join(&app, &room_id, "repo-b", "opus47", "/b").await;
+    send(&app, &room_id, "repo-b", "opus47", "/b", None, "from-b").await;
+
+    // A re-joins with the same identity (resume fast-path). Its unread inbox
+    // message must NOT appear in recent_messages.
+    let (_, rejoin) = join(&app, &room_id, "repo-a", "opus47", "/a").await;
+    let recent = rejoin["recent_messages"].as_array().expect("recent array");
+    assert!(
+        recent.iter().all(|m| m["body"].as_str() != Some("from-b")),
+        "resume must not resurface the unread inbox message, got {rejoin}"
+    );
+
+    // ...and `wait` still delivers it exactly once.
+    let (status, w) = wait(&app, &room_id, "repo-a", "opus47", "/a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        w["message"]["body"].as_str(),
+        Some("from-b"),
+        "wait must deliver the message the resume omitted, got {w}"
+    );
+}
+
+#[tokio::test]
+async fn fresh_join_still_returns_full_recent_backlog() {
+    // Regression guard for the cursor-bounding: a FRESH joiner (cursor = current
+    // high-water) must still receive the full pre-join backlog as recent context.
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "fresh backlog room").await;
+
+    join(&app, &room_id, "repo-a", "opus47", "/a").await;
+    send(&app, &room_id, "repo-a", "opus47", "/a", None, "msg1").await;
+    send(&app, &room_id, "repo-a", "opus47", "/a", None, "msg2").await;
+
+    // B joins fresh (distinct identity). It sees both prior messages.
+    let (_, j) = join(&app, &room_id, "repo-b", "opus47", "/b").await;
+    let recent = j["recent_messages"].as_array().expect("recent array");
+    let bodies: Vec<&str> = recent.iter().filter_map(|m| m["body"].as_str()).collect();
+    assert!(
+        bodies.contains(&"msg1") && bodies.contains(&"msg2"),
+        "a fresh joiner must still get the full recent backlog, got {bodies:?}"
+    );
+}
+
+// --- Participant nicknames (friendly display label, distinct from identity) ---
+
+async fn join_with_nick(
+    app: &axum::Router,
+    room_id: &str,
+    repo: &str,
+    model: &str,
+    cwd: &str,
+    nickname: &str,
+) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/rooms/{room_id}/join"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({ "repo": repo, "model": model, "cwd": cwd, "nickname": nickname }).to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = body_json(resp.into_body()).await;
+    (status, body)
+}
+
+async fn get_status(app: &axum::Router, room_id: &str) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/rooms/{room_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = body_json(resp.into_body()).await;
+    (status, body)
+}
+
+#[tokio::test]
+async fn nickname_round_trips_through_join_and_status() {
+    // A nickname is a human-friendly display label, NOT identity: it never changes
+    // the handle, and a re-join may update it.
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "nickname room").await;
+
+    let (status, body) =
+        join_with_nick(&app, &room_id, "repo-a", "opus47", "/a", "concierge-agent").await;
+    assert_eq!(status, StatusCode::CREATED);
+    let handle = body["handle"].as_str().expect("handle").to_string();
+    assert!(
+        handle.starts_with("repo-a-opus47-"),
+        "the nickname must not affect handle derivation, got {handle}"
+    );
+
+    let (_, st) = get_status(&app, &room_id).await;
+    let p = &st["participants"][0];
+    assert_eq!(
+        p["nickname"].as_str(),
+        Some("concierge-agent"),
+        "status must surface the nickname, got {st}"
+    );
+    assert_eq!(
+        p["handle"].as_str(),
+        Some(handle.as_str()),
+        "identity is unchanged, got {st}"
+    );
+
+    // A re-join with the same identity updates the nickname.
+    join_with_nick(&app, &room_id, "repo-a", "opus47", "/a", "results-agent").await;
+    let (_, st2) = get_status(&app, &room_id).await;
+    assert_eq!(
+        st2["participants"][0]["nickname"].as_str(),
+        Some("results-agent"),
+        "a re-join must update the nickname, got {st2}"
+    );
+    assert_eq!(
+        st2["participants"][0]["handle"].as_str(),
+        Some(handle.as_str()),
+        "the handle is still stable across the nickname update, got {st2}"
+    );
+}

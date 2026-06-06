@@ -189,6 +189,13 @@ async fn list_rooms(
 /// their current counters, participants, and every message oldest-first. Separate
 /// from `GET /rooms/:id` (which serves the lighter `RoomStatus`) so neither view
 /// constrains the other.
+///
+/// This is a deliberate, opt-in *peek* at the whole log: it does NOT advance any
+/// participant's read cursor and is NOT a consumption path. Agents consume their
+/// inbox exclusively via `wait` (which advances `last_read_seq`); a `show` here is
+/// for humans/debugging and intentionally overlaps the inbox. (The automatic
+/// join `recent_messages` window, by contrast, is bounded to the joiner's cursor
+/// so it never double-surfaces unread inbox messages.)
 async fn transcript(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -228,13 +235,22 @@ async fn join_room(
         .await?
         .ok_or(ApiError::NotFound)?;
 
-    // The room's recent messages (log view), surfaced to the joiner.
-    let recent = recent_message_views(&state.storage, &id).await?;
-
     // A newly-minted participant starts reading from "now": its cursor is the
-    // room's current high-water seq, so `wait` only delivers post-join traffic
-    // (the pre-join backlog lives in `recent` above, not the inbox).
+    // room's current high-water seq, so `wait` only delivers post-join traffic.
+    //
+    // `recent_messages` is bounded to the joiner's *effective cursor* (resolved
+    // per branch below), NOT the latest 50. This is the Bug-B fix: on a resume the
+    // preserved cursor can sit behind the room head, and an unbounded recency
+    // window would re-surface unread inbox messages (seq > cursor) that `wait`
+    // will also deliver — so the agent acts on them twice. Bounding at the cursor
+    // makes the inbox (seq > cursor) the exclusive province of `wait`. A fresh
+    // participant's cursor is `start_seq`, so its window is the full backlog
+    // (unchanged behavior).
     let start_seq = state.storage.current_seq(&id).await?;
+
+    // Optional display nickname (distinct from identity). A blank/whitespace value
+    // is treated as "not supplied" so it neither sets nor clears anything.
+    let nickname = normalize_nickname(req.nickname);
 
     let ident = JoinIdentity {
         instance: effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
@@ -243,12 +259,20 @@ async fn join_room(
         cwd: req.cwd,
     };
 
-    // Fast path: an existing participant with this instance resumes its handle.
+    // Fast path: an existing participant with this instance resumes its handle. A
+    // re-join that supplies a nickname updates it (identity is untouched).
     if let Some(p) = state
         .storage
         .get_participant_by_instance(&id, &ident.instance)
         .await?
     {
+        if nickname.is_some() {
+            state
+                .storage
+                .set_nickname(&p.handle, nickname.as_deref())
+                .await?;
+        }
+        let recent = recent_message_views_up_to(&state.storage, &id, p.last_read_seq).await?;
         return Ok(join_response(p.handle, true, &room, recent));
     }
 
@@ -259,8 +283,22 @@ async fn join_room(
         let existing = state.storage.list_participants(&id).await?;
         let handle = match derive_handle(&ident, &existing, rand_sess_candidates()) {
             // Reused shouldn't occur after the fast-path lookup, but if a
-            // concurrent join inserted the same instance, honor it as resumed.
-            HandleOutcome::Reused(h) => return Ok(join_response(h, true, &room, recent.clone())),
+            // concurrent join inserted the same instance, honor it as resumed —
+            // bounding recent to that row's cursor (fall back to start_seq if the
+            // race row vanished).
+            HandleOutcome::Reused(h) => {
+                if nickname.is_some() {
+                    state.storage.set_nickname(&h, nickname.as_deref()).await?;
+                }
+                let cursor = state
+                    .storage
+                    .get_participant_by_instance(&id, &ident.instance)
+                    .await?
+                    .map(|p| p.last_read_seq)
+                    .unwrap_or(start_seq);
+                let recent = recent_message_views_up_to(&state.storage, &id, cursor).await?;
+                return Ok(join_response(h, true, &room, recent));
+            }
             HandleOutcome::Created(h) => h,
         };
 
@@ -275,10 +313,16 @@ async fn join_room(
             joined_at: now,
             last_poll_at: now,
             last_read_seq: start_seq,
+            nickname: nickname.clone(),
         };
 
         match state.storage.create_participant(&participant).await {
-            Ok(()) => return Ok(join_response(handle, false, &room, recent.clone())),
+            Ok(()) => {
+                // Fresh participant: cursor = start_seq, so the window is the full
+                // pre-join backlog and the inbox is strictly seq > start_seq.
+                let recent = recent_message_views_up_to(&state.storage, &id, start_seq).await?;
+                return Ok(join_response(handle, false, &room, recent));
+            }
             Err(e) if e.is_unique_violation() && attempt < MAX_ATTEMPTS => {
                 // Either a concurrent join took our instance (refetch → resume)
                 // or the random sess collided (refetch returns None → retry).
@@ -287,7 +331,9 @@ async fn join_room(
                     .get_participant_by_instance(&id, &ident.instance)
                     .await?
                 {
-                    return Ok(join_response(p.handle, true, &room, recent.clone()));
+                    let recent =
+                        recent_message_views_up_to(&state.storage, &id, p.last_read_seq).await?;
+                    return Ok(join_response(p.handle, true, &room, recent));
                 }
                 continue;
             }
@@ -412,15 +458,19 @@ fn join_response(
     )
 }
 
-/// The most recent messages in a room, as wire views (oldest-first).
+/// The most recent messages in a room, as wire views (oldest-first), bounded to
+/// `seq <= max_seq`. Callers pass a joiner's read cursor so the join "recent
+/// context" never overlaps the inbox (`wait` delivers seq > cursor); a fresh
+/// joiner passes its high-water cursor to recover the full backlog.
 const RECENT_MESSAGE_LIMIT: i64 = 50;
 
-async fn recent_message_views(
+async fn recent_message_views_up_to(
     storage: &Storage,
     room_id: &str,
+    max_seq: i64,
 ) -> Result<Vec<MessageView>, ApiError> {
     let msgs = storage
-        .recent_messages(room_id, RECENT_MESSAGE_LIMIT)
+        .recent_messages_up_to(room_id, max_seq, RECENT_MESSAGE_LIMIT)
         .await?;
     msgs.iter().map(message_view).collect()
 }
@@ -925,23 +975,35 @@ async fn has_counterpart(
         .any(|p| p.handle != handle))
 }
 
-/// True when the room's counterpart — the other participant, 2-agent v1 — has
-/// not polled within `GHOST_AFTER`. A room with no counterpart yet is never a
-/// ghost (returns `false`), so a lone waiter parks normally rather than being
-/// told an absent other side is stale. Uses the strict `>` boundary, matching
+/// True when the caller has at least one other participant AND *every* other has
+/// gone dark (no poll within `GHOST_AFTER`) — i.e. there is no live counterpart
+/// left to wait on. A room with no other participant yet is never stale (returns
+/// `false`), so a lone waiter parks normally rather than being told an absent
+/// other side is gone. Uses the strict `>` boundary, matching
 /// `lifecycle::no_live_poller`.
+///
+/// `.all` (not `.any`) over the others is load-bearing for the 2-live-max +
+/// ghosts model: an agent that churned identity or died leaves an inert ghost
+/// row behind while its live replacement keeps polling. A single stale ghost must
+/// NOT make the wait short-circuit to `counterpart_stale` (which tells the caller
+/// to stop polling) while a live counterpart is still here. Only when *all* of
+/// them are dark is the conversation genuinely over.
 async fn counterpart_is_stale(
     storage: &Storage,
     room_id: &str,
     handle: &str,
 ) -> Result<bool, StorageError> {
     let now = OffsetDateTime::now_utc();
-    Ok(storage
+    let others: Vec<_> = storage
         .list_participants(room_id)
         .await?
         .into_iter()
         .filter(|p| p.handle != handle)
-        .any(|p| now - p.last_poll_at > lifecycle::GHOST_AFTER))
+        .collect();
+    Ok(!others.is_empty()
+        && others
+            .iter()
+            .all(|p| now - p.last_poll_at > lifecycle::GHOST_AFTER))
 }
 
 /// The polling backoff (seconds) implied by the counterpart's *current* state,
@@ -950,6 +1012,17 @@ async fn counterpart_is_stale(
 /// counts, so a later `msg` from that sender self-supersedes the pause and
 /// clears the backoff. A corrupt sentinel missing its severity yields `None`
 /// rather than panicking the wait path.
+///
+/// Ghost-robustness (2-live-max model): this reads "latest from any other" and
+/// is left intentionally unchanged. Under seq-monotonicity a live replacement
+/// always posts *after* the churned/dead agent's final message, so a dead ghost
+/// is frozen seq-behind and cannot become the latest-from-other (nor mask a live
+/// sentinel) once the replacement has spoken. The only residual is a transient
+/// false-pause if the replacement is silent while the ghost's old `waiting_user`
+/// is briefly the latest — self-decaying, and it only ever over-parks (never a
+/// `counterpart_stale` abort, since a live counterpart still exists). Holding
+/// this invariant is what keeps the change surgical; true 3-way live coordination
+/// is a future version.
 async fn active_sentinel_backoff(
     storage: &Storage,
     room_id: &str,
@@ -1000,16 +1073,28 @@ async fn counterpart_busy_backoff(
     if latest.sender != handle {
         return Ok(None);
     }
-    // Has the counterpart (the other participant — 2-agent v1) read my latest?
-    // Known v1 limitation: if I send a *second* message while the counterpart is
-    // still composing a reply to the first, `last_read_seq` falls behind my new
-    // latest and busy reads as false until the counterpart catches up — acceptable
-    // for the turn-based two-agent exchange this targets.
+    // Has *any* other participant read my latest? We ask "anyone" rather than
+    // picking "the counterpart": `list_participants` is `ORDER BY joined_at`, so a
+    // `.find(first non-caller)` deterministically selects the OLDEST row — which,
+    // in the 2-live-max + ghosts model, is exactly the dead ghost (it joined
+    // before its live replacement). Its frozen low cursor would mask the live
+    // replacement that actually read my message. `.any` over the read cursors
+    // sidesteps per-row selection and is correct for the live pair. Note we cannot
+    // instead select by poll-freshness: a counterpart silently composing a long
+    // reply is also not polling, so freshness can't tell it from a ghost — the
+    // read cursor is the durable signal.
+    //
+    // Known v1 limitation (unchanged): if I send a *second* message while the
+    // counterpart is still composing a reply to the first, `last_read_seq` falls
+    // behind my new latest and busy reads as false until it catches up. Accepted
+    // residual of the ghosts model: a dead ghost whose frozen cursor happens to be
+    // `>= latest.seq` yields a false busy *hint* — never a `counterpart_stale`
+    // abort, self-decaying, and hint-only (it never shortens the park).
     let participants = storage.list_participants(room_id).await?;
-    let Some(counterpart) = participants.iter().find(|p| p.handle != handle) else {
-        return Ok(None);
-    };
-    if counterpart.last_read_seq < latest.seq {
+    let someone_read_my_latest = participants
+        .iter()
+        .any(|p| p.handle != handle && p.last_read_seq >= latest.seq);
+    if !someone_read_my_latest {
         return Ok(None);
     }
     let elapsed = (OffsetDateTime::now_utc() - latest.created_at).whole_seconds();
@@ -1051,7 +1136,16 @@ fn participant_view(p: &Participant) -> Result<ParticipantView, ApiError> {
             .joined_at
             .format(&Rfc3339)
             .map_err(|e| ApiError::Internal(e.to_string()))?,
+        nickname: p.nickname.clone(),
     })
+}
+
+/// Trim a supplied nickname, mapping blank/whitespace-only to `None` so it is
+/// treated as "not supplied" (neither sets nor clears the stored value).
+fn normalize_nickname(nickname: Option<String>) -> Option<String> {
+    nickname
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
 }
 
 fn room_to_status(room: &Room, participants: &[Participant]) -> Result<RoomStatus, ApiError> {

@@ -46,6 +46,11 @@ pub struct JoinRoomArgs {
     )]
     #[serde(default, rename = "as")]
     pub identity: Option<String>,
+    #[schemars(
+        description = "Optional friendly display name shown in cbc list/status (e.g. 'concierge-agent'). Purely cosmetic — it does NOT affect your identity or routing. A re-join updates it."
+    )]
+    #[serde(default)]
+    pub nickname: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -201,6 +206,7 @@ impl CbcMcp {
             room_id,
             model,
             identity,
+            nickname,
         }): Parameters<JoinRoomArgs>,
     ) -> String {
         let repo = crate::context::detect_repo();
@@ -208,7 +214,14 @@ impl CbcMcp {
         let instance = crate::context::detect_instance(identity.as_deref());
         match self
             .client
-            .join_room(&room_id, &repo, &model, &cwd, &instance)
+            .join_room(
+                &room_id,
+                &repo,
+                &model,
+                &cwd,
+                &instance,
+                nickname.as_deref(),
+            )
             .await
         {
             Ok(resp) => {

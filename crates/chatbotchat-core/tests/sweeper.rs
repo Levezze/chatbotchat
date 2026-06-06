@@ -39,6 +39,7 @@ async fn join_with_poll(
         joined_at: last_poll_at,
         last_poll_at,
         last_read_seq: 0,
+        nickname: None,
     };
     storage
         .create_participant(&p)
