@@ -227,6 +227,9 @@ fn print_next_steps(config: &InstallConfig, plist_path: &Path, newsyslog_conf: &
         "  claude mcp add --scope user chatbotchat -e CBC_SERVER=http://127.0.0.1:{port} -- cbc mcp"
     );
     println!();
+    println!("Auto-approve the bus so cbc_send doesn't stall for per-call approval:");
+    println!("  cbc allow-tools");
+    println!();
     println!("Enable log rotation (needs sudo; one time):");
     println!(
         "  sudo cp {} /etc/newsyslog.d/chatbotchat.conf",
@@ -256,7 +259,42 @@ pub fn run(port: u16, plist_dir_override: Option<PathBuf>) -> anyhow::Result<()>
     let newsyslog_conf = write_newsyslog_conf(&config)?;
     load_launchagent(&plist_path)?;
     print_next_steps(&config, &plist_path, &newsyslog_conf);
+    maybe_prompt_allow_tools();
     Ok(())
+}
+
+/// Offer to write the auto-approve rule during an interactive install. Defaults
+/// to **No** — it grants the bus standing approval, which should be a deliberate
+/// keystroke. Skipped entirely when stdin is not a TTY (piped / CI installs),
+/// where the printed `cbc allow-tools` step is the opt-in instead. Never aborts
+/// the install: a settings file we can't edit degrades to the manual snippet.
+fn maybe_prompt_allow_tools() {
+    use std::io::{IsTerminal, Write};
+
+    if !std::io::stdin().is_terminal() {
+        return;
+    }
+    print!("\nAuto-approve the chatbotchat MCP tools now (edits ~/.claude/settings.json)? [y/N] ");
+    let _ = std::io::stdout().flush();
+
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return;
+    }
+    if !matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        println!("Skipped. Run `cbc allow-tools` anytime to do this.");
+        return;
+    }
+
+    match crate::settings::settings_path()
+        .and_then(|p| crate::settings::apply_allow_rule(&p).map(|outcome| (p, outcome)))
+    {
+        Ok((path, outcome)) => crate::settings::print_allow_outcome(&path, &outcome),
+        Err(e) => {
+            eprintln!("Could not edit settings automatically: {e:#}");
+            crate::settings::print_manual_snippet();
+        }
+    }
 }
 
 #[cfg(test)]

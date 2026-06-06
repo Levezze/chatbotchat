@@ -713,6 +713,76 @@ fn port_override_round_trips_across_both_binaries() {
 }
 
 #[test]
+fn allow_tools_writes_the_rule_into_user_settings_and_is_idempotent() {
+    // No daemon needed: `allow-tools` only edits ~/.claude/settings.json, which
+    // we redirect by overriding HOME at a tempdir.
+    let home = tempfile::tempdir().unwrap();
+
+    let first = Command::cargo_bin("cbc")
+        .unwrap()
+        .arg("allow-tools")
+        .env("HOME", home.path())
+        .assert()
+        .success();
+    let out = String::from_utf8(first.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("Claude Code settings"),
+        "first run should report it granted approval; got:\n{out}"
+    );
+
+    let settings = home.path().join(".claude").join("settings.json");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(
+        v["permissions"]["allow"][0],
+        serde_json::json!("mcp__chatbotchat"),
+        "the server-wide allow rule must land in user settings"
+    );
+
+    // Second run is a no-op and says so, rather than duplicating the rule.
+    let second = Command::cargo_bin("cbc")
+        .unwrap()
+        .arg("allow-tools")
+        .env("HOME", home.path())
+        .assert()
+        .success();
+    let out2 = String::from_utf8(second.get_output().stdout.clone()).unwrap();
+    assert!(
+        out2.contains("already auto-approved"),
+        "second run should detect the existing rule; got:\n{out2}"
+    );
+}
+
+#[test]
+fn allow_tools_degrades_to_a_snippet_on_unparseable_settings() {
+    // A hand-maintained settings file we can't parse must not be clobbered, and
+    // the command must still exit cleanly with a manual fix rather than crash.
+    let home = tempfile::tempdir().unwrap();
+    let claude = home.path().join(".claude");
+    std::fs::create_dir_all(&claude).unwrap();
+    let settings = claude.join("settings.json");
+    let corrupt = "{ not valid json // trailing comment\n";
+    std::fs::write(&settings, corrupt).unwrap();
+
+    let assert = Command::cargo_bin("cbc")
+        .unwrap()
+        .arg("allow-tools")
+        .env("HOME", home.path())
+        .assert()
+        .success();
+    let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("by hand") && out.contains("mcp__chatbotchat"),
+        "an unparseable file must degrade to the manual snippet; got:\n{out}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&settings).unwrap(),
+        corrupt,
+        "the corrupt file must be left exactly as-is, never overwritten"
+    );
+}
+
+#[test]
 fn join_with_nick_shows_nickname_in_status() {
     // End-to-end: `cbc join --nick` flows the label through the client → daemon →
     // a real (file-backed) sqlite DB (exercising migration 0010), and `cbc status`
