@@ -67,6 +67,7 @@ fn sample_participant(room_id: &str, cwd: &str) -> Participant {
         joined_at: now,
         last_poll_at: now,
         last_read_seq: 0,
+        nickname: None,
     }
 }
 
@@ -119,6 +120,7 @@ async fn two_participants_identical_tuple_distinct_instance_coexist() {
         joined_at: now,
         last_poll_at: now,
         last_read_seq: 0,
+        nickname: None,
     };
     let one = mk("mvp-api-opus48-aaaa", "session-one");
     let two = mk("mvp-api-opus48-bbbb", "session-two");
@@ -158,6 +160,7 @@ fn participant_with_handle(room_id: &str, handle: &str, cwd: &str) -> Participan
         joined_at: now,
         last_poll_at: now,
         last_read_seq: 0,
+        nickname: None,
     }
 }
 

@@ -781,3 +781,41 @@ fn allow_tools_degrades_to_a_snippet_on_unparseable_settings() {
         "the corrupt file must be left exactly as-is, never overwritten"
     );
 }
+
+#[test]
+fn join_with_nick_shows_nickname_in_status() {
+    // End-to-end: `cbc join --nick` flows the label through the client → daemon →
+    // a real (file-backed) sqlite DB (exercising migration 0010), and `cbc status`
+    // renders "<nickname> [<handle>]" — identity stays visible, nickname leads.
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "cli nickname");
+
+    let joined = Command::cargo_bin("cbc")
+        .unwrap()
+        .args([
+            "join",
+            &room_id,
+            "--model",
+            "opus47",
+            "--as",
+            "opus47",
+            "--nick",
+            "concierge-agent",
+        ])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let handle = handle_of(&String::from_utf8(joined.get_output().stdout.clone()).unwrap());
+
+    let status = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["status", &room_id])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let status_out = String::from_utf8(status.get_output().stdout.clone()).unwrap();
+    assert!(
+        status_out.contains(&format!("concierge-agent [{handle}]")),
+        "status should render the nickname with the handle in brackets; got:\n{status_out}"
+    );
+}

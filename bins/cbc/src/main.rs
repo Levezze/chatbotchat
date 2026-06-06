@@ -60,6 +60,11 @@ enum Command {
         /// the same label from another terminal/client/dir to resume or hand off.
         #[arg(long = "as")]
         identity: Option<String>,
+        /// Optional friendly display name shown in `cbc list`/`status` (e.g.
+        /// "concierge-agent"). Cosmetic only — does not affect identity. A
+        /// re-join updates it.
+        #[arg(long = "nick")]
+        nickname: Option<String>,
     },
     /// Post a message to a room; repo and cwd are auto-detected.
     Send {
@@ -210,12 +215,20 @@ async fn main() -> anyhow::Result<()> {
             room_id,
             model,
             identity,
+            nickname,
         } => {
             let repo = context::detect_repo();
             let cwd = context::detect_cwd();
             let instance = context::detect_instance(identity.as_deref());
             let resp = client
-                .join_room(&room_id, &repo, &model, &cwd, &instance)
+                .join_room(
+                    &room_id,
+                    &repo,
+                    &model,
+                    &cwd,
+                    &instance,
+                    nickname.as_deref(),
+                )
                 .await
                 .context("joining room")?;
             println!("Handle:  {}", resp.handle);
@@ -368,7 +381,12 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 println!("Participants:");
                 for p in &status.participants {
-                    println!("  - {} ({} @ {})", p.handle, p.model, p.cwd);
+                    println!(
+                        "  - {} ({} @ {})",
+                        participant_label(&p.nickname, &p.handle),
+                        p.model,
+                        p.cwd
+                    );
                 }
             }
         }
@@ -442,6 +460,15 @@ async fn main() -> anyhow::Result<()> {
 /// messages (type != `msg`) are rendered like the `wait` handler surfaces them:
 /// the signal type, its severity, and the question the other agent is asking its
 /// user — a `msg` shows its body instead.
+/// A participant's display label: its nickname with the handle in brackets when
+/// a nickname is set (so identity stays visible), else just the handle.
+fn participant_label(nickname: &Option<String>, handle: &str) -> String {
+    match nickname {
+        Some(n) => format!("{n} [{handle}]"),
+        None => handle.to_string(),
+    }
+}
+
 fn render_transcript_markdown(t: &RoomTranscript) -> String {
     let mut out = String::new();
     out.push_str(&format!("# {}\n\n", t.subject));
@@ -459,7 +486,12 @@ fn render_transcript_markdown(t: &RoomTranscript) -> String {
         out.push_str("- (none)\n");
     } else {
         for p in &t.participants {
-            out.push_str(&format!("- {} ({} @ {})\n", p.handle, p.model, p.cwd));
+            out.push_str(&format!(
+                "- {} ({} @ {})\n",
+                participant_label(&p.nickname, &p.handle),
+                p.model,
+                p.cwd
+            ));
         }
     }
 

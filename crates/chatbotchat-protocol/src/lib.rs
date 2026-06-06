@@ -38,6 +38,10 @@ pub struct JoinRoomRequest {
     pub cwd: String,
     #[serde(default)]
     pub instance: String,
+    /// Optional human-friendly display label, distinct from identity. Omitted (or
+    /// blank) leaves any existing nickname untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
 }
 
 fn default_msg_type() -> String {
@@ -237,6 +241,9 @@ pub struct ParticipantView {
     pub model: String,
     pub cwd: String,
     pub joined_at: String,
+    /// Optional friendly display label; `None` renders by handle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
 }
 
 /// Response body for `GET /rooms/:id`. The wire-facing view of a room's status.

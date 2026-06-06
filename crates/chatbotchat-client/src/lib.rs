@@ -65,6 +65,7 @@ impl HttpClient {
         model: &str,
         cwd: &str,
         instance: &str,
+        nickname: Option<&str>,
     ) -> Result<JoinRoomResponse, ClientError> {
         let resp = self
             .http
@@ -74,6 +75,7 @@ impl HttpClient {
                 model: model.to_string(),
                 cwd: cwd.to_string(),
                 instance: instance.to_string(),
+                nickname: nickname.map(str::to_string),
             })
             .send()
             .await?;

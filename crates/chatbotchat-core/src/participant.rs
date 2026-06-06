@@ -23,4 +23,9 @@ pub struct Participant {
     /// Long-poll read cursor: the `seq` of the highest message this participant
     /// has consumed via `wait`. Starts at 0 (no messages read).
     pub last_read_seq: i64,
+    /// Optional human-friendly display label, distinct from identity. Never
+    /// affects handle derivation, routing, or `sender` — purely a display alias
+    /// (e.g. "concierge-agent") so humans can tell rows apart. `None` renders by
+    /// handle.
+    pub nickname: Option<String>,
 }
