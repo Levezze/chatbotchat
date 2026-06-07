@@ -38,6 +38,7 @@ async fn join(storage: &Storage, room_id: &str, handle: &str, cwd: &str) {
         last_poll_at: now,
         last_read_seq: 0,
         nickname: None,
+        wants_close_at: None,
     };
     storage
         .create_participant(&p)

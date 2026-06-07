@@ -148,6 +148,12 @@ enum Command {
         /// Optional identity label (see `join --as`); pass the value you joined with.
         #[arg(long = "as")]
         identity: Option<String>,
+        /// Force the room closed immediately, bypassing consensus. Without this,
+        /// `close` is a vote: the room closes only once a quorum of live
+        /// participants have voted (the counterpart sees `close_proposed` and can
+        /// agree or keep talking). Use `--force` to unilaterally end a room.
+        #[arg(long)]
+        force: bool,
     },
     /// Pause a room; repo and cwd are auto-detected.
     Pause {
@@ -304,7 +310,15 @@ async fn main() -> anyhow::Result<()> {
                     message,
                     surface_to_user,
                     retry_after,
+                    room_state,
                 } => {
+                    if let Some(rs) = &room_state {
+                        println!(
+                            "[room {rs}] delivered from a {rs} room — read it; you cannot just \
+                             reply. Keep calling wait to drain any backlog until you get status \
+                             {rs}."
+                        );
+                    }
                     println!("From: {}", message.from);
                     println!("To:   {}", message.to.as_deref().unwrap_or("all"));
                     // A sentinel (type != "msg") carries no body; surface its type
@@ -394,15 +408,29 @@ async fn main() -> anyhow::Result<()> {
             room_id,
             model,
             identity,
+            force,
         } => {
             let repo = context::detect_repo();
             let cwd = context::detect_cwd();
             let instance = context::detect_instance(identity.as_deref());
             let resp = client
-                .close(&room_id, &repo, &model, &cwd, &instance)
+                .close(&room_id, &repo, &model, &cwd, &instance, force)
                 .await
                 .context("closing room")?;
-            println!("State: {}", resp.state);
+            // `status` distinguishes a completed close from a pending proposal;
+            // older servers omit it, so fall back to the bare state.
+            match resp.status.as_deref() {
+                Some("close_proposed") => {
+                    let have = resp.votes.unwrap_or(0);
+                    let need = resp.needed.unwrap_or(0);
+                    println!(
+                        "Close proposed ({have}/{need}) — waiting for the other agent to agree. \
+                         They will see it on their next wait and can agree (cbc close) or keep \
+                         talking (which cancels the proposal)."
+                    );
+                }
+                _ => println!("State: {}", resp.state),
+            }
         }
         Command::Pause {
             room_id,

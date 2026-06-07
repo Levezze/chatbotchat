@@ -28,4 +28,10 @@ pub struct Participant {
     /// (e.g. "concierge-agent") so humans can tell rows apart. `None` renders by
     /// handle.
     pub nickname: Option<String>,
+    /// Pending vote to close the room (consensus close). `Some(ts)` means this
+    /// participant has called `cbc_close`; the room closes once a quorum of live
+    /// participants have voted. Cleared (set to `None`) for everyone when any
+    /// participant sends a conversational message — a deterministic "continue".
+    /// `None` means no pending vote.
+    pub wants_close_at: Option<OffsetDateTime>,
 }
