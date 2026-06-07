@@ -408,6 +408,64 @@ fn pause_wake_close_round_trip_over_cli() {
 }
 
 #[test]
+fn close_is_consensus_then_both_agents_agree() {
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "cli consensus");
+    // Two distinct live agents.
+    join(&base, &room_id, "opus47");
+    join(&base, &room_id, "opus48");
+
+    // Agent A votes to close — with a live counterpart this is a PROPOSAL.
+    let proposed = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["close", &room_id, "--model", "opus47", "--as", "opus47"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(proposed.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("Close proposed (1/2)"),
+        "one of two live agents closing is a proposal; got:\n{out}"
+    );
+
+    // Agent B agrees — quorum met, the room closes.
+    let closed = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["close", &room_id, "--model", "opus48", "--as", "opus48"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(closed.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("State: closed"),
+        "the second agent's vote should close the room; got:\n{out}"
+    );
+}
+
+#[test]
+fn close_force_overrides_consensus_over_cli() {
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "cli force");
+    join(&base, &room_id, "opus47");
+    join(&base, &room_id, "opus48");
+
+    // --force closes despite a live, un-consented counterpart.
+    let forced = Command::cargo_bin("cbc")
+        .unwrap()
+        .args([
+            "close", &room_id, "--model", "opus47", "--as", "opus47", "--force",
+        ])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(forced.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("State: closed"),
+        "--force should close the room in one shot; got:\n{out}"
+    );
+}
+
+#[test]
 fn status_reports_open_room() {
     let base = spawn_daemon();
 

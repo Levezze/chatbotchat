@@ -118,8 +118,8 @@ impl Storage {
 
         sqlx::query(
             "INSERT INTO participants \
-             (handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname, wants_close_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&p.handle)
         .bind(&p.room_id)
@@ -131,6 +131,12 @@ impl Storage {
         .bind(last_poll_at)
         .bind(p.last_read_seq)
         .bind(&p.nickname)
+        .bind(
+            p.wants_close_at
+                .map(|ts| ts.format(&Rfc3339))
+                .transpose()
+                .map_err(fmt_err)?,
+        )
         .execute(&self.pool)
         .await?;
 
@@ -148,6 +154,37 @@ impl Storage {
         sqlx::query("UPDATE participants SET nickname = ? WHERE handle = ?")
             .bind(nickname)
             .bind(handle)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Record (or clear) a participant's pending close vote. Consensus close: a
+    /// room transitions to `closed` only once a quorum of live participants have
+    /// a non-NULL `wants_close_at`. Passing `None` retracts the vote.
+    pub async fn set_close_vote(
+        &self,
+        handle: &str,
+        at: Option<OffsetDateTime>,
+    ) -> Result<(), StorageError> {
+        let ts = at
+            .map(|t| t.format(&Rfc3339))
+            .transpose()
+            .map_err(fmt_err)?;
+        sqlx::query("UPDATE participants SET wants_close_at = ? WHERE handle = ?")
+            .bind(ts)
+            .bind(handle)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Clear every pending close vote in a room. Called when a conversational
+    /// message is sent (a deterministic "continue, don't close") and after a
+    /// close actually lands (tidy-up).
+    pub async fn clear_close_votes(&self, room_id: &str) -> Result<(), StorageError> {
+        sqlx::query("UPDATE participants SET wants_close_at = NULL WHERE room_id = ?")
+            .bind(room_id)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -593,7 +630,7 @@ impl Storage {
         instance: &str,
     ) -> Result<Option<Participant>, StorageError> {
         let row = sqlx::query(
-            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname \
+            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname, wants_close_at \
              FROM participants \
              WHERE room_id = ? AND instance = ?",
         )
@@ -619,7 +656,7 @@ impl Storage {
         cwd: &str,
     ) -> Result<Option<Participant>, StorageError> {
         let row = sqlx::query(
-            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname \
+            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname, wants_close_at \
              FROM participants \
              WHERE room_id = ? AND repo = ? AND model = ? AND cwd = ?",
         )
@@ -638,7 +675,7 @@ impl Storage {
 
     pub async fn list_participants(&self, room_id: &str) -> Result<Vec<Participant>, StorageError> {
         let rows = sqlx::query(
-            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname \
+            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname, wants_close_at \
              FROM participants WHERE room_id = ? ORDER BY joined_at",
         )
         .bind(room_id)
@@ -877,6 +914,10 @@ fn row_to_participant(row: &sqlx::sqlite::SqliteRow) -> Result<Participant, Stor
         last_poll_at: parse_ts(&row.try_get::<String, _>("last_poll_at")?)?,
         last_read_seq: row.try_get("last_read_seq")?,
         nickname: row.try_get("nickname")?,
+        wants_close_at: row
+            .try_get::<Option<String>, _>("wants_close_at")?
+            .map(|s| parse_ts(&s))
+            .transpose()?,
     })
 }
 

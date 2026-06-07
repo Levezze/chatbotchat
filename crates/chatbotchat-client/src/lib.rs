@@ -223,6 +223,9 @@ impl HttpClient {
 
     /// Explicitly close a room. Identity is the `(repo, model, cwd)` tuple; the
     /// caller must be a participant. Returns the room's new state.
+    /// Close a room. By default this is a *vote* (consensus close): the response
+    /// `status` is `closed` once quorum is met, else `close_proposed`. `force`
+    /// (the human/CLI escape hatch) closes unilaterally regardless of consensus.
     pub async fn close(
         &self,
         room_id: &str,
@@ -230,8 +233,9 @@ impl HttpClient {
         model: &str,
         cwd: &str,
         instance: &str,
+        force: bool,
     ) -> Result<LifecycleResponse, ClientError> {
-        self.lifecycle(room_id, "close", repo, model, cwd, instance, None)
+        self.lifecycle(room_id, "close", repo, model, cwd, instance, None, force)
             .await
     }
 
@@ -246,7 +250,7 @@ impl HttpClient {
         instance: &str,
         reason: Option<&str>,
     ) -> Result<LifecycleResponse, ClientError> {
-        self.lifecycle(room_id, "pause", repo, model, cwd, instance, reason)
+        self.lifecycle(room_id, "pause", repo, model, cwd, instance, reason, false)
             .await
     }
 
@@ -260,7 +264,7 @@ impl HttpClient {
         cwd: &str,
         instance: &str,
     ) -> Result<LifecycleResponse, ClientError> {
-        self.lifecycle(room_id, "wake", repo, model, cwd, instance, None)
+        self.lifecycle(room_id, "wake", repo, model, cwd, instance, None, false)
             .await
     }
 
@@ -275,6 +279,7 @@ impl HttpClient {
         cwd: &str,
         instance: &str,
         reason: Option<&str>,
+        force: bool,
     ) -> Result<LifecycleResponse, ClientError> {
         let resp = self
             .http
@@ -285,6 +290,7 @@ impl HttpClient {
                 cwd: cwd.to_string(),
                 instance: instance.to_string(),
                 reason: reason.map(str::to_string),
+                force,
             })
             .send()
             .await?;

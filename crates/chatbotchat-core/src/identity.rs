@@ -98,6 +98,7 @@ mod tests {
             last_poll_at: now,
             last_read_seq: 0,
             nickname: None,
+            wants_close_at: None,
         }
     }
 

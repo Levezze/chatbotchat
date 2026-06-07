@@ -28,13 +28,43 @@ impl RoomState {
     }
 }
 
-/// Per-room caps. Defaults come from the locked design (hard cap 10 messages,
-/// soft cap 4 consecutive without human input). Enforcement is slice 4; here we
-/// only need the value to persist and round-trip.
+/// How many *live* participants must vote to close before a room actually
+/// closes (consensus close). `All` (the default, and exact for the 2-agent
+/// world) requires every live participant; `Majority` requires strictly more
+/// than half — reserved for the future N-way version. Dead/ghost rows never
+/// count toward the denominator, so a lone live agent whose counterpart has gone
+/// dark closes immediately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseQuorum {
+    #[default]
+    All,
+    Majority,
+}
+
+impl CloseQuorum {
+    /// Votes needed to close, given the number of live participants. Never
+    /// exceeds `live` and is at least 1 (a lone live agent can always close).
+    pub fn needed(self, live: usize) -> usize {
+        let n = match self {
+            CloseQuorum::All => live,
+            CloseQuorum::Majority => live / 2 + 1,
+        };
+        n.max(1)
+    }
+}
+
+/// Per-room caps and policy. Cap defaults come from the locked design (hard cap
+/// 10 messages, soft cap 4 consecutive without human input); `close_quorum`
+/// defaults to `All`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomConfig {
     pub hard_cap: u32,
     pub soft_cap: u32,
+    /// Close-consensus policy. `#[serde(default)]` so rooms persisted before this
+    /// field existed deserialize to `All`.
+    #[serde(default)]
+    pub close_quorum: CloseQuorum,
 }
 
 impl Default for RoomConfig {
@@ -42,6 +72,7 @@ impl Default for RoomConfig {
         RoomConfig {
             hard_cap: 10,
             soft_cap: 4,
+            close_quorum: CloseQuorum::All,
         }
     }
 }

@@ -5,7 +5,7 @@ use crate::message::{Message, MessageType, Severity};
 use crate::participant::Participant;
 use crate::room::{Room, RoomConfig, RoomState};
 use crate::storage::{RoomSummaryRow, Storage, StorageError};
-use crate::waiter::{backoff_secs, wait_for_message, Hub, WaitOutcome};
+use crate::waiter::{backoff_secs, wait_for_message, wait_for_message_until, Hub, WaitOutcome};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -92,6 +92,7 @@ async fn open_room(
     let config = RoomConfig {
         hard_cap: req.hard_cap.unwrap_or(defaults.hard_cap),
         soft_cap: req.soft_cap.unwrap_or(defaults.soft_cap),
+        close_quorum: defaults.close_quorum,
     };
 
     // Reject pathological caps rather than minting a degenerate room. A hard_cap
@@ -314,6 +315,7 @@ async fn join_room(
             last_poll_at: now,
             last_read_seq: start_seq,
             nickname: nickname.clone(),
+            wants_close_at: None,
         };
 
         match state.storage.create_participant(&participant).await {
@@ -546,6 +548,13 @@ async fn send_message(
             ))
         })?;
 
+    // A conversational message is a deterministic "continue, don't close": it
+    // cancels any pending close proposal in the room (consensus close). The
+    // counterpart's next wait then delivers this message instead of the
+    // `close_proposed` status. Signals (waiting_user etc.) deliberately do NOT
+    // clear — stepping away is not "keep talking".
+    state.storage.clear_close_votes(&id).await?;
+
     // Activity bookkeeping. The timestamp bump drives the sweeper's idle/stale
     // timing on every msg; and a msg landing on an `idle`/`stale` room revives it
     // to `active` (a `Message` transition). The state write is guarded to those
@@ -713,14 +722,135 @@ async fn signal_room(
     Ok((StatusCode::CREATED, Json(SignalResponse { seq: msg.seq })))
 }
 
-/// Explicitly close a room. The caller must be a participant. Drives a `Close`
-/// lifecycle transition; `Err` (e.g. already closed) → 409.
+/// Close a room by CONSENSUS. The caller must be a participant. A close is a
+/// *vote*: the room transitions to `closed` only once a quorum of *live*
+/// participants (per `RoomConfig::close_quorum`, default all live) have voted.
+/// Until then the vote is recorded and the response is `close_proposed`
+/// (`votes`/`needed`); the counterpart learns of it via a computed
+/// `close_proposed` wait status and either votes too (agree) or sends a message
+/// (which clears all votes — "continue"). A dead/ghost participant never counts
+/// toward quorum, so a lone live agent closes immediately. `force` (the
+/// human/CLI escape hatch) bypasses consensus. Closing an already-terminal room
+/// → 409; a non-participant → 400.
 async fn close_room(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<LifecycleRequest>,
 ) -> Result<Json<LifecycleResponse>, ApiError> {
-    apply_transition(&state, &id, &req, LifecycleEvent::Close, None).await
+    let room = state
+        .storage
+        .get_room(&id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    // Idempotency: an already-terminal room takes no further close (preserves the
+    // 409-on-double-close contract).
+    if matches!(room.state, RoomState::Closed | RoomState::Archived) {
+        return Err(ApiError::Conflict(format!(
+            "cannot close from {}",
+            room.state.as_str()
+        )));
+    }
+
+    let closer = state
+        .storage
+        .get_participant_by_instance(
+            &id,
+            &effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
+        )
+        .await?
+        .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
+
+    let now = OffsetDateTime::now_utc();
+
+    // Human-only escape hatch: close unilaterally, no vote.
+    if req.force {
+        close_now(&state, &id, room.state, now).await?;
+        return Ok(Json(close_response("closed", RoomState::Closed, None)));
+    }
+
+    // Record the vote; voting also proves the voter is live.
+    state.storage.touch_last_poll(&closer.handle, now).await?;
+    state
+        .storage
+        .set_close_vote(&closer.handle, Some(now))
+        .await?;
+
+    // Count votes among LIVE participants only (a ghost neither blocks a close nor
+    // counts toward quorum — symmetric with `counterpart_is_stale`'s `>` boundary).
+    let participants = state.storage.list_participants(&id).await?;
+    let live = participants
+        .iter()
+        .filter(|p| now - p.last_poll_at <= lifecycle::GHOST_AFTER)
+        .count();
+    let votes = participants
+        .iter()
+        .filter(|p| p.wants_close_at.is_some() && now - p.last_poll_at <= lifecycle::GHOST_AFTER)
+        .count();
+    let needed = room.config.close_quorum.needed(live);
+
+    if votes >= needed {
+        close_now(&state, &id, room.state, now).await?;
+        Ok(Json(close_response("closed", RoomState::Closed, None)))
+    } else {
+        // Wake any parked counterpart: a contentless wake makes its long-poll
+        // yield and re-derive (see `wait_relevant_change`/`timeout_response`), so
+        // it surfaces `close_proposed` now rather than a full cap later.
+        state.hub.notify(&id);
+        Ok(Json(close_response(
+            "close_proposed",
+            room.state,
+            Some((votes as u32, needed as u32)),
+        )))
+    }
+}
+
+/// Apply the actual Active/Idle/Stale→Closed transition (CAS), clear all pending
+/// close votes, and wake waiters. Shared by force-close and quorum-met close. A
+/// lost CAS race is success iff the room ended up terminal anyway.
+async fn close_now(
+    state: &AppState,
+    id: &str,
+    from: RoomState,
+    now: OffsetDateTime,
+) -> Result<(), ApiError> {
+    let to = lifecycle::transition(from, LifecycleEvent::Close)
+        .map_err(|_| ApiError::Conflict(format!("cannot close from {}", from.as_str())))?;
+    let changed = state
+        .storage
+        .update_room_state(id, from, to, now, None)
+        .await?;
+    if !changed {
+        let cur = state
+            .storage
+            .get_room(id)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+        if !matches!(cur.state, RoomState::Closed | RoomState::Archived) {
+            return Err(ApiError::Conflict(
+                "room state changed concurrently; retry".into(),
+            ));
+        }
+    }
+    state.storage.clear_close_votes(id).await?;
+    state.hub.notify(id);
+    Ok(())
+}
+
+/// Build a close response. `state` is the room's state to report (the new
+/// `closed`, or the unchanged current state for a pending proposal); `progress`
+/// is `Some((votes, needed))` for a proposal, `None` for a completed close.
+fn close_response(
+    status: &str,
+    state: RoomState,
+    progress: Option<(u32, u32)>,
+) -> LifecycleResponse {
+    LifecycleResponse {
+        state: state.as_str().to_string(),
+        status: Some(status.to_string()),
+        votes: progress.map(|(v, _)| v),
+        needed: progress.map(|(_, n)| n),
+    }
 }
 
 /// Explicitly pause a room (the durable park). The caller must be a participant.
@@ -791,6 +921,9 @@ async fn apply_transition(
 
     Ok(Json(LifecycleResponse {
         state: to.as_str().to_string(),
+        status: None,
+        votes: None,
+        needed: None,
     }))
 }
 
@@ -833,19 +966,41 @@ async fn wait_room(
         .await?
         .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
 
-    // State entry gate: a paused/closed/archived room never long-polls. Return
-    // its state immediately so the caller stops waiting — only an explicit wake
-    // (paused) or a human (closed/archived) clears it, so polling can't help and
-    // there is no retry_after hint. This early return never enters the park path,
-    // so the slice-5b two-read backoff invariant below is untouched.
+    // State entry gate: a paused/closed/archived room never long-polls, but it
+    // must still DRAIN. A zero-cap claim delivers any already-unread message
+    // (one per call) before reporting the terminal status — otherwise closing or
+    // pausing a room strands every message a counterpart posted but the caller
+    // had not yet read (the "agents never see the latest messages" bug). The
+    // delivered message carries a `room_state` hint so the receiver knows it
+    // cannot simply reply. Only once the inbox is empty do we report the state.
+    // Zero-cap `wait_for_message` never parks (it claims-then-checks-deadline),
+    // so this stays a fast return and the slice-5b park-path invariant is intact.
     if matches!(
         room.state,
         RoomState::Paused | RoomState::Closed | RoomState::Archived
     ) {
-        return Ok(Json(WaitResponse::Timeout {
-            status: room.state.as_str().to_string(),
-            retry_after: None,
-        }));
+        return Ok(Json(
+            match wait_for_message(
+                &state.storage,
+                &state.hub,
+                &id,
+                &caller.handle,
+                Duration::ZERO,
+            )
+            .await?
+            {
+                WaitOutcome::Message(m) => WaitResponse::Message {
+                    message: message_view(&m)?,
+                    surface_to_user: false,
+                    retry_after: None,
+                    room_state: Some(room.state.as_str().to_string()),
+                },
+                WaitOutcome::PausedByTimeout => WaitResponse::Timeout {
+                    status: room.state.as_str().to_string(),
+                    retry_after: None,
+                },
+            },
+        ));
     }
 
     // Sole-participant gate: when no counterpart has joined yet, do not long-poll.
@@ -887,49 +1042,64 @@ async fn wait_room(
         Some(secs) => state.wait_cap.min(Duration::from_secs(secs as u64)),
         None => state.wait_cap,
     };
+    // How long to park, chosen from the counterpart's state at entry. Precedence:
+    // an active away-signal (backoff) shortens the park; a dark counterpart
+    // (`counterpart_stale`) or a pending close proposal the caller has not voted
+    // on park *zero* (deliver a ready message at once, else report immediately);
+    // otherwise park the full cap. The *status* a timeout reports is no longer
+    // frozen here — it is re-derived from fresh state at exit (`timeout_response`),
+    // so a close or proposal landing mid-park is reported promptly, not a cap late.
     let backoff = active_sentinel_backoff(&state.storage, &id, &caller.handle).await?;
-    let (outcome, ghosted) = if let Some(secs) = backoff {
+    let cap = if let Some(secs) = backoff {
         // min(server cap, per-call max, backoff): the per-call cap (MCP path) must
         // still win when it is shorter than the backoff, or an MCP `cbc_wait`
         // would overshoot its cap behind a counterpart's away-signal.
-        let cap = full_cap.min(Duration::from_secs(secs as u64));
-        (
-            wait_for_message(&state.storage, &state.hub, &id, &caller.handle, cap).await?,
-            false,
-        )
-    } else if counterpart_is_stale(&state.storage, &id, &caller.handle).await? {
-        (
-            wait_for_message(
-                &state.storage,
-                &state.hub,
-                &id,
-                &caller.handle,
-                Duration::ZERO,
-            )
-            .await?,
-            true,
-        )
+        full_cap.min(Duration::from_secs(secs as u64))
+    } else if counterpart_is_stale(&state.storage, &id, &caller.handle).await?
+        || close_proposed(&state.storage, &id, &caller.handle).await?
+    {
+        Duration::ZERO
     } else {
-        (
-            wait_for_message(&state.storage, &state.hub, &id, &caller.handle, full_cap).await?,
-            false,
-        )
+        full_cap
     };
+
+    // End the park early if the room halts (paused/closed/archived) or a close is
+    // proposed while we are parked: the notify carrying that change wakes the
+    // waiter with no claimable message, and without this it re-parks to the full
+    // cap. Consulted only on a contentless wake with park time left, so the
+    // zero-cap arms above never invoke it.
+    let yield_storage = state.storage.clone();
+    let yield_room = id.clone();
+    let yield_handle = caller.handle.clone();
+    let should_yield = move || {
+        let storage = yield_storage.clone();
+        let room = yield_room.clone();
+        let handle = yield_handle.clone();
+        async move { wait_relevant_change(&storage, &room, &handle).await }
+    };
+    let outcome = wait_for_message_until(
+        &state.storage,
+        &state.hub,
+        &id,
+        &caller.handle,
+        cap,
+        should_yield,
+    )
+    .await?;
 
     // Re-derive the hint from the post-wake state (the slice-5b two-read
     // invariant): the *cap* above used the pre-park reading, but a pause can
     // begin or clear while parked, so the *response hint* is re-read now —
     // otherwise a sentinel delivered on wake would lose its hint, or a msg that
-    // cleared the pause would carry a stale one. The `counterpart_stale` arm
-    // deliberately carries no hint: the counterpart is gone, not paused, so there
-    // is nothing to back off behind.
+    // cleared the pause would carry a stale one.
     //
     // Precedence: an explicit `waiting_user` sentinel (counterpart consulting its
     // human) is the more specific state and wins; otherwise fall back to the
     // inferred *busy* hint (counterpart read my latest and is composing a reply).
-    // The `ghosted` arm below overrides this to `None`, so a busy hint never leaks
-    // into a `counterpart_stale` response — which keeps ghost behaviour unchanged.
-    let retry_after = match active_sentinel_backoff(&state.storage, &id, &caller.handle).await? {
+    // `away` also gates ghost suppression below (the locked 6c rule: an explicit
+    // away-signal is not a ghost).
+    let away = active_sentinel_backoff(&state.storage, &id, &caller.handle).await?;
+    let retry_after = match away {
         Some(secs) => Some(secs),
         None => counterpart_busy_backoff(&state.storage, &id, &caller.handle).await?,
     };
@@ -947,17 +1117,97 @@ async fn wait_room(
                 message: message_view(&m)?,
                 surface_to_user,
                 retry_after,
+                room_state: None,
             }
         }
-        WaitOutcome::PausedByTimeout if ghosted => WaitResponse::Timeout {
+        WaitOutcome::PausedByTimeout => {
+            timeout_response(&state, &id, &caller.handle, retry_after, away.is_some()).await?
+        }
+    }))
+}
+
+/// Build the `wait` timeout response (no message claimed), deriving the status
+/// from the room's *current* state rather than a value frozen at park entry. A
+/// waiter woken mid-park by a close or proposal thus reports the fresh outcome:
+/// a halted room (paused/closed/archived) reports its state; a pending proposal
+/// the caller has not voted on reports `close_proposed`; an all-dark counterpart
+/// `counterpart_stale`; otherwise the plain `paused_by_timeout`, carrying any
+/// busy/away backoff hint. `close_proposed` and `counterpart_stale` are mutually
+/// exclusive (a live voter means the others are not all dark), so their order
+/// here is immaterial; both deliberately carry no hint (the peer is gone, or it
+/// is the caller's turn to decide — neither is "stay quiet, a reply is coming").
+///
+/// `away_active` carries the locked 6c rule: an explicit `waiting_user` sentinel
+/// is *not* a ghost, so an active away-signal suppresses `counterpart_stale` —
+/// the caller parks and reports `paused_by_timeout` (with the away backoff hint)
+/// rather than being told its counterpart is gone.
+async fn timeout_response(
+    state: &AppState,
+    id: &str,
+    handle: &str,
+    retry_after: Option<u32>,
+    away_active: bool,
+) -> Result<WaitResponse, ApiError> {
+    let room = state
+        .storage
+        .get_room(id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if matches!(
+        room.state,
+        RoomState::Paused | RoomState::Closed | RoomState::Archived
+    ) {
+        return Ok(WaitResponse::Timeout {
+            status: room.state.as_str().to_string(),
+            retry_after: None,
+        });
+    }
+    // `close_proposed` is checked before the away-suppression on purpose: a real
+    // close vote outranks "I'm away consulting my user" — if the counterpart both
+    // signalled away and voted to close, the actionable proposal wins. Do not
+    // reorder this below the away check.
+    if close_proposed(&state.storage, id, handle).await? {
+        return Ok(WaitResponse::Timeout {
+            status: "close_proposed".to_string(),
+            retry_after: None,
+        });
+    }
+    if !away_active && counterpart_is_stale(&state.storage, id, handle).await? {
+        return Ok(WaitResponse::Timeout {
             status: "counterpart_stale".to_string(),
             retry_after: None,
-        },
-        WaitOutcome::PausedByTimeout => WaitResponse::Timeout {
-            status: "paused_by_timeout".to_string(),
-            retry_after,
-        },
-    }))
+        });
+    }
+    Ok(WaitResponse::Timeout {
+        status: "paused_by_timeout".to_string(),
+        retry_after,
+    })
+}
+
+/// The `should_yield` predicate for a parked long-poll: `true` when something
+/// changed under the waiter that should end the park early so the response is
+/// re-derived against fresh state — the room entered a non-waitable state
+/// (paused/closed/archived), or a close was proposed that this caller has not yet
+/// voted on. Checked only on a contentless wake (see [`wait_for_message_until`]).
+async fn wait_relevant_change(
+    storage: &Storage,
+    room_id: &str,
+    handle: &str,
+) -> Result<bool, StorageError> {
+    let halted = storage
+        .get_room(room_id)
+        .await?
+        .map(|r| {
+            matches!(
+                r.state,
+                RoomState::Paused | RoomState::Closed | RoomState::Archived
+            )
+        })
+        .unwrap_or(false);
+    if halted {
+        return Ok(true);
+    }
+    close_proposed(storage, room_id, handle).await
 }
 
 /// True when at least one participant other than `handle` has joined the room
@@ -973,6 +1223,32 @@ async fn has_counterpart(
         .await?
         .iter()
         .any(|p| p.handle != handle))
+}
+
+/// True when a *live* other participant has voted to close (consensus close) and
+/// the caller has not yet voted — i.e. there is a pending close proposal awaiting
+/// the caller's decision. Counts only live voters (a ghost's stale vote never
+/// proposes), symmetric with `counterpart_is_stale`'s liveness boundary. When the
+/// caller has already voted there is nothing to surface to it (it is the one
+/// waiting on the others), so this is `false`.
+async fn close_proposed(
+    storage: &Storage,
+    room_id: &str,
+    handle: &str,
+) -> Result<bool, StorageError> {
+    let now = OffsetDateTime::now_utc();
+    let participants = storage.list_participants(room_id).await?;
+    let caller_voted = participants
+        .iter()
+        .any(|p| p.handle == handle && p.wants_close_at.is_some());
+    if caller_voted {
+        return Ok(false);
+    }
+    Ok(participants.iter().any(|p| {
+        p.handle != handle
+            && p.wants_close_at.is_some()
+            && now - p.last_poll_at <= lifecycle::GHOST_AFTER
+    }))
 }
 
 /// True when the caller has at least one other participant AND *every* other has

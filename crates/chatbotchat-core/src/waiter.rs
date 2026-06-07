@@ -69,6 +69,38 @@ pub async fn wait_for_message(
     handle: &str,
     timeout: Duration,
 ) -> Result<WaitOutcome, StorageError> {
+    // No mid-park yield condition: park purely on the message channel and the
+    // cap. Callers that must react to a room-state change while parked use
+    // [`wait_for_message_until`] directly.
+    wait_for_message_until(storage, hub, room_id, handle, timeout, || async {
+        Ok(false)
+    })
+    .await
+}
+
+/// Like [`wait_for_message`], but on every *contentless* wake (a hub notify that
+/// delivered no claimable message) it consults `should_yield`. When that returns
+/// `true`, the park ends early with [`WaitOutcome::PausedByTimeout`] so the
+/// caller can re-derive its response against fresh state — e.g. a room that
+/// closed, or a close that was just proposed, while this waiter was parked.
+/// Without it, a notify carrying no message re-parks to the full cap and the
+/// state change is reported a whole cap late.
+///
+/// `should_yield` is consulted *after* the message claim (so a queued message is
+/// still drained first) and only while park time remains (so the zero-cap drain
+/// path never pays for it).
+pub async fn wait_for_message_until<F, Fut>(
+    storage: &Storage,
+    hub: &Hub,
+    room_id: &str,
+    handle: &str,
+    timeout: Duration,
+    should_yield: F,
+) -> Result<WaitOutcome, StorageError>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<bool, StorageError>>,
+{
     // Refresh liveness: this poll proves the participant is alive (consumed by
     // stale-counterpart detection in a later slice).
     storage
@@ -89,6 +121,14 @@ pub async fn wait_for_message(
 
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
+            return Ok(WaitOutcome::PausedByTimeout);
+        }
+
+        // Park-relevant state may have changed under us (the room closed, or a
+        // close was proposed) — the notify carrying that change wakes us with no
+        // claimable message. Yield so the caller re-derives, rather than
+        // re-parking to the full cap and reporting the change a cap late.
+        if should_yield().await? {
             return Ok(WaitOutcome::PausedByTimeout);
         }
 

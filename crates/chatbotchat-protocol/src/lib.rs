@@ -147,13 +147,27 @@ pub struct LifecycleRequest {
     pub instance: String,
     #[serde(default)]
     pub reason: Option<String>,
+    /// Human-only escape hatch for `close`: bypass consensus and close the room
+    /// unilaterally. Set by `cbc close --force` (the CLI/human path); never
+    /// exposed over MCP, so agents must reach consensus. Ignored by pause/wake.
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// Response body for the lifecycle endpoints: the room's new state after the
-/// transition (e.g. `closed`, `paused`, `active`).
+/// transition (e.g. `closed`, `paused`, `active`). For `close`, `status`
+/// distinguishes a completed close (`"closed"`) from a recorded-but-pending
+/// proposal (`"close_proposed"`, with `votes`/`needed` showing progress toward
+/// quorum); pause/wake leave the consensus fields unset.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LifecycleResponse {
     pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub votes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needed: Option<u32>,
 }
 
 /// Query parameters for `GET /rooms/:id/wait`. Same tuple identity as send.
@@ -213,6 +227,14 @@ pub enum WaitResponse {
         surface_to_user: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry_after: Option<u32>,
+        /// Set only when the message was drained from a non-active (terminal)
+        /// room — `"closed"`, `"paused"`, or `"archived"`. It tells the receiver
+        /// "read this, but the room is {state}: you cannot just reply (a `closed`
+        /// room rejects sends; a `paused` room needs a wake first). Keep calling
+        /// `cbc_wait` to drain any remaining backlog until you get the terminal
+        /// status." Absent (not `null`) for the normal active-room delivery.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        room_state: Option<String>,
     },
     Timeout {
         status: String,
@@ -396,6 +418,7 @@ mod tests {
             message: sample_view(),
             surface_to_user: false,
             retry_after: Some(45),
+            room_state: None,
         };
         let value = serde_json::to_value(&with).expect("serialize");
         assert_eq!(value["retry_after"], json!(45));
@@ -412,6 +435,7 @@ mod tests {
             message: sample_view(),
             surface_to_user: false,
             retry_after: None,
+            room_state: None,
         };
         let text = serde_json::to_string(&without).expect("serialize");
         assert!(
@@ -511,6 +535,7 @@ mod tests {
             message: sample_view(),
             surface_to_user: true,
             retry_after: Some(10),
+            room_state: None,
         })
         .expect("serialize");
         let back: WaitResponse = serde_json::from_value(value).expect("deserialize");
