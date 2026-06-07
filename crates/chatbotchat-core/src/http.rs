@@ -5,7 +5,7 @@ use crate::message::{Message, MessageType, Severity};
 use crate::participant::Participant;
 use crate::room::{Room, RoomConfig, RoomState};
 use crate::storage::{RoomSummaryRow, Storage, StorageError};
-use crate::waiter::{backoff_secs, wait_for_message, Hub, WaitOutcome};
+use crate::waiter::{backoff_secs, wait_for_message, wait_for_message_until, Hub, WaitOutcome};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -793,8 +793,9 @@ async fn close_room(
         close_now(&state, &id, room.state, now).await?;
         Ok(Json(close_response("closed", RoomState::Closed, None)))
     } else {
-        // Wake any parked counterpart so its wait recomputes and surfaces
-        // `close_proposed` immediately.
+        // Wake any parked counterpart: a contentless wake makes its long-poll
+        // yield and re-derive (see `wait_relevant_change`/`timeout_response`), so
+        // it surfaces `close_proposed` now rather than a full cap later.
         state.hub.notify(&id);
         Ok(Json(close_response(
             "close_proposed",
@@ -1041,68 +1042,64 @@ async fn wait_room(
         Some(secs) => state.wait_cap.min(Duration::from_secs(secs as u64)),
         None => state.wait_cap,
     };
-    // Which status a *timeout* (no message claimed) should report, decided up
-    // front from the counterpart's state. Precedence: an active away-signal
-    // (backoff) → a dark counterpart (`counterpart_stale`) → a pending close
-    // proposal (`close_proposed`) → the plain `paused_by_timeout`. The stale and
-    // close-proposed arms park zero (deliver a ready message at once, else report
-    // the status immediately); the backoff arm shortens the park; the normal arm
-    // parks the full cap.
+    // How long to park, chosen from the counterpart's state at entry. Precedence:
+    // an active away-signal (backoff) shortens the park; a dark counterpart
+    // (`counterpart_stale`) or a pending close proposal the caller has not voted
+    // on park *zero* (deliver a ready message at once, else report immediately);
+    // otherwise park the full cap. The *status* a timeout reports is no longer
+    // frozen here — it is re-derived from fresh state at exit (`timeout_response`),
+    // so a close or proposal landing mid-park is reported promptly, not a cap late.
     let backoff = active_sentinel_backoff(&state.storage, &id, &caller.handle).await?;
-    let (outcome, timeout_status) = if let Some(secs) = backoff {
+    let cap = if let Some(secs) = backoff {
         // min(server cap, per-call max, backoff): the per-call cap (MCP path) must
         // still win when it is shorter than the backoff, or an MCP `cbc_wait`
         // would overshoot its cap behind a counterpart's away-signal.
-        let cap = full_cap.min(Duration::from_secs(secs as u64));
-        (
-            wait_for_message(&state.storage, &state.hub, &id, &caller.handle, cap).await?,
-            TimeoutStatus::PausedByTimeout,
-        )
-    } else if counterpart_is_stale(&state.storage, &id, &caller.handle).await? {
-        (
-            wait_for_message(
-                &state.storage,
-                &state.hub,
-                &id,
-                &caller.handle,
-                Duration::ZERO,
-            )
-            .await?,
-            TimeoutStatus::CounterpartStale,
-        )
-    } else if close_proposed(&state.storage, &id, &caller.handle).await? {
-        (
-            wait_for_message(
-                &state.storage,
-                &state.hub,
-                &id,
-                &caller.handle,
-                Duration::ZERO,
-            )
-            .await?,
-            TimeoutStatus::CloseProposed,
-        )
+        full_cap.min(Duration::from_secs(secs as u64))
+    } else if counterpart_is_stale(&state.storage, &id, &caller.handle).await?
+        || close_proposed(&state.storage, &id, &caller.handle).await?
+    {
+        Duration::ZERO
     } else {
-        (
-            wait_for_message(&state.storage, &state.hub, &id, &caller.handle, full_cap).await?,
-            TimeoutStatus::PausedByTimeout,
-        )
+        full_cap
     };
+
+    // End the park early if the room halts (paused/closed/archived) or a close is
+    // proposed while we are parked: the notify carrying that change wakes the
+    // waiter with no claimable message, and without this it re-parks to the full
+    // cap. Consulted only on a contentless wake with park time left, so the
+    // zero-cap arms above never invoke it.
+    let yield_storage = state.storage.clone();
+    let yield_room = id.clone();
+    let yield_handle = caller.handle.clone();
+    let should_yield = move || {
+        let storage = yield_storage.clone();
+        let room = yield_room.clone();
+        let handle = yield_handle.clone();
+        async move { wait_relevant_change(&storage, &room, &handle).await }
+    };
+    let outcome = wait_for_message_until(
+        &state.storage,
+        &state.hub,
+        &id,
+        &caller.handle,
+        cap,
+        should_yield,
+    )
+    .await?;
 
     // Re-derive the hint from the post-wake state (the slice-5b two-read
     // invariant): the *cap* above used the pre-park reading, but a pause can
     // begin or clear while parked, so the *response hint* is re-read now —
     // otherwise a sentinel delivered on wake would lose its hint, or a msg that
-    // cleared the pause would carry a stale one. The `counterpart_stale` arm
-    // deliberately carries no hint: the counterpart is gone, not paused, so there
-    // is nothing to back off behind.
+    // cleared the pause would carry a stale one.
     //
     // Precedence: an explicit `waiting_user` sentinel (counterpart consulting its
     // human) is the more specific state and wins; otherwise fall back to the
     // inferred *busy* hint (counterpart read my latest and is composing a reply).
-    // The `ghosted` arm below overrides this to `None`, so a busy hint never leaks
-    // into a `counterpart_stale` response — which keeps ghost behaviour unchanged.
-    let retry_after = match active_sentinel_backoff(&state.storage, &id, &caller.handle).await? {
+    // `away` also gates ghost suppression below (the locked 6c rule: an explicit
+    // away-signal is not a ghost).
+    let away = active_sentinel_backoff(&state.storage, &id, &caller.handle).await?;
+    let retry_after = match away {
         Some(secs) => Some(secs),
         None => counterpart_busy_backoff(&state.storage, &id, &caller.handle).await?,
     };
@@ -1123,33 +1120,94 @@ async fn wait_room(
                 room_state: None,
             }
         }
-        WaitOutcome::PausedByTimeout => match timeout_status {
-            // `counterpart_stale` and `close_proposed` carry no backoff hint: the
-            // peer is gone, or it is the caller's turn to decide on the close —
-            // neither is "stay quiet, a reply is coming".
-            TimeoutStatus::CounterpartStale => WaitResponse::Timeout {
-                status: "counterpart_stale".to_string(),
-                retry_after: None,
-            },
-            TimeoutStatus::CloseProposed => WaitResponse::Timeout {
-                status: "close_proposed".to_string(),
-                retry_after: None,
-            },
-            TimeoutStatus::PausedByTimeout => WaitResponse::Timeout {
-                status: "paused_by_timeout".to_string(),
-                retry_after,
-            },
-        },
+        WaitOutcome::PausedByTimeout => {
+            timeout_response(&state, &id, &caller.handle, retry_after, away.is_some()).await?
+        }
     }))
 }
 
-/// The status a `wait` timeout (no message claimed) should report, chosen from
-/// the counterpart's state before the park.
-#[derive(Clone, Copy)]
-enum TimeoutStatus {
-    PausedByTimeout,
-    CounterpartStale,
-    CloseProposed,
+/// Build the `wait` timeout response (no message claimed), deriving the status
+/// from the room's *current* state rather than a value frozen at park entry. A
+/// waiter woken mid-park by a close or proposal thus reports the fresh outcome:
+/// a halted room (paused/closed/archived) reports its state; a pending proposal
+/// the caller has not voted on reports `close_proposed`; an all-dark counterpart
+/// `counterpart_stale`; otherwise the plain `paused_by_timeout`, carrying any
+/// busy/away backoff hint. `close_proposed` and `counterpart_stale` are mutually
+/// exclusive (a live voter means the others are not all dark), so their order
+/// here is immaterial; both deliberately carry no hint (the peer is gone, or it
+/// is the caller's turn to decide — neither is "stay quiet, a reply is coming").
+///
+/// `away_active` carries the locked 6c rule: an explicit `waiting_user` sentinel
+/// is *not* a ghost, so an active away-signal suppresses `counterpart_stale` —
+/// the caller parks and reports `paused_by_timeout` (with the away backoff hint)
+/// rather than being told its counterpart is gone.
+async fn timeout_response(
+    state: &AppState,
+    id: &str,
+    handle: &str,
+    retry_after: Option<u32>,
+    away_active: bool,
+) -> Result<WaitResponse, ApiError> {
+    let room = state
+        .storage
+        .get_room(id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if matches!(
+        room.state,
+        RoomState::Paused | RoomState::Closed | RoomState::Archived
+    ) {
+        return Ok(WaitResponse::Timeout {
+            status: room.state.as_str().to_string(),
+            retry_after: None,
+        });
+    }
+    // `close_proposed` is checked before the away-suppression on purpose: a real
+    // close vote outranks "I'm away consulting my user" — if the counterpart both
+    // signalled away and voted to close, the actionable proposal wins. Do not
+    // reorder this below the away check.
+    if close_proposed(&state.storage, id, handle).await? {
+        return Ok(WaitResponse::Timeout {
+            status: "close_proposed".to_string(),
+            retry_after: None,
+        });
+    }
+    if !away_active && counterpart_is_stale(&state.storage, id, handle).await? {
+        return Ok(WaitResponse::Timeout {
+            status: "counterpart_stale".to_string(),
+            retry_after: None,
+        });
+    }
+    Ok(WaitResponse::Timeout {
+        status: "paused_by_timeout".to_string(),
+        retry_after,
+    })
+}
+
+/// The `should_yield` predicate for a parked long-poll: `true` when something
+/// changed under the waiter that should end the park early so the response is
+/// re-derived against fresh state — the room entered a non-waitable state
+/// (paused/closed/archived), or a close was proposed that this caller has not yet
+/// voted on. Checked only on a contentless wake (see [`wait_for_message_until`]).
+async fn wait_relevant_change(
+    storage: &Storage,
+    room_id: &str,
+    handle: &str,
+) -> Result<bool, StorageError> {
+    let halted = storage
+        .get_room(room_id)
+        .await?
+        .map(|r| {
+            matches!(
+                r.state,
+                RoomState::Paused | RoomState::Closed | RoomState::Archived
+            )
+        })
+        .unwrap_or(false);
+    if halted {
+        return Ok(true);
+    }
+    close_proposed(storage, room_id, handle).await
 }
 
 /// True when at least one participant other than `handle` has joined the room

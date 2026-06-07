@@ -3201,3 +3201,181 @@ async fn force_close_overrides_consensus() {
     let st = room_status(&app, &room_id).await;
     assert_eq!(st["state"].as_str(), Some("closed"), "got {st}");
 }
+
+// ---- Hole 2 latency: a parked wait must learn of a close/proposal promptly ----
+//
+// The consensus close is only useful if a peer that is *already parked* in a
+// long-poll discovers the outcome promptly — not a full cap later. `close_now`
+// and the proposal path both `hub.notify`, but a contentless wake that finds no
+// claimable message used to re-park to the full cap with a status frozen at
+// entry. These two tests pin both directions: the proposer learning the close,
+// and the counterpart learning the proposal. Both arrange the peer to be
+// genuinely parked (a sleep past the park entry) before the triggering call, so
+// the fast entry-gate path cannot mask a regression — the assertion is on the
+// elapsed time, which only means something if the park was actually entered.
+
+#[tokio::test]
+async fn a_parked_proposer_learns_of_the_close_promptly() {
+    // A proposes, then parks waiting. When B's agreeing vote meets quorum and
+    // closes the room, A's in-flight wait must return `closed` promptly (woken by
+    // the close), not re-park and report `paused_by_timeout` a full cap later.
+    let cap = std::time::Duration::from_secs(4);
+    let app = test_router_with_cap(cap).await;
+    let room_id = open_room_id(&app, "proposer parks").await;
+    join(&app, &room_id, "repo-a", "opus47", "/a").await;
+    join(&app, &room_id, "repo-b", "opus47", "/b").await;
+
+    // A proposes the close (1/2), then parks waiting for B to decide.
+    let (_, body) = lifecycle_op(&app, &room_id, "close", "repo-a", "opus47", "/a", None).await;
+    assert_eq!(
+        body["status"].as_str(),
+        Some("close_proposed"),
+        "got {body}"
+    );
+
+    let app_a = app.clone();
+    let rid = room_id.clone();
+    let parked = tokio::spawn(async move {
+        let start = std::time::Instant::now();
+        let (_, b) = wait(&app_a, &rid, "repo-a", "opus47", "/a").await;
+        (start.elapsed(), b)
+    });
+
+    // Let A reach the park, then B agrees → quorum → close_now → notify.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let (_, cbody) = lifecycle_op(&app, &room_id, "close", "repo-b", "opus47", "/b", None).await;
+    assert_eq!(
+        cbody["status"].as_str(),
+        Some("closed"),
+        "B's vote closes: {cbody}"
+    );
+
+    let (elapsed, wbody) = parked.await.expect("parked wait task");
+    assert_eq!(
+        wbody["status"].as_str(),
+        Some("closed"),
+        "the parked proposer must learn of the close, got {wbody}"
+    );
+    assert!(
+        elapsed < cap / 2,
+        "the proposer must learn promptly (woken by the close), not a full cap \
+         later; took {elapsed:?} of a {cap:?} cap"
+    );
+}
+
+#[tokio::test]
+async fn a_parked_counterpart_learns_of_the_proposal_promptly() {
+    // B parks waiting on an active room. When A proposes a close, A's `hub.notify`
+    // must wake B's in-flight wait and have it return `close_proposed` promptly —
+    // not re-park and report `paused_by_timeout` a full cap later (the symmetric
+    // half of the proposer case). This is what makes the close_room:798 notify
+    // actually do what its comment claims.
+    let cap = std::time::Duration::from_secs(4);
+    let app = test_router_with_cap(cap).await;
+    let room_id = open_room_id(&app, "counterpart parks").await;
+    join(&app, &room_id, "repo-a", "opus47", "/a").await;
+    join(&app, &room_id, "repo-b", "opus47", "/b").await;
+
+    let app_b = app.clone();
+    let rid = room_id.clone();
+    let parked = tokio::spawn(async move {
+        let start = std::time::Instant::now();
+        let (_, b) = wait(&app_b, &rid, "repo-b", "opus47", "/b").await;
+        (start.elapsed(), b)
+    });
+
+    // Let B reach the park, then A proposes a close.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let (_, body) = lifecycle_op(&app, &room_id, "close", "repo-a", "opus47", "/a", None).await;
+    assert_eq!(
+        body["status"].as_str(),
+        Some("close_proposed"),
+        "A proposes: {body}"
+    );
+
+    let (elapsed, wbody) = parked.await.expect("parked wait task");
+    assert_eq!(
+        wbody["status"].as_str(),
+        Some("close_proposed"),
+        "the parked counterpart must learn of the proposal, got {wbody}"
+    );
+    assert!(
+        elapsed < cap / 2,
+        "the counterpart must learn promptly (woken by the proposal), not a full \
+         cap later; took {elapsed:?} of a {cap:?} cap"
+    );
+}
+
+#[tokio::test]
+async fn a_proposer_is_not_told_close_proposed_on_its_own_wait() {
+    // The `close_proposed` status is for the *counterpart* — the agent who has NOT
+    // voted and must decide. A proposer waiting after its own vote must get the
+    // ordinary `paused_by_timeout`, never `close_proposed`. Guards the
+    // `caller_voted` short-circuit in `close_proposed`: a regression that reported
+    // a proposal on the voter's own wait would have both agents ping-ponging
+    // `close_proposed` at each other and never converging.
+    let (app, _storage) =
+        test_router_with_cap_returning_storage(std::time::Duration::from_millis(200)).await;
+    let room_id = open_room_id(&app, "self view").await;
+    join(&app, &room_id, "repo-a", "opus47", "/a").await;
+    join(&app, &room_id, "repo-b", "opus47", "/b").await;
+
+    // A proposes (1/2). B is live but silent; the room stays open.
+    let (_, body) = lifecycle_op(&app, &room_id, "close", "repo-a", "opus47", "/a", None).await;
+    assert_eq!(
+        body["status"].as_str(),
+        Some("close_proposed"),
+        "got {body}"
+    );
+
+    // A then waits. Its own vote must NOT come back to it as a proposal.
+    let (_, wbody) = wait(&app, &room_id, "repo-a", "opus47", "/a").await;
+    assert_eq!(
+        wbody["status"].as_str(),
+        Some("paused_by_timeout"),
+        "the proposer must not be told `close_proposed` on its own wait, got {wbody}"
+    );
+}
+
+#[tokio::test]
+async fn wait_drains_unread_through_a_real_consensus_close() {
+    // The drain-before-gate must hold when the room reaches `closed` through the
+    // real two-vote consensus path (`close_now`: CAS + clear votes + notify), not
+    // only when a test forces the state via `update_room_state`. An unread message
+    // sent before the close must still drain, carrying the terminal hint, before
+    // the close is reported.
+    let (app, _storage) =
+        test_router_with_cap_returning_storage(std::time::Duration::from_millis(200)).await;
+    let room_id = open_room_id(&app, "consensus drain").await;
+    join(&app, &room_id, "repo-a", "opus47", "/a").await;
+    join(&app, &room_id, "repo-b", "opus47", "/b").await;
+
+    // B leaves an unread message, then both agents vote to close (real quorum).
+    let (s, _) = send(&app, &room_id, "repo-b", "opus47", "/b", None, "final word").await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (_, a) = lifecycle_op(&app, &room_id, "close", "repo-a", "opus47", "/a", None).await;
+    assert_eq!(
+        a["status"].as_str(),
+        Some("close_proposed"),
+        "A proposes: {a}"
+    );
+    let (_, b) = lifecycle_op(&app, &room_id, "close", "repo-b", "opus47", "/b", None).await;
+    assert_eq!(
+        b["status"].as_str(),
+        Some("closed"),
+        "B agrees → closed: {b}"
+    );
+
+    // A's wait on the now-consensus-closed room still drains the unread first...
+    let (_, m) = wait(&app, &room_id, "repo-a", "opus47", "/a").await;
+    assert_eq!(
+        m["message"]["body"].as_str(),
+        Some("final word"),
+        "a consensus close must not strand unread, got {m}"
+    );
+    assert_eq!(m["room_state"].as_str(), Some("closed"), "got {m}");
+
+    // ...and only then reports the terminal status.
+    let (_, done) = wait(&app, &room_id, "repo-a", "opus47", "/a").await;
+    assert_eq!(done["status"].as_str(), Some("closed"), "got {done}");
+}
