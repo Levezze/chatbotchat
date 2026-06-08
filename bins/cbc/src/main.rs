@@ -121,21 +121,22 @@ enum Command {
     /// event arrives — a message, a terminal state, or a state needing a
     /// decision — then print it and exit. Loops internally on
     /// `paused_by_timeout` (honoring any `retry_after`), so the caller is no
-    /// longer the polling loop. Designed to run as a background task driven by
-    /// `/loop` or the Monitor tool. ALWAYS pass `--as` so the poller shares one
-    /// identity with your in-session sends — the poller owns the read cursor,
-    /// so do NOT also call `cbc wait` on the same identity while it runs.
+    /// longer the polling loop. Designed to run as a background task (e.g. via
+    /// `/loop`). Pass the `--as` you joined with so the poller shares one identity
+    /// with your in-session sends — the poller owns the read cursor, so do NOT
+    /// also call `cbc wait` on the same identity while it runs.
     Poll {
         /// Room id to poll.
         room_id: String,
         /// Self-declared model name (your identity; e.g. opus47).
         #[arg(long)]
         model: String,
-        /// Identity label (see `join --as`). Strongly recommended: pass the same
-        /// value you join/send with so the poller and your sends are one
-        /// participant. Omitting it falls back to the per-process identity.
+        /// Identity label (see `join --as`). REQUIRED: the poller owns the read
+        /// cursor, so it must share one identity with your MCP join/send. Relying
+        /// on the ambient per-process identity would split the cursor when the
+        /// session id is absent or has churned — pass the value you joined with.
         #[arg(long = "as")]
-        identity: Option<String>,
+        identity: String,
         /// Per-call long-poll cap (seconds): each underlying wait blocks up to
         /// this, and the loop re-waits on a timeout. Clamped to [1, 590] (a 0
         /// would make the server return instantly and the loop spin). Default 50.
@@ -154,9 +155,13 @@ enum Command {
         /// own cadence). Joins are human-paced; default 5.
         #[arg(long, default_value_t = 5)]
         join_backoff_secs: u64,
-        /// Give up if no counterpart joins within this many seconds (0 = wait
-        /// forever). Lets an initiator launch the poll right after surfacing the
-        /// room id and go hands-free, while a never-pasted id still terminates.
+        /// Give up if no counterpart joins within this many seconds. Lets an
+        /// initiator launch the poll right after surfacing the room id and go
+        /// hands-free, while a never-pasted id still terminates. `0` means "the
+        /// maximum safe window". Clamped below the server's 15-min sole-participant
+        /// stale threshold: while alone the poller cannot refresh its own liveness
+        /// (the server short-circuits before the liveness touch), so out-waiting
+        /// that threshold would make a late-joining counterpart see it as stale.
         /// Default 300 (5 min).
         #[arg(long, default_value_t = 300)]
         max_join_wait_secs: u64,
@@ -385,11 +390,14 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let repo = context::detect_repo();
             let cwd = context::detect_cwd();
-            let instance = context::detect_instance(identity.as_deref());
+            let instance = context::detect_instance(Some(&identity));
             // Clamp the cap to [1, 590] (mirrors the MCP cbc_wait clamp): a 0 cap
             // makes the server return instantly with no retry_after, which would
             // otherwise spin the loop; 590 stays under the server's 600s cap.
             let poll_cap_secs = poll_cap_secs.clamp(1, 590);
+            // Keep the join wait under the server's sole-participant stale window
+            // (see SAFE_JOIN_WAIT_CAP_SECS); 0 means "the max safe window".
+            let max_join_wait_secs = effective_max_join_wait(max_join_wait_secs);
             poll_until_event(
                 &client,
                 &room_id,
@@ -545,6 +553,27 @@ async fn main() -> anyhow::Result<()> {
 const POLL_REGROUND_NEXT: &str =
     "next: re-ground before you reply — call cbc_recap to re-read the whole room, and re-verify \
      any status claims against git/gh. Do not recap from memory.";
+
+/// Largest window a sole `cbc poll` may wait for a counterpart to join. Kept
+/// below the server's `lifecycle::GHOST_AFTER` (15 min) on purpose: while alone,
+/// the poll short-circuits with `awaiting_counterpart` *before* the server's
+/// per-wait liveness touch, so the poller cannot refresh its own `last_poll_at`.
+/// A poller that out-waited the stale threshold would be seen as `counterpart_stale`
+/// by the counterpart that finally joins. The full fix (refreshing liveness while
+/// alone) requires a server change and is tracked separately.
+const SAFE_JOIN_WAIT_CAP_SECS: u64 = 840; // < GHOST_AFTER (900s)
+                                          // Compile-time guard: the cap must stay under the server's 15-min stale window.
+const _: () = assert!(SAFE_JOIN_WAIT_CAP_SECS < 900);
+
+/// Resolve the effective join-wait bound: `0` ("max safe window") and any
+/// over-large value collapse to `SAFE_JOIN_WAIT_CAP_SECS`.
+fn effective_max_join_wait(secs: u64) -> u64 {
+    if secs == 0 || secs > SAFE_JOIN_WAIT_CAP_SECS {
+        SAFE_JOIN_WAIT_CAP_SECS
+    } else {
+        secs
+    }
+}
 
 /// The deterministic, background-friendly poll loop behind `cbc poll`. It
 /// long-polls in `poll_cap_secs` chunks and returns only on a meaningful event —
@@ -746,6 +775,9 @@ fn emit_poll_join_giveup(waited_secs: u64, json: bool) {
 /// kept in lockstep with the MCP `wait_next` guidance so both surfaces agree.
 fn poll_status_guidance(status: &str) -> &'static str {
     match status {
+        // Retained only for parity with the MCP `wait_next` mapping. The poll loop
+        // intercepts `awaiting_counterpart` (waits through it, then `emit_poll_join_giveup`)
+        // before this is ever reached, so this arm is unreachable via `cbc poll`.
         "awaiting_counterpart" => {
             "The other agent has not joined yet. Surface the room id to your user and end your \
              turn; resume polling once they join. Do not abandon the room."
@@ -880,6 +912,25 @@ fn print_backoff(retry_after: Option<u32>) {
     if let Some(secs) = retry_after {
         println!(
             "[backoff] Counterpart is engaged (paused or composing); wait ~{secs}s before re-polling."
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn join_wait_is_clamped_below_the_stale_threshold() {
+        // 0 ("max safe window") and any over-large value collapse to the cap, so a
+        // sole poller can never out-wait the server's 15-min stale threshold.
+        assert_eq!(effective_max_join_wait(0), SAFE_JOIN_WAIT_CAP_SECS);
+        assert_eq!(effective_max_join_wait(100_000), SAFE_JOIN_WAIT_CAP_SECS);
+        // Reasonable explicit values pass through unchanged.
+        assert_eq!(effective_max_join_wait(300), 300);
+        assert_eq!(
+            effective_max_join_wait(SAFE_JOIN_WAIT_CAP_SECS),
+            SAFE_JOIN_WAIT_CAP_SECS
         );
     }
 }
