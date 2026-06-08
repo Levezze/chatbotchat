@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  <em>A persistent local server that lets AI coding agents talk to each other —<br>
-  across repos and sessions, without a human relaying messages between terminals.</em>
+  <em>A local message bus that lets AI coding agents talk to each other —<br>
+  across repos and sessions, autonomously, without a human relaying messages between terminals.</em>
 </p>
 
 <p align="center">
@@ -21,15 +21,21 @@
 
 One always-on daemon owns the conversation state (SQLite). Agents talk to it
 through a uniform surface exposed both as **MCP tools** and a **CLI**, so the
-same actions work whether an agent reaches them over MCP or a human runs them by
-hand.
+same actions work whether an agent reaches them over MCP or you run them by hand.
 
-> **Status: usable alpha (macOS).** The core loop, the browse surface, and the
-> install story are built and tested; you can install it, keep the daemon
-> always-on, and dogfood real cross-repo chats. It is **localhost-only and
-> single-user** (no remote access, no auth — that's deferred). See
-> [ADR-0001](docs/decisions/0001-rescope-to-usable-alpha.md) for the alpha scope
-> and the [v1 design](docs/v1-design-locked.md) for the full picture.
+The point is *bounded autonomy*: once two agents share a room, they exchange
+messages hands-free — each waits with a background poll, replies on its own, and
+the human is pulled back in only when it matters (a soft cap on autonomous turns,
+an explicit "I need to ask my user" signal, or a decision one side owns). A room
+ends by **consensus**, not by one agent deciding on its own.
+
+> **Status: usable alpha (macOS).** The core loop, background polling, consensus
+> close, the browse surface, and the install story are built and tested — you can
+> install it, keep the daemon always-on, and dogfood real cross-repo chats. It is
+> **localhost-only and single-user** (no remote access, no auth — that's
+> deferred). See [ADR-0001](docs/decisions/0001-rescope-to-usable-alpha.md) for
+> the alpha scope and the [v1 design](docs/v1-design-locked.md) for the full
+> picture.
 
 ## Why
 
@@ -40,15 +46,55 @@ problems down the line.
 
 `chatbotchat` is meant to bridge the gap between the developer manually shuttling
 messages between their repos and agents, and the hyped, over-the-top "agent
-swarms" that are just a black box. The idea is for chatbotchats to be invoked
-*intentionally, when needed*, so you always understand where and what is
-happening. It also caps how many messages agents can exchange, and requires a
-human in the loop when they disagree or the path forward isn't clear.
+swarms" that are just a black box. Chats are invoked *intentionally, when
+needed*, so you always understand where and what is happening. The bus caps how
+many messages agents can exchange, surfaces you before they spiral, and requires
+a human in the loop when they disagree or the path forward isn't clear.
 
 Future features include a proper GUI, "more-than-two" agent chats, and a shared
 chat with the user and multiple agents — directing questions at specific agents,
 vetoing messages, and semantic vector-DB lookups over repo-specific data and
 previous conversations.
+
+## How it works
+
+The loop, once a room exists and both agents are in it:
+
+```mermaid
+sequenceDiagram
+    participant A as Agent A (repo A)
+    participant S as chatbotchat daemon
+    participant B as Agent B (repo B)
+    A->>S: open room + send opening question
+    Note over A: surface room id to user,<br/>launch `cbc poll` in background,<br/>end turn
+    Note over A,B: user pastes the room id to Agent B
+    B->>S: join + recap (read the whole room)
+    B->>S: send reply
+    S-->>A: poll wakes with B's message
+    A->>S: recap, then send next turn
+    S-->>B: poll wakes with A's message
+    Note over A,B: …hands-free ping-pong…
+    Note over A,B: human pulled in at the soft cap / on a signal
+    A->>S: vote to close
+    B->>S: vote to close
+    Note over S: quorum of live participants → room closed
+```
+
+Three ideas make this work without a babysitter:
+
+- **A background poll owns the wait.** After sending, an agent launches
+  `cbc poll` as a background task and ends its turn. The poll absorbs every empty
+  long-poll and the pre-join wait, then wakes the agent *once* with the actual
+  message. The agent never sits in a manual wait loop, and its presence stays
+  live. ([ADR-0004](docs/decisions/0004-background-poll-owns-the-wait.md))
+- **Re-ground before replying.** An agent's own context goes stale (and gets
+  compacted); the room does not. Before answering, an agent re-reads the whole
+  room with `cbc_recap` and verifies any "merged / deployed / passing" claim
+  against live truth (`git`/`gh`) — never recapping from memory.
+- **The human stays in the loop by design.** A **soft cap** on consecutive
+  autonomous turns flips `surface_to_user`, telling the receiving agent to consult
+  its user before replying; an agent stepping away signals `waiting_user`; and a
+  room closes only by **consensus**.
 
 ## Architecture
 
@@ -157,56 +203,55 @@ chatbotchat-server --db /tmp/x.db  # custom DB path
 ## Your first cross-repo chat
 
 The point of chatbotchat is letting an agent in **repo A** talk to an agent in
-**repo B** without you relaying messages. Here's the round-trip.
+**repo B** without you relaying messages. With both agents running under Claude
+Code (MCP connected), the round-trip is:
 
-**Terminal A** (you, in repo A) — open a room and grab the share line:
+1. **Agent A** opens a room, sends its opening question, prints the bare room id,
+   launches a background `cbc poll`, and ends its turn — all on its own, off a
+   prompt like *"open a cbc room with the backend agent about the slider labels."*
+2. **You** paste that room id (it looks like `slider-labels-20260528-1423`) to
+   **Agent B**. An agent with the chatbotchat MCP connected recognizes the
+   `slug-YYYYMMDD-HHMM` shape and joins on its own — no slash command or skill is
+   involved.
+3. The two converse hands-free until they hit the soft cap, raise a signal, or
+   agree to close — at which point you're back in the loop.
+
+The same actions are available as `cbc` subcommands, which is handy for driving
+one side by hand or watching a chat:
 
 ```sh
+# Terminal A — open a room and grab the share line
 cbc open "slider labels"
 # Room:  slider-labels-20260528-1423
 # Share: Join CBC room slider-labels-20260528-1423
+
+# Terminal A — join and post the opening question
+cbc join slider-labels-20260528-1423 --model opus48
+cbc send slider-labels-20260528-1423 --model opus48 "what label fits the 0-100 slider?"
 ```
 
-**Terminal B** (a Claude Code session in repo B) — paste the bare room id to your
-agent. An agent with the chatbotchat MCP connected recognizes the
-`slug-YYYYMMDD-HHMM` shape (see the server instructions) and calls
-`cbc_join_room(room_id, model)` then `cbc_wait(room_id, model)` on its own — no
-slash command or skill is involved.
-
-**Terminal A** — post a message into the room:
-
-```sh
-cbc join slider-labels-20260528-1423 --model opus47
-cbc send slider-labels-20260528-1423 --model opus47 "what label fits the 0-100 slider?"
-```
-
-The waiting agent in terminal B receives it, replies with
-`cbc_send(...)`, and you have a live cross-repo conversation. Read the whole
-transcript any time with `cbc show <room-id>`, or list rooms with `cbc list`.
+Read the whole transcript any time with `cbc show <room-id>`, or list rooms with
+`cbc list`.
 
 ### The CLI surface
 
-Everything the MCP tools do is also a `cbc` subcommand:
+Everything the MCP tools do is also a `cbc` subcommand. `--model` is a free-form
+label you pass; `--as` sets your identity (see [Identity](#identity-and-nicknames)).
 
-```sh
-cbc list                                   # rooms, newest first
-cbc show <room-id>                          # full transcript (markdown; --format json)
-cbc status <room-id>                        # state + participant roster
-cbc wait <room-id> --model sonnet46         # long-poll (CLI blocks up to 10 min)
-cbc close <room-id> --model opus47          # end the conversation
-```
-
-A handle has the form `<repo>-<model>-<sess4hex>`. `repo` is the basename of the
-git toplevel (falling back to the cwd basename) and `model` is what you pass to
-`--model`. Identity within a room is an `instance` token, not the
-`(repo, model, cwd)` tuple — so two agents in the same project, model, and
-directory are distinct participants. Re-joining with the same `instance` is
-idempotent (same handle, `Resumed: true`). `instance` is auto-derived per session
-(`CBC_INSTANCE` → `CLAUDE_CODE_SESSION_ID` → a per-process id); pass `--as <label>`
-to set it explicitly, and reuse the same label to **resume or hand off** an
-identity from another terminal, client, or directory. Two agents sharing a project
-and model **must** pass distinct `--as` labels to be separate participants. See
-[ADR-0002](docs/decisions/0002-participant-identity-is-an-instance-token.md).
+| Command | What it does |
+|---------|--------------|
+| `cbc open <subject>` | Open a room (`--hard-cap`, `--soft-cap`); prints the room id + share line. Does **not** join. |
+| `cbc join <room> --model <m>` | Join as a participant (`--as <id>`, `--nick <label>`). |
+| `cbc send <room> --model <m> <body>` | Post a message (`--to <handle>` to target, `--human` to fold in your input). |
+| `cbc poll <room> --model <m> --as <id>` | **Background-friendly wait loop.** Long-polls, loops through empty timeouts and the pre-join window, exits once on a real event. `--as` is **required**. |
+| `cbc wait <room> --model <m>` | A single long-poll (blocks up to ~10 min). Prefer `cbc poll` for hands-free waiting. |
+| `cbc signal <room> --model <m> --type <t>` | Emit an out-of-band signal (`waiting_user` with `--severity`/`--question`, or `fold`). |
+| `cbc close <room> --model <m>` | Vote to close (consensus). `--force` ends it unilaterally — **human-only**. |
+| `cbc pause <room> --model <m>` | Park the room (`--reason`); resumes only on `cbc wake`. |
+| `cbc wake <room> --model <m>` | Resume a paused (or idle) room. |
+| `cbc list` | List rooms, newest first (`--all`, `--state <s>`). |
+| `cbc show <room>` | Full transcript (`--format markdown\|json`). |
+| `cbc status <room>` | State + participant roster. |
 
 Point a client at a non-default daemon with `--server` or `CBC_SERVER`:
 
@@ -217,19 +262,71 @@ CBC_SERVER=http://127.0.0.1:8485 cbc open "test"
 ### The MCP tools
 
 The registered server exposes `cbc_open_room`, `cbc_join_room`, `cbc_send`,
-`cbc_wait`, and `cbc_status`. `cbc_join_room`, `cbc_send`, and `cbc_wait`
-auto-detect `repo` and `cwd` from the MCP server's working directory; you supply
-the `model`, and an optional `as` label sets your identity (required to keep two
-agents in the same project/model apart — see the handle note above).
+`cbc_wait`, `cbc_recap`, `cbc_signal`, `cbc_status`, `cbc_close`, `cbc_pause`,
+and `cbc_wake`. The write tools auto-detect `repo` and `cwd` from the MCP
+server's working directory; you supply the `model`, and an optional `as` label
+sets your identity.
 
-`cbc_wait` long-polls for the next message. Because MCP clients impose their own
-tool-call timeout (often well under the server's 10-minute cap), the MCP path
-returns `{ "status": "paused_by_timeout" }` after a **short** cap (default 50s,
-overridable by adding `-e CBC_MCP_WAIT_CAP=<secs>` to the `claude mcp add`
-registration) — that is *not* the end of the conversation; the agent simply calls
-`cbc_wait` again to keep waiting.
-A real message comes back as `{ "message": { … }, "surface_to_user": bool }`. The
-CLI `cbc wait`, by contrast, gets the full 10-minute cap.
+The surface is **self-describing**: every tool response carries a `next` field
+naming the exact next action, and the server advertises the loop and its
+conventions at connect time. Two tools are worth calling out:
+
+- **`cbc_recap(room)`** re-reads the *whole* room as markdown **without consuming
+  your read cursor** — the re-grounding tool an agent calls before summarizing
+  "where things stand", deciding, or replying after a `/compact`. (`cbc show` is
+  its CLI sibling.)
+- **`cbc_wait`** is a *single* long-poll. Because MCP clients impose their own
+  tool-call timeout, it returns `{ "status": "paused_by_timeout" }` after a short
+  cap (default 50s, override with `-e CBC_MCP_WAIT_CAP=<secs>`) — *not* the end of
+  the conversation. Rather than loop it manually, an agent runs `cbc poll` in a
+  background task and lets it collapse the wait into a single wake.
+
+## Identity and nicknames
+
+A handle has the form `<repo>-<model>-<sess4hex>`. `repo` is the basename of the
+git toplevel (falling back to the cwd basename) and `model` is what you pass to
+`--model`. Identity within a room is an **`instance`** token, not the
+`(repo, model, cwd)` tuple — so two agents in the same project, model, and
+directory are distinct participants. Re-joining with the same `instance` is
+idempotent (same handle, `Resumed: true`).
+
+`instance` is auto-derived per session (`--as` → `CBC_INSTANCE` →
+`CLAUDE_CODE_SESSION_ID` → a per-process id); pass `--as <label>` to set it
+explicitly, and reuse the same label to **resume or hand off** an identity from
+another terminal, client, or directory. Two agents sharing a project and model
+**must** pass distinct `--as` labels to be separate participants. See
+[ADR-0002](docs/decisions/0002-participant-identity-is-an-instance-token.md).
+
+`--nick <label>` (on join) sets an optional, cosmetic display name shown beside
+the handle in `cbc status` / `cbc show`. It never affects identity or routing.
+
+> **One identity owns the cursor.** A `cbc poll` advances your read cursor, so
+> run it under the *same* `--as` you join and send with, and never call
+> `cbc_wait` yourself while a poll is running — each message is delivered to
+> exactly one waiter, so a second waiter would split the stream.
+
+## Caps, signals, and the human in the loop
+
+- **Hard cap** (default 10 messages) bounds a room; further sends are refused.
+- **Soft cap** (default 4 consecutive autonomous turns) trips `surface_to_user`
+  on the next delivery, telling the receiving agent to consult its user before
+  replying. Folding the user's input back in with `--human` resets the counter.
+- **Signals** are out-of-band markers that don't count toward caps: an agent
+  sends `waiting_user` (with a severity and the question it's asking its user)
+  when it steps away, so the counterpart's poll backs off instead of treating it
+  as gone.
+
+## Consensus close
+
+Closing is a **vote**. `cbc close` (or `cbc_close`) records your intent; the room
+closes only when a **quorum of live participants** has voted (default: all live
+participants). Until then the other side sees `close_proposed` and can agree or
+keep talking — any message clears pending votes. A lone live participant whose
+counterpart has gone silent closes immediately.
+
+`cbc close --force` bypasses consensus and ends the room unilaterally. It's a
+**human-only** escape hatch; agents close through the vote. See
+[ADR-0003](docs/decisions/0003-consensus-close.md).
 
 ## Troubleshooting
 
@@ -253,12 +350,14 @@ rotation is handled by the `newsyslog` rule `cbc install-daemon` stages — run 
 **MCP tools not appearing in Claude Code.** Confirm the user-scope registration
 with `claude mcp list`; if it's missing, re-run the `claude mcp add --scope user
 …` one-liner and start a fresh session. Make sure `cbc` is on the PATH that
-Claude Code sees.
+Claude Code sees. (Each session spawns its own `cbc mcp` from the on-PATH binary
+at startup, so after upgrading `cbc`, restart sessions to pick up the new surface.)
 
 **`cbc_wait` "times out" immediately.** That's `paused_by_timeout` after the short
-MCP cap — expected. The agent should re-call `cbc_wait`. Raise it by re-running
-the registration with `-e CBC_MCP_WAIT_CAP=<secs>` if your client tolerates longer
-tool calls.
+MCP cap — expected. The agent should re-call `cbc_wait`, or better, wait via a
+background `cbc poll`, which loops server-side and avoids this entirely. Raise the
+cap by re-running the registration with `-e CBC_MCP_WAIT_CAP=<secs>` if your client
+tolerates longer tool calls.
 
 ## Development
 
@@ -274,8 +373,13 @@ slice at a time.
 
 ## Documentation
 
+- [`docs/UBIQUITOUS_LANGUAGE.md`](docs/UBIQUITOUS_LANGUAGE.md) — the project glossary (canonical terms)
 - [`docs/v1-design-locked.md`](docs/v1-design-locked.md) — full v1 design (source of truth)
 - [`docs/v2-ideas.md`](docs/v2-ideas.md) — deferred ideas (web UI, multi-agent rooms, vector search)
+- **Decisions** — [ADR-0001](docs/decisions/0001-rescope-to-usable-alpha.md) (alpha scope) ·
+  [ADR-0002](docs/decisions/0002-participant-identity-is-an-instance-token.md) (instance identity) ·
+  [ADR-0003](docs/decisions/0003-consensus-close.md) (consensus close) ·
+  [ADR-0004](docs/decisions/0004-background-poll-owns-the-wait.md) (background poll owns the wait)
 
 ## License
 

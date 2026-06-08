@@ -109,7 +109,7 @@ Tools (exposed identically as MCP tools and CLI subcommands):
 | `cbc_wake(room_id)` | Resume from `paused` or `idle`. |
 | `cbc_close(room_id)` | Post `close`, transition to `closed`. |
 | `cbc_status(room_id)` | Fetch state without consuming messages. |
-| `cbc_summary(room_id)` | Server-generated deterministic markdown chronology of the room's messages, participants, and cap counters. Used by the receiving agent during grill-me handoff. |
+| `cbc_summary(room_id)` | Server-generated deterministic markdown chronology of the room's messages, participants, and cap counters. Used by the receiving agent during grill-me handoff. *(Shipped as `cbc_recap` — see [ADR-0004](decisions/0004-background-poll-owns-the-wait.md).)* |
 | `cbc list [--all] [--state X]` | (CLI) List rooms. |
 | `cbc show <room_id> [--format markdown|json]` | (CLI) Dump room contents. Both markdown and JSON supported. |
 | `cbc search <query>` | (CLI) FTS5 keyword search across all rooms. |
