@@ -2,6 +2,7 @@ use anyhow::Context;
 use chatbotchat_client::HttpClient;
 use chatbotchat_protocol::{MessageView, RoomTranscript, WaitResponse};
 use clap::{Parser, Subcommand, ValueEnum};
+use std::time::Duration;
 
 mod context;
 mod install;
@@ -115,6 +116,37 @@ enum Command {
         /// Optional identity label (see `join --as`); pass the value you joined with.
         #[arg(long = "as")]
         identity: Option<String>,
+    },
+    /// Background-friendly wait loop: long-poll in bounded chunks until a real
+    /// event arrives — a message, a terminal state, or a state needing a
+    /// decision — then print it and exit. Loops internally on
+    /// `paused_by_timeout` (honoring any `retry_after`), so the caller is no
+    /// longer the polling loop. Designed to run as a background task driven by
+    /// `/loop` or the Monitor tool. ALWAYS pass `--as` so the poller shares one
+    /// identity with your in-session sends — the poller owns the read cursor,
+    /// so do NOT also call `cbc wait` on the same identity while it runs.
+    Poll {
+        /// Room id to poll.
+        room_id: String,
+        /// Self-declared model name (your identity; e.g. opus47).
+        #[arg(long)]
+        model: String,
+        /// Identity label (see `join --as`). Strongly recommended: pass the same
+        /// value you join/send with so the poller and your sends are one
+        /// participant. Omitting it falls back to the per-process identity.
+        #[arg(long = "as")]
+        identity: Option<String>,
+        /// Per-call long-poll cap (seconds): each underlying wait blocks up to
+        /// this, and the loop re-waits on a timeout. Default 50.
+        #[arg(long, default_value_t = 50)]
+        poll_cap_secs: u32,
+        /// Give up after this many consecutive empty polls (0 = never give up).
+        /// Mainly for tests and bounded runs; background callers leave it 0.
+        #[arg(long, default_value_t = 0)]
+        max_polls: u32,
+        /// Emit the delivered event as JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
     },
     /// List rooms (newest-first). Hides archived unless `--all` or `--state archived`.
     List {
@@ -312,35 +344,7 @@ async fn main() -> anyhow::Result<()> {
                     retry_after,
                     room_state,
                 } => {
-                    if let Some(rs) = &room_state {
-                        println!(
-                            "[room {rs}] delivered from a {rs} room — read it; you cannot just \
-                             reply. Keep calling wait to drain any backlog until you get status \
-                             {rs}."
-                        );
-                    }
-                    println!("From: {}", message.from);
-                    println!("To:   {}", message.to.as_deref().unwrap_or("all"));
-                    // A sentinel (type != "msg") carries no body; surface its type
-                    // and the question the other agent is asking its user instead.
-                    if message.msg_type != "msg" {
-                        match &message.severity {
-                            Some(sev) => println!("Signal: {} ({sev})", message.msg_type),
-                            None => println!("Signal: {}", message.msg_type),
-                        }
-                        if let Some(q) = &message.question_text {
-                            println!("Asking its user: {q}");
-                        }
-                    } else {
-                        println!("Body: {}", message.body);
-                    }
-                    if surface_to_user {
-                        println!();
-                        println!(
-                            "[soft cap] Consecutive autonomous turns hit the soft cap. \
-                             Consult your user and send the next turn with --human."
-                        );
-                    }
+                    print_message_human(&message, surface_to_user, room_state.as_deref());
                     print_backoff(retry_after);
                 }
                 WaitResponse::Timeout {
@@ -351,6 +355,31 @@ async fn main() -> anyhow::Result<()> {
                     print_backoff(retry_after);
                 }
             }
+        }
+        Command::Poll {
+            room_id,
+            model,
+            identity,
+            poll_cap_secs,
+            max_polls,
+            json,
+        } => {
+            let repo = context::detect_repo();
+            let cwd = context::detect_cwd();
+            let instance = context::detect_instance(identity.as_deref());
+            poll_until_event(
+                &client,
+                &room_id,
+                &repo,
+                &model,
+                &cwd,
+                &instance,
+                poll_cap_secs,
+                max_polls,
+                json,
+            )
+            .await
+            .context("polling room")?;
         }
         Command::List { all, state } => {
             let rooms = client
@@ -484,6 +513,207 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// CLI analog of the MCP `next` field: the re-ground discipline a waking agent
+/// must follow before it replies, so it answers from the room and live facts
+/// rather than stale context (the failure that motivated `cbc poll`).
+const POLL_REGROUND_NEXT: &str =
+    "next: re-ground before you reply — call cbc_recap to re-read the whole room, and re-verify \
+     any status claims against git/gh. Do not recap from memory.";
+
+/// The deterministic, background-friendly poll loop behind `cbc poll`. It
+/// long-polls in `poll_cap_secs` chunks and returns only on a meaningful event —
+/// a delivered message, a terminal room state, or a state needing a decision
+/// (awaiting_counterpart / close_proposed). It loops internally on
+/// `paused_by_timeout`, honoring any server `retry_after`, so the agent driving
+/// it sees a single wake carrying the payload rather than a stream of empty
+/// polls. Transient `wait` errors (a daemon restart, a dropped long-poll) are
+/// retried with a short backoff; the loop fails only after several in a row.
+#[allow(clippy::too_many_arguments)]
+async fn poll_until_event(
+    client: &HttpClient,
+    room_id: &str,
+    repo: &str,
+    model: &str,
+    cwd: &str,
+    instance: &str,
+    poll_cap_secs: u32,
+    max_polls: u32,
+    json: bool,
+) -> anyhow::Result<()> {
+    const MAX_CONSECUTIVE_ERRORS: u32 = 5;
+    let mut empty_polls: u32 = 0;
+    let mut consecutive_errors: u32 = 0;
+
+    loop {
+        let resp = match client
+            .wait(room_id, repo, model, cwd, instance, Some(poll_cap_secs))
+            .await
+        {
+            Ok(resp) => {
+                consecutive_errors = 0;
+                resp
+            }
+            Err(e) => {
+                consecutive_errors += 1;
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                    return Err(anyhow::anyhow!(
+                        "poll: giving up after {consecutive_errors} consecutive wait errors: {e}"
+                    ));
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+
+        match resp {
+            WaitResponse::Message {
+                message,
+                surface_to_user,
+                room_state,
+                ..
+            } => {
+                emit_poll_message(&message, surface_to_user, room_state.as_deref(), json);
+                return Ok(());
+            }
+            // The only keep-waiting status: nothing addressed to us arrived yet.
+            WaitResponse::Timeout {
+                status,
+                retry_after,
+            } if status == "paused_by_timeout" => {
+                empty_polls += 1;
+                if max_polls != 0 && empty_polls >= max_polls {
+                    emit_poll_giveup(empty_polls, json);
+                    return Ok(());
+                }
+                if let Some(secs) = retry_after {
+                    tokio::time::sleep(Duration::from_secs(secs as u64)).await;
+                }
+            }
+            // Everything else needs the agent: a terminal state, or a decision.
+            WaitResponse::Timeout { status, .. } => {
+                emit_poll_status(&status, json);
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// Print a delivered message for `cbc poll` (human or JSON), followed by the
+/// re-ground instruction the waking agent must honor before replying.
+fn emit_poll_message(
+    message: &MessageView,
+    surface_to_user: bool,
+    room_state: Option<&str>,
+    json: bool,
+) {
+    if json {
+        let payload = serde_json::json!({
+            "event": "message",
+            "message": message,
+            "surface_to_user": surface_to_user,
+            "room_state": room_state,
+            "next": POLL_REGROUND_NEXT,
+        });
+        println!("{payload}");
+        return;
+    }
+    print_message_human(message, surface_to_user, room_state);
+    println!("{POLL_REGROUND_NEXT}");
+}
+
+/// Print a non-message poll outcome (terminal state or a decision-needed state)
+/// plus the action the agent should take, mirroring the MCP `wait_next` guidance.
+fn emit_poll_status(status: &str, json: bool) {
+    if json {
+        let payload = serde_json::json!({
+            "event": "status",
+            "status": status,
+            "next": poll_status_guidance(status),
+        });
+        println!("{payload}");
+        return;
+    }
+    println!("{status}");
+    println!("{}", poll_status_guidance(status));
+}
+
+/// Print the give-up outcome when a bounded poll (`--max-polls`) exhausts its
+/// budget with no message. The conversation is still alive — the caller relaunches.
+fn emit_poll_giveup(polls: u32, json: bool) {
+    if json {
+        let payload = serde_json::json!({
+            "event": "gave_up",
+            "polls": polls,
+            "next": "Gave up after the poll bound with no message; the conversation is still alive — relaunch cbc poll to keep waiting.",
+        });
+        println!("{payload}");
+        return;
+    }
+    println!("paused_by_timeout");
+    println!(
+        "Gave up after {polls} empty poll(s) with no message. The conversation is still alive — \
+         relaunch cbc poll to keep waiting."
+    );
+}
+
+/// The action a waking agent should take for each non-message poll outcome,
+/// kept in lockstep with the MCP `wait_next` guidance so both surfaces agree.
+fn poll_status_guidance(status: &str) -> &'static str {
+    match status {
+        "awaiting_counterpart" => {
+            "The other agent has not joined yet. Surface the room id to your user and end your \
+             turn; resume polling once they join. Do not abandon the room."
+        }
+        "close_proposed" => {
+            "The other agent proposed closing the room. If you agree the conversation is done, \
+             call cbc_close to agree; if you have more to say, cbc_send (which cancels the \
+             proposal)."
+        }
+        "counterpart_stale" => {
+            "The other agent has gone silent (>15 min with no poll). Stop polling and tell your \
+             user the counterpart is unresponsive."
+        }
+        "paused" => "The room is paused. Stop polling — it needs an explicit cbc_wake to resume.",
+        "closed" | "archived" => "The room is over. Stop polling.",
+        _ => "Stop polling unless you know how to resume.",
+    }
+}
+
+/// Render a delivered message the way `cbc wait` / `cbc poll` surface it: a
+/// terminal-room note when drained from a non-active room, the from/to header,
+/// the body (or a sentinel's type + the question it is asking its user), and the
+/// soft-cap consult prompt when the cap is reached.
+fn print_message_human(message: &MessageView, surface_to_user: bool, room_state: Option<&str>) {
+    if let Some(rs) = room_state {
+        println!(
+            "[room {rs}] delivered from a {rs} room — read it; you cannot just reply. Keep \
+             polling to drain any backlog until you get status {rs}."
+        );
+    }
+    println!("From: {}", message.from);
+    println!("To:   {}", message.to.as_deref().unwrap_or("all"));
+    // A sentinel (type != "msg") carries no body; surface its type and the
+    // question the other agent is asking its user instead.
+    if message.msg_type != "msg" {
+        match &message.severity {
+            Some(sev) => println!("Signal: {} ({sev})", message.msg_type),
+            None => println!("Signal: {}", message.msg_type),
+        }
+        if let Some(q) = &message.question_text {
+            println!("Asking its user: {q}");
+        }
+    } else {
+        println!("Body: {}", message.body);
+    }
+    if surface_to_user {
+        println!();
+        println!(
+            "[soft cap] Consecutive autonomous turns hit the soft cap. Consult your user and \
+             send the next turn with --human."
+        );
+    }
+}
+
 /// Render a room transcript as human-readable markdown for `cbc show`. Sentinel
 /// messages (type != `msg`) are rendered like the `wait` handler surfaces them:
 /// the signal type, its severity, and the question the other agent is asking its
@@ -497,7 +727,9 @@ fn participant_label(nickname: &Option<String>, handle: &str) -> String {
     }
 }
 
-fn render_transcript_markdown(t: &RoomTranscript) -> String {
+/// `pub(crate)` so the MCP `cbc_recap` tool (in `mcp.rs`) can reuse the exact
+/// same rendering `cbc show` uses — one transcript renderer, two surfaces.
+pub(crate) fn render_transcript_markdown(t: &RoomTranscript) -> String {
     let mut out = String::new();
     out.push_str(&format!("# {}\n\n", t.subject));
     out.push_str(&format!("- Room: {}\n", t.id));

@@ -401,3 +401,281 @@ async fn mcp_join_room_is_idempotent_within_a_session() {
 
     client.cancel().await.ok();
 }
+
+#[tokio::test]
+async fn mcp_recap_is_advertised_and_returns_message_bodies() {
+    let base = spawn_daemon().await;
+
+    let transport =
+        TokioChildProcess::new(Command::new(env!("CARGO_BIN_EXE_cbc")).configure(|cmd| {
+            cmd.arg("mcp").env("CBC_SERVER", &base);
+        }))
+        .expect("spawn cbc mcp");
+    let client = ().serve(transport).await.expect("connect mcp client");
+
+    let tools = client
+        .list_tools(Default::default())
+        .await
+        .expect("list tools");
+    let advertised: Vec<&str> = tools.tools.iter().map(|t| t.name.as_ref()).collect();
+    assert!(
+        advertised.contains(&"cbc_recap"),
+        "cbc_recap should be advertised; got {advertised:?}"
+    );
+
+    // Open + two participants + two messages.
+    let opened = client
+        .call_tool(
+            CallToolRequestParams::new("cbc_open_room").with_arguments(
+                serde_json::json!({ "subject": "mcp recap" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("open room");
+    let opened_rendered = serde_json::to_string(&opened).expect("serialize");
+    let start = opened_rendered.find("mcp-recap-").expect("room id");
+    let room_id: String = opened_rendered[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+
+    for model in ["opus47", "sonnet46"] {
+        client
+            .call_tool(
+                CallToolRequestParams::new("cbc_join_room").with_arguments(
+                    serde_json::json!({ "room_id": room_id, "model": model, "as": model })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("join");
+    }
+    for (model, body) in [
+        ("opus47", "first recap line"),
+        ("sonnet46", "second recap line"),
+    ] {
+        client
+            .call_tool(
+                CallToolRequestParams::new("cbc_send").with_arguments(
+                    serde_json::json!({ "room_id": room_id, "model": model, "as": model, "body": body })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("send");
+    }
+
+    let recap = client
+        .call_tool(
+            CallToolRequestParams::new("cbc_recap").with_arguments(
+                serde_json::json!({ "room_id": room_id })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("call cbc_recap");
+    let rendered = serde_json::to_string(&recap).expect("serialize recap");
+    assert!(
+        rendered.contains("transcript_markdown"),
+        "recap should carry a transcript_markdown field; got: {rendered}"
+    );
+    assert!(
+        rendered.contains("first recap line") && rendered.contains("second recap line"),
+        "recap should include every message body; got: {rendered}"
+    );
+    assert!(
+        rendered.contains("git/gh"),
+        "recap's next must carry the re-ground/verify instruction; got: {rendered}"
+    );
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn mcp_recap_does_not_advance_the_read_cursor() {
+    let base = spawn_daemon().await;
+
+    let transport =
+        TokioChildProcess::new(Command::new(env!("CARGO_BIN_EXE_cbc")).configure(|cmd| {
+            cmd.arg("mcp").env("CBC_SERVER", &base);
+        }))
+        .expect("spawn cbc mcp");
+    let client = ().serve(transport).await.expect("connect mcp client");
+
+    let opened = client
+        .call_tool(
+            CallToolRequestParams::new("cbc_open_room").with_arguments(
+                serde_json::json!({ "subject": "recap cursor" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("open room");
+    let opened_rendered = serde_json::to_string(&opened).expect("serialize");
+    let start = opened_rendered.find("recap-cursor-").expect("room id");
+    let room_id: String = opened_rendered[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+
+    for model in ["opus47", "sonnet46"] {
+        client
+            .call_tool(
+                CallToolRequestParams::new("cbc_join_room").with_arguments(
+                    serde_json::json!({ "room_id": room_id, "model": model, "as": model })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("join");
+    }
+
+    // opus47 posts; sonnet46 has NOT yet read it.
+    client
+        .call_tool(
+            CallToolRequestParams::new("cbc_send").with_arguments(
+                serde_json::json!({ "room_id": room_id, "model": "opus47", "as": "opus47", "body": "unread tail" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("send");
+
+    // sonnet46 re-reads the whole room via recap — this must NOT consume its cursor.
+    client
+        .call_tool(
+            CallToolRequestParams::new("cbc_recap").with_arguments(
+                serde_json::json!({ "room_id": room_id })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("recap");
+
+    // sonnet46's cbc_wait must STILL deliver the unread message.
+    let waited = client
+        .call_tool(
+            CallToolRequestParams::new("cbc_wait").with_arguments(
+                serde_json::json!({ "room_id": room_id, "model": "sonnet46", "as": "sonnet46" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("wait");
+    let waited_rendered = serde_json::to_string(&waited).expect("serialize wait");
+    assert!(
+        waited_rendered.contains("unread tail"),
+        "recap must be cursor-independent: the unread message must still be delivered by cbc_wait; got: {waited_rendered}"
+    );
+
+    client.cancel().await.ok();
+}
+
+#[tokio::test]
+async fn mcp_send_nudges_substance_and_wait_steers_reground() {
+    let base = spawn_daemon().await;
+
+    let transport =
+        TokioChildProcess::new(Command::new(env!("CARGO_BIN_EXE_cbc")).configure(|cmd| {
+            cmd.arg("mcp").env("CBC_SERVER", &base);
+        }))
+        .expect("spawn cbc mcp");
+    let client = ().serve(transport).await.expect("connect mcp client");
+
+    // cbc_send's advertised description must carry the structural nudge.
+    let tools = client
+        .list_tools(Default::default())
+        .await
+        .expect("list tools");
+    let send_desc = tools
+        .tools
+        .iter()
+        .find(|t| t.name.as_ref() == "cbc_send")
+        .and_then(|t| t.description.as_ref().map(|d| d.to_string()))
+        .expect("cbc_send must be advertised with a description");
+    assert!(
+        send_desc.to_lowercase().contains("substantive"),
+        "cbc_send description should nudge a substantive turn; got: {send_desc}"
+    );
+
+    // Open + two participants + a message, then prove the delivered `next`
+    // steers the agent to re-ground (cbc_recap) before replying.
+    let opened = client
+        .call_tool(
+            CallToolRequestParams::new("cbc_open_room").with_arguments(
+                serde_json::json!({ "subject": "mcp reground next" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("open room");
+    let opened_rendered = serde_json::to_string(&opened).expect("serialize");
+    let start = opened_rendered.find("mcp-reground-next-").expect("room id");
+    let room_id: String = opened_rendered[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    for model in ["opus47", "sonnet46"] {
+        client
+            .call_tool(
+                CallToolRequestParams::new("cbc_join_room").with_arguments(
+                    serde_json::json!({ "room_id": room_id, "model": model, "as": model })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .expect("join");
+    }
+    client
+        .call_tool(
+            CallToolRequestParams::new("cbc_send").with_arguments(
+                serde_json::json!({ "room_id": room_id, "model": "opus47", "as": "opus47", "body": "decision pending" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("send");
+    let waited = client
+        .call_tool(
+            CallToolRequestParams::new("cbc_wait").with_arguments(
+                serde_json::json!({ "room_id": room_id, "model": "sonnet46", "as": "sonnet46" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("wait");
+    let waited_rendered = serde_json::to_string(&waited).expect("serialize wait");
+    assert!(
+        waited_rendered.contains("cbc_recap"),
+        "a delivered message's next must steer the agent to re-ground; got: {waited_rendered}"
+    );
+
+    client.cancel().await.ok();
+}

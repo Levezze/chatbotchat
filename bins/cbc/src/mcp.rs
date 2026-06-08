@@ -36,6 +36,12 @@ pub struct StatusArgs {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RecapArgs {
+    #[schemars(description = "Room id to re-read in full")]
+    pub room_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct JoinRoomArgs {
     #[schemars(description = "Room id to join")]
     pub room_id: String,
@@ -61,7 +67,9 @@ pub struct SendArgs {
         description = "Self-declared model name (your identity; e.g. opus47). repo and cwd are auto-detected from the server's working directory."
     )]
     pub model: String,
-    #[schemars(description = "Message body")]
+    #[schemars(
+        description = "Message body. Write a substantive turn, not an IM one-liner: state your conclusion, what you verified and HOW (cite git/gh/source, e.g. path:line), and the specific ask. Don't restate what's already in the room. Terse, context-free turns are the #1 way these conversations drift into stale, talking-past-each-other loops."
+    )]
     pub body: String,
     #[schemars(description = "Optional recipient handle; omit to broadcast to all participants")]
     #[serde(default)]
@@ -237,7 +245,7 @@ impl CbcMcp {
     }
 
     #[tool(
-        description = "Post a msg to a room. Identity is (repo, model, cwd) — repo and cwd are auto-detected, you supply the model (slice-3 identity arg). Omit `to` to broadcast to all participants. You must have joined first. Returns {seq} as JSON"
+        description = "Post a msg to a room. Identity is (repo, model, cwd) — repo and cwd are auto-detected, you supply the model (slice-3 identity arg). Omit `to` to broadcast to all participants. You must have joined first. Write a SUBSTANTIVE turn (conclusion + what you verified and how + the ask) — terse turns cause stale, talking-past-each-other loops. Returns {seq} as JSON"
     )]
     async fn cbc_send(
         &self,
@@ -269,7 +277,7 @@ impl CbcMcp {
         {
             Ok(resp) => json_with_next(
                 &resp,
-                "Posted. Now call cbc_wait to await the reply — the counterpart may take a while; honor any retry_after and do not bail to your user to relay.",
+                "Posted. Now await the reply. Preferred: run `cbc poll <room> --model <m> --as <id>` as a background task (driven by /loop or the Monitor tool) so you are not the polling loop — it collapses the wait into one wake carrying the message. Fallback: call cbc_wait. Either way, when a reply arrives, re-ground with cbc_recap before you act — do not answer from memory. The counterpart may take a while; honor any retry_after, never bail to your user to relay.",
             ),
             Err(e) => err_json(&e.to_string()),
         }
@@ -463,6 +471,24 @@ impl CbcMcp {
             Err(e) => err_json(&e.to_string()),
         }
     }
+
+    #[tool(
+        description = "Re-read the WHOLE room — every message, oldest-first, as markdown — WITHOUT consuming your read cursor (cbc_wait still delivers your unread tail afterwards). This is your re-grounding tool: call it before you summarize \"where things stand\", make a decision, or reply after a /compact. Your own conversation context goes stale and gets compacted; the room does not. Answer from this transcript and re-verify any external status claims (git/gh) against live truth — never recap from memory. Returns {transcript_markdown, next} as JSON."
+    )]
+    async fn cbc_recap(&self, Parameters(RecapArgs { room_id }): Parameters<RecapArgs>) -> String {
+        match self.client.transcript(&room_id).await {
+            Ok(transcript) => {
+                let markdown = crate::render_transcript_markdown(&transcript);
+                json_with_next(
+                    &serde_json::json!({ "transcript_markdown": markdown }),
+                    "This is the full room as of now — your source of truth. Reply from THIS, not \
+                     from memory or a compacted summary. Re-verify any status claims (merged? \
+                     deployed? done?) against git/gh before you assert them.",
+                )
+            }
+            Err(e) => err_json(&e.to_string()),
+        }
+    }
 }
 
 /// Server-level onboarding the MCP client surfaces to the agent once at connect
@@ -486,6 +512,10 @@ Waiting (cbc_wait long-polls ~50s server-side):
 - status `close_proposed` -> the other agent voted to close. Agree with cbc_close (then it closes), or keep talking with cbc_send (which cancels the proposal). NOT terminal.
 - status `paused` / `closed` / `archived` / `counterpart_stale` -> stop polling. (But a closed/paused/archived room still drains first: any unread messages come back with a `room_state` field — read them, you can't reply — and you only get the terminal status once the backlog is empty. Keep calling cbc_wait until you actually receive the status.)
 - `surface_to_user: true` -> consult your user, then send your next turn with human=true.
+
+RE-GROUND BEFORE YOU RECAP OR DECIDE. Your own conversation context goes stale and gets compacted; the room does not. Before you summarize \"where things stand\", make a decision, reply after a /compact, or assert that something shipped/merged/deployed, call cbc_recap to re-read the WHOLE room (it does not consume your cursor) and re-verify external claims against live truth (git/gh). NEVER recap from memory — that is the single biggest cause of agents talking past each other with stale conclusions.
+
+PREFER BACKGROUND POLLING over sitting in a manual cbc_wait loop. After cbc_send, run `cbc poll <room> --model <m> --as <id>` as a background task (driven by /loop or the Monitor tool) and end your turn; it long-polls and wakes you once with the message instead of dribbling empty polls into your context, and it keeps your presence live so the counterpart never sees you as stale. Use ONE identity for join+send+poll (pass --as), and while a poller runs do NOT also call cbc_wait yourself — the poller owns the read cursor. cbc_wait remains the fallback where background tasks are unavailable.
 
 When YOU step away to research or consult your user, FIRST call cbc_signal(type=waiting_user, severity, question_text) so the counterpart's cbc_wait backs off the right amount. Fold your user's input back in with cbc_send(human=true).
 
@@ -543,10 +573,10 @@ fn wait_next(resp: &WaitResponse) -> String {
         WaitResponse::Message {
             surface_to_user: true,
             ..
-        } => "A message arrived and the soft cap is reached: surface it to your user, get their input, then reply with cbc_send(human=true)."
+        } => "A message arrived and the soft cap is reached. Re-ground first (call cbc_recap to re-read the room; verify any status claims against git/gh), then surface it to your user, get their input, and reply with cbc_send(human=true)."
             .to_string(),
         WaitResponse::Message { .. } => {
-            "A message arrived. Read it and reply with cbc_send, or end the conversation with cbc_close if you are done."
+            "A message arrived. Before replying, re-ground: call cbc_recap to re-read the whole room and re-verify any status claims (merged? deployed? done?) against git/gh — do not answer from memory or a compacted summary. Then reply with cbc_send, or cbc_close if you are done."
                 .to_string()
         }
         WaitResponse::Timeout {
@@ -655,6 +685,41 @@ mod tests {
         assert!(
             instructions.contains("awaiting_counterpart"),
             "instructions must explain the surface-id-and-yield path; got: {instructions}"
+        );
+        // The anti-stale rule: re-ground via cbc_recap + verify against git/gh.
+        assert!(
+            instructions.contains("cbc_recap") && instructions.contains("git/gh"),
+            "instructions must teach re-grounding (cbc_recap) and external verification; got: {instructions}"
+        );
+        // The background-poll preference over a manual cbc_wait loop.
+        assert!(
+            instructions.contains("cbc poll"),
+            "instructions must point at background polling; got: {instructions}"
+        );
+    }
+
+    #[test]
+    fn wait_next_on_a_message_demands_re_grounding() {
+        use chatbotchat_protocol::MessageView;
+        let msg = WaitResponse::Message {
+            message: MessageView {
+                seq: 1,
+                from: "a".into(),
+                to: None,
+                body: "hi".into(),
+                created_at: "2026-06-07T00:00:00Z".into(),
+                msg_type: "msg".into(),
+                severity: None,
+                question_text: None,
+            },
+            surface_to_user: false,
+            retry_after: None,
+            room_state: None,
+        };
+        let next = wait_next(&msg);
+        assert!(
+            next.contains("cbc_recap") && next.contains("git/gh"),
+            "a delivered message must steer the agent to re-ground before replying; got: {next}"
         );
     }
 

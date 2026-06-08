@@ -877,3 +877,136 @@ fn join_with_nick_shows_nickname_in_status() {
         "status should render the nickname with the handle in brackets; got:\n{status_out}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `cbc poll` — the background-friendly wait loop. It long-polls in bounded
+// chunks and exits only on a meaningful event (a message, a terminal state, or
+// a state needing a decision), looping internally on paused_by_timeout. These
+// tests must never park on the real cap, so each scenario either pre-posts the
+// message, drives the room terminal, exercises the immediate awaiting_counterpart
+// return, or bounds the loop with --poll-cap-secs / --max-polls.
+
+#[test]
+fn poll_returns_when_a_message_arrives_and_carries_reground() {
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "cli poll msg");
+    join(&base, &room_id, "opus47");
+    join(&base, &room_id, "sonnet46");
+
+    // opus47 posts BEFORE the poll so the first underlying wait returns at once.
+    Command::cargo_bin("cbc")
+        .unwrap()
+        .args([
+            "send",
+            &room_id,
+            "--model",
+            "opus47",
+            "--as",
+            "opus47",
+            "ping over poll",
+        ])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+
+    let polled = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["poll", &room_id, "--model", "sonnet46", "--as", "sonnet46"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(polled.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("ping over poll"),
+        "poll should deliver the message body and exit; got:\n{out}"
+    );
+    assert!(
+        out.contains("cbc_recap"),
+        "poll should print the re-ground instruction (the CLI analog of `next`); got:\n{out}"
+    );
+}
+
+#[test]
+fn poll_exits_on_closed_room() {
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "cli poll closed");
+    join(&base, &room_id, "opus47");
+    join(&base, &room_id, "opus48");
+
+    // Force the room terminal, then poll: the loop must report `closed` and exit.
+    Command::cargo_bin("cbc")
+        .unwrap()
+        .args([
+            "close", &room_id, "--model", "opus47", "--as", "opus47", "--force",
+        ])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+
+    let polled = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["poll", &room_id, "--model", "opus48", "--as", "opus48"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(polled.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("closed"),
+        "poll should report the closed terminal state and exit; got:\n{out}"
+    );
+}
+
+#[test]
+fn poll_exits_on_awaiting_counterpart_without_hanging() {
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "cli poll alone");
+    join(&base, &room_id, "opus47");
+
+    // A lone participant: the server returns awaiting_counterpart immediately
+    // (no park), so the poll loop must exit rather than hang.
+    let polled = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["poll", &room_id, "--model", "opus47", "--as", "opus47"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(polled.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("awaiting_counterpart"),
+        "lone-participant poll should exit with awaiting_counterpart; got:\n{out}"
+    );
+}
+
+#[test]
+fn poll_loops_on_timeout_then_gives_up_at_max_polls() {
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "cli poll giveup");
+    join(&base, &room_id, "opus47");
+    join(&base, &room_id, "sonnet46");
+
+    // No message: each 1s-capped wait returns paused_by_timeout. --max-polls 2
+    // proves the loop RE-WAITS on a timeout instead of exiting on the first one,
+    // then gives up at the bound (bounded ~2s, never the real 10-min cap).
+    let polled = Command::cargo_bin("cbc")
+        .unwrap()
+        .args([
+            "poll",
+            &room_id,
+            "--model",
+            "sonnet46",
+            "--as",
+            "sonnet46",
+            "--poll-cap-secs",
+            "1",
+            "--max-polls",
+            "2",
+        ])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(polled.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.to_lowercase().contains("gave up"),
+        "poll should loop through timeouts and report giving up at --max-polls; got:\n{out}"
+    );
+}
