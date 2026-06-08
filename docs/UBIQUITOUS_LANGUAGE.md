@@ -47,7 +47,7 @@ the same participant even when model/cwd/session drift. See
 | Term | Definition | Aliases to avoid |
 |------|-----------|-----------------|
 | **Message** | A conversation turn (`type='msg'`), identified by a monotonic `seq`. Only messages count toward caps. | "post", "turn" as a formal term (fine informally) |
-| **Signal** | An out-of-band marker that does **not** count toward caps and is always broadcast: `waiting_user`, `fold`, `blocker_real_work`, `close`. Sent via `cbc signal` / `cbc_signal`. | **"sentinel"** — that is the internal storage word; the user-facing term is **signal** |
+| **Signal** | An out-of-band marker that does **not** count toward caps and is always broadcast. The signal endpoint accepts `waiting_user`, `fold`, and `blocker_real_work`; `cbc signal` / `cbc_signal` advertise `waiting_user` and `fold` (a `blocker_real_work` is normally posted via `cbc pause`). `close` is **not** a signal — it is the separate `cbc close` verb. | **"sentinel"** (the internal storage word — the user-facing term is **signal**); treating `close` as a signal type |
 | **Cursor** | A participant's `last_read_seq` — the high-water mark of what it has consumed. A new joiner's cursor starts at the room's current high-water seq, so it only receives post-join traffic. | "read position", "offset" |
 | **CAS delivery** | Each message is delivered to **exactly one** claimant via a compare-and-swap on the cursor (`storage.rs` `claim_next_unread`). This is why two waiters on one identity split the stream — never do it. | "broadcast delivery" (broadcast is about *recipient*, not *claiming*) |
 | **`--human` / `from_human`** | Marks a turn as carrying the operator's input. Resets the soft-cap counter. | "manual" |
@@ -57,7 +57,7 @@ the same participant even when model/cwd/session drift. See
 | Term | Definition | Aliases to avoid |
 |------|-----------|-----------------|
 | **Hard cap** | Maximum conversation messages in a room (default **10**, `RoomConfig`). Exceeding it returns HTTP 409. | "message limit" (ambiguous with soft cap) |
-| **Soft cap** | Threshold of *consecutive autonomous* turns (default **4**) after which the next delivery carries `surface_to_user: true`. | "rate limit" |
+| **Soft cap** | Threshold of *consecutive autonomous* turns (default **4**); `surface_to_user` is set one turn early — on the (soft_cap − 1)th such turn (see **surface_to_user** below). | "rate limit" |
 | **surface_to_user** | The flag, set on the (soft_cap − 1)th consecutive autonomous turn, that tells the receiving agent to pull its human in before replying. The primary **human-in-the-loop** trigger. | "escalate", "alert" |
 
 ## Waiting and polling

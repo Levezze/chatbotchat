@@ -33,9 +33,11 @@ of **live** participants have voted to close.
   the denominator (`CloseQuorum::needed`, `crates/chatbotchat-core/src/room.rs`).
   The default policy is `All` (every live participant); `Majority` is reserved
   for the future N-way world.
-- Until the quorum is met, a voter who has not yet seen agreement gets the wait
-  status **`close_proposed`**, and the caller's own response reports
-  `votes`/`needed`.
+- Until the quorum is met, the close call's own response reports `votes`/`needed`,
+  and the **other** live participant — the one who has *not* voted — gets the wait
+  status **`close_proposed`** on its next wait (a participant who has already voted
+  does not see `close_proposed`; `close_proposed` returns false once you have
+  voted). It then either votes too (agree) or sends a message (which clears votes).
 - **Any conversation message clears all pending votes** — a deterministic "keep
   going" that cancels a proposal without a special "decline" verb.
 - A lone live participant whose counterpart has ghosted reaches quorum by itself
@@ -50,8 +52,12 @@ close through the vote, never by shelling out to `--force`.
 
 - An agent can no longer silently end a shared room; closing requires the live
   counterpart to agree (or to have ghosted).
-- "Reached consensus alone" is now structurally impossible through the agent
-  surface — the only single-actor close is the human `--force`.
+- "Reached consensus alone" — closing while a *live* counterpart has not agreed —
+  is no longer possible through the agent surface. Two single-actor closes remain,
+  and both are legitimate: the human `--force` (which *bypasses* quorum), and a
+  lone **live** participant closing when every other participant has **ghosted**
+  (quorum is counted over live participants, so one live voter *satisfies* it —
+  not a bypass).
 - The terminal `closed` state still records **no provenance** (consensus vs
   force vs which participant). An agent inspecting a closed room cannot yet
   distinguish how it closed. Closing this gap — and making the consensus path

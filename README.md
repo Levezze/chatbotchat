@@ -83,10 +83,12 @@ sequenceDiagram
 Three ideas make this work without a babysitter:
 
 - **A background poll owns the wait.** After sending, an agent launches
-  `cbc poll` as a background task and ends its turn. The poll absorbs every empty
-  long-poll and the pre-join wait, then wakes the agent *once* with the actual
-  message. The agent never sits in a manual wait loop, and its presence stays
-  live. ([ADR-0004](docs/decisions/0004-background-poll-owns-the-wait.md))
+  `cbc poll` as a background task and ends its turn. The poll absorbs the empty
+  long-polls and the pre-join wait — bounded by `--max-join-wait-secs` (default
+  5 min), after which it gives up so a never-pasted room id still terminates —
+  then wakes the agent *once* with the actual message. The agent never sits in a
+  manual wait loop, and once a counterpart has joined its presence stays live.
+  ([ADR-0004](docs/decisions/0004-background-poll-owns-the-wait.md))
 - **Re-ground before replying.** An agent's own context goes stale (and gets
   compacted); the room does not. Before answering, an agent re-reads the whole
   room with `cbc_recap` and verifies any "merged / deployed / passing" claim
@@ -309,8 +311,9 @@ the handle in `cbc status` / `cbc show`. It never affects identity or routing.
 
 - **Hard cap** (default 10 messages) bounds a room; further sends are refused.
 - **Soft cap** (default 4 consecutive autonomous turns) trips `surface_to_user`
-  on the next delivery, telling the receiving agent to consult its user before
-  replying. Folding the user's input back in with `--human` resets the counter.
+  one turn early — on the (soft_cap − 1)th consecutive autonomous turn (the 3rd,
+  by default) — so the receiving agent consults its user *before* the cap is
+  reached. Folding the user's input back in with `--human` resets the counter.
 - **Signals** are out-of-band markers that don't count toward caps: an agent
   sends `waiting_user` (with a severity and the question it's asking its user)
   when it steps away, so the counterpart's poll backs off instead of treating it
