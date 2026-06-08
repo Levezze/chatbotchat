@@ -877,3 +877,262 @@ fn join_with_nick_shows_nickname_in_status() {
         "status should render the nickname with the handle in brackets; got:\n{status_out}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `cbc poll` — the background-friendly wait loop. It long-polls in bounded
+// chunks and exits only on a meaningful event (a message, a terminal state, or
+// a state needing a decision), looping internally on paused_by_timeout. These
+// tests must never park on the real cap, so each scenario either pre-posts the
+// message, drives the room terminal, exercises the immediate awaiting_counterpart
+// return, or bounds the loop with --poll-cap-secs / --max-polls.
+
+#[test]
+fn poll_returns_when_a_message_arrives_and_carries_reground() {
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "cli poll msg");
+    join(&base, &room_id, "opus47");
+    join(&base, &room_id, "sonnet46");
+
+    // opus47 posts BEFORE the poll so the first underlying wait returns at once.
+    Command::cargo_bin("cbc")
+        .unwrap()
+        .args([
+            "send",
+            &room_id,
+            "--model",
+            "opus47",
+            "--as",
+            "opus47",
+            "ping over poll",
+        ])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+
+    let polled = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["poll", &room_id, "--model", "sonnet46", "--as", "sonnet46"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(polled.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("ping over poll"),
+        "poll should deliver the message body and exit; got:\n{out}"
+    );
+    assert!(
+        out.contains("cbc_recap"),
+        "poll should print the re-ground instruction (the CLI analog of `next`); got:\n{out}"
+    );
+}
+
+#[test]
+fn poll_exits_on_closed_room() {
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "cli poll closed");
+    join(&base, &room_id, "opus47");
+    join(&base, &room_id, "opus48");
+
+    // Force the room terminal, then poll: the loop must report `closed` and exit.
+    Command::cargo_bin("cbc")
+        .unwrap()
+        .args([
+            "close", &room_id, "--model", "opus47", "--as", "opus47", "--force",
+        ])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+
+    let polled = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["poll", &room_id, "--model", "opus48", "--as", "opus48"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(polled.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("closed"),
+        "poll should report the closed terminal state and exit; got:\n{out}"
+    );
+}
+
+#[test]
+fn poll_requires_an_explicit_identity() {
+    // `cbc poll` owns the read cursor, so it MUST share one identity with the
+    // agent's MCP join/send. A missing `--as` would fall back to a per-process
+    // identity that can mismatch (and split the cursor) when the ambient session
+    // id is absent or has churned — so the flag is required, rejected by the
+    // parser before any network call.
+    let failed = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["poll", "some-room-20260101-0000", "--model", "opus47"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(failed.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("--as"),
+        "missing --as must be a parser error naming --as; got:\n{stderr}"
+    );
+}
+
+#[test]
+fn poll_waits_through_awaiting_counterpart_then_delivers() {
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "cli poll wait-through-join");
+    // Only the poller has joined, so the first wait returns awaiting_counterpart
+    // immediately (no park). The counterpart joins + sends shortly AFTER the poll
+    // starts. This proves the initiator's background poll loops THROUGH the
+    // pre-join window instead of exiting on awaiting_counterpart, and wakes on the
+    // first real message — the hands-free path that means the agent never has to
+    // ask its user "tell me when they joined".
+    join(&base, &room_id, "opus47");
+
+    let base_bg = base.clone();
+    let room_bg = room_id.clone();
+    let counterpart = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(1200));
+        join(&base_bg, &room_bg, "sonnet46");
+        send(
+            &base_bg,
+            &room_bg,
+            "sonnet46",
+            "joined late, here is the reply",
+        );
+    });
+
+    let polled = Command::cargo_bin("cbc")
+        .unwrap()
+        .args([
+            "poll",
+            &room_id,
+            "--model",
+            "opus47",
+            "--as",
+            "opus47",
+            "--join-backoff-secs",
+            "1",
+            "--max-join-wait-secs",
+            "30",
+        ])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    counterpart.join().unwrap();
+    let out = String::from_utf8(polled.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("joined late, here is the reply"),
+        "poll must wait through awaiting_counterpart and deliver the first message; got:\n{out}"
+    );
+}
+
+#[test]
+fn poll_gives_up_after_join_wait_bound_when_no_one_joins() {
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "cli poll join-giveup");
+    join(&base, &room_id, "opus47");
+
+    // Lone participant, counterpart never joins. With a 2s join-wait bound and a
+    // 1s backoff the loop RE-CHECKS for the join (it does not exit on the first
+    // awaiting_counterpart like the old behavior), then gives up and tells the
+    // agent to re-surface the room id — never hanging on the real cap.
+    let start = Instant::now();
+    let polled = Command::cargo_bin("cbc")
+        .unwrap()
+        .args([
+            "poll",
+            &room_id,
+            "--model",
+            "opus47",
+            "--as",
+            "opus47",
+            "--join-backoff-secs",
+            "1",
+            "--max-join-wait-secs",
+            "2",
+        ])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let elapsed = start.elapsed();
+    let out = String::from_utf8(polled.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.to_lowercase().contains("room id"),
+        "join-wait give-up should tell the agent to re-surface the room id; got:\n{out}"
+    );
+    // Structurally prove the loop re-checked (did not exit on the first
+    // awaiting_counterpart): a 2s bound at 1s backoff cannot finish under a second.
+    assert!(
+        elapsed >= Duration::from_secs(1),
+        "the loop must re-check at least once before giving up; got {elapsed:?}"
+    );
+}
+
+#[test]
+fn poll_loops_on_timeout_then_gives_up_at_max_polls() {
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "cli poll giveup");
+    join(&base, &room_id, "opus47");
+    join(&base, &room_id, "sonnet46");
+
+    // No message: each 1s-capped wait returns paused_by_timeout. --max-polls 2
+    // proves the loop RE-WAITS on a timeout instead of exiting on the first one,
+    // then gives up at the bound (bounded ~3s, never the real 10-min cap).
+    let start = Instant::now();
+    let polled = Command::cargo_bin("cbc")
+        .unwrap()
+        .args([
+            "poll",
+            &room_id,
+            "--model",
+            "sonnet46",
+            "--as",
+            "sonnet46",
+            "--poll-cap-secs",
+            "1",
+            "--max-polls",
+            "2",
+        ])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let elapsed = start.elapsed();
+    let out = String::from_utf8(polled.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.to_lowercase().contains("gave up"),
+        "poll should loop through timeouts and report giving up at --max-polls; got:\n{out}"
+    );
+    // Structurally prove the loop re-waited (not arithmetic on --max-polls alone):
+    // two ~1s-capped polls cannot complete in under a second.
+    assert!(
+        elapsed >= Duration::from_secs(1),
+        "two 1s-capped polls must take >=1s, proving the loop re-waited; got {elapsed:?}"
+    );
+}
+
+#[test]
+fn poll_bails_after_repeated_wait_errors_against_a_dead_server() {
+    // Reserve a port, then close it so every connection is refused.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let dead = format!("http://{}", listener.local_addr().expect("addr"));
+    drop(listener);
+
+    // No daemon: every `wait` errors (connection refused). With --error-backoff-secs 0
+    // the loop bails immediately after MAX_CONSECUTIVE_ERRORS and exits nonzero —
+    // proving the transient-error retry path terminates instead of looping forever
+    // (the resilience logic that is the whole point of background polling).
+    Command::cargo_bin("cbc")
+        .unwrap()
+        .args([
+            "poll",
+            "dead-room-20260101-0000",
+            "--model",
+            "opus47",
+            "--as",
+            "opus47",
+            "--error-backoff-secs",
+            "0",
+        ])
+        .env("CBC_SERVER", &dead)
+        .assert()
+        .failure();
+}
