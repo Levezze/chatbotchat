@@ -1,9 +1,11 @@
 # Proposal: kill CBC staleness + move polling off the agent's back
 
-> Status: **proposal, not locked.** Written 2026-06-07 from a frustration report + a
-> full read of the codebase. Two user-reported problems; the analysis below argues
-> they are **one root cause seen from two angles**, with layered remedies. Nothing
-> here is implemented — this is for discussion.
+> Status: **shipped in #42** (background `cbc poll` + `cbc_recap` + anti-stale
+> coaching); see [ADR-0004](../decisions/0004-background-poll-owns-the-wait.md).
+> Written 2026-06-07 from a frustration report + a full read of the codebase. Two
+> user-reported problems; the analysis below argues they are **one root cause seen
+> from two angles**, with layered remedies. Retained as the design rationale
+> behind the implementation.
 
 ---
 
