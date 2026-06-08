@@ -617,6 +617,26 @@ async fn mcp_send_nudges_substance_and_wait_steers_reground() {
         "cbc_send description should nudge a substantive turn; got: {send_desc}"
     );
 
+    // cbc_close's description must (a) tell the agent to send everything before
+    // voting close and (b) forbid the `--force` CLI escape hatch — the exact gap
+    // that let an agent unilaterally force-close a room and drop the counterpart's
+    // unsent, better answer.
+    let close_desc = tools
+        .tools
+        .iter()
+        .find(|t| t.name.as_ref() == "cbc_close")
+        .and_then(|t| t.description.as_ref().map(|d| d.to_string()))
+        .expect("cbc_close must be advertised with a description");
+    let close_lc = close_desc.to_lowercase();
+    assert!(
+        close_lc.contains("--force") && close_lc.contains("human-only"),
+        "cbc_close description must mark --force as a human-only escape hatch; got: {close_desc}"
+    );
+    assert!(
+        close_lc.contains("sent everything") || close_lc.contains("send everything"),
+        "cbc_close description must tell the agent to send everything before voting close; got: {close_desc}"
+    );
+
     // Open + two participants + a message, then prove the delivered `next`
     // steers the agent to re-ground (cbc_recap) before replying.
     let opened = client

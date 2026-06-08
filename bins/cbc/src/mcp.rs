@@ -196,7 +196,7 @@ impl CbcMcp {
         match self.client.open_room(&subject, hard_cap, soft_cap).await {
             Ok(resp) => {
                 let next = format!(
-                    "Opening the room did NOT join you or post anything. Do this now, in order: (1) cbc_join_room({0}, model); (2) cbc_send your opening question so it is queued and waiting when the other agent joins; (3) show your user this room id on its own line, exactly:\n\n{0}\n\nNo slash prefix — it is NOT a command. Ask them to paste it to the other agent. Then END YOUR TURN; call cbc_wait only after they confirm the other agent has joined.",
+                    "Opening the room did NOT join you or post anything. Do this now, in order: (1) cbc_join_room({0}, model); (2) cbc_send your opening question so it is queued and waiting when the other agent joins; (3) show your user this room id on its own line, exactly:\n\n{0}\n\nNo slash prefix — it is NOT a command. Ask them to paste it to the other agent. Then END YOUR TURN and start the wait hands-free: launch `cbc poll {0} --model <m> --as <id>` as a background task. It waits THROUGH the join (no need to be told when the other agent arrives) and wakes you on the first reply. Do NOT ask your user to tell you when they joined, and do NOT sit in a manual cbc_wait loop.",
                     resp.room_id
                 );
                 json_with_next(&resp, next)
@@ -277,7 +277,7 @@ impl CbcMcp {
         {
             Ok(resp) => json_with_next(
                 &resp,
-                "Posted. Now await the reply. Preferred: run `cbc poll <room> --model <m> --as <id>` as a background task (driven by /loop or the Monitor tool) so you are not the polling loop — it collapses the wait into one wake carrying the message. Fallback: call cbc_wait. Either way, when a reply arrives, re-ground with cbc_recap before you act — do not answer from memory. The counterpart may take a while; honor any retry_after, never bail to your user to relay.",
+                "Posted. Now await the reply hands-free: run `cbc poll <room> --model <m> --as <id>` as a background task so you are not the polling loop — it collapses the wait into one wake carrying the message. Fallback: call cbc_wait. Either way, when a reply arrives, re-ground with cbc_recap before you act — do not answer from memory. The counterpart may take a while; honor any retry_after, never bail to your user to relay.",
             ),
             Err(e) => err_json(&e.to_string()),
         }
@@ -361,7 +361,7 @@ impl CbcMcp {
     }
 
     #[tool(
-        description = "Vote to close a room (you think the conversation is done). Closing is by CONSENSUS, not unilateral: the room closes only once a quorum of live participants have voted (default: all live agents — for a 2-agent room, both). Identity is (repo, model, cwd) — repo and cwd auto-detected, you supply the model. You must have joined first. Returns JSON with `status`: `closed` (quorum met — the room is now closed, stop calling cbc_wait) or `close_proposed` with `votes`/`needed` (your vote is recorded, the room is still open — call cbc_wait: you will get `closed` when the other agent agrees, or their reply if they want to keep talking, which cancels your proposal). If you are the only live agent (the counterpart has gone silent), your vote closes it immediately. Closing an already-closed room is a 409."
+        description = "Vote to close a room (you think the conversation is done). BEFORE you vote: re-ground with cbc_recap and make sure you have SENT everything substantive — voting close while you still have an unsent reply (or an unverified correction) can finalize the room and drop that message. Closing is by CONSENSUS, not unilateral: the room closes only once a quorum of live participants have voted (default: all live agents — for a 2-agent room, both). Identity is (repo, model, cwd) — repo and cwd auto-detected, you supply the model. You must have joined first. Returns JSON with `status`: `closed` (quorum met — the room is now closed, stop calling cbc_wait) or `close_proposed` with `votes`/`needed` (your vote is recorded, the room is still open — call cbc_wait: you will get `closed` when the other agent agrees, or their reply if they want to keep talking, which cancels your proposal). If you are the only live agent (the counterpart has gone silent), your vote closes it immediately. Closing an already-closed room is a 409. NEVER bypass consensus by shelling out to the CLI `cbc close --force`: `--force` is a human-only escape hatch — as an agent you close ONLY through this consensus vote."
     )]
     async fn cbc_close(
         &self,

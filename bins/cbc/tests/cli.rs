@@ -957,23 +957,94 @@ fn poll_exits_on_closed_room() {
 }
 
 #[test]
-fn poll_exits_on_awaiting_counterpart_without_hanging() {
+fn poll_waits_through_awaiting_counterpart_then_delivers() {
     let base = spawn_daemon();
-    let room_id = open_room(&base, "cli poll alone");
+    let room_id = open_room(&base, "cli poll wait-through-join");
+    // Only the poller has joined, so the first wait returns awaiting_counterpart
+    // immediately (no park). The counterpart joins + sends shortly AFTER the poll
+    // starts. This proves the initiator's background poll loops THROUGH the
+    // pre-join window instead of exiting on awaiting_counterpart, and wakes on the
+    // first real message — the hands-free path that means the agent never has to
+    // ask its user "tell me when they joined".
     join(&base, &room_id, "opus47");
 
-    // A lone participant: the server returns awaiting_counterpart immediately
-    // (no park), so the poll loop must exit rather than hang.
+    let base_bg = base.clone();
+    let room_bg = room_id.clone();
+    let counterpart = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(1200));
+        join(&base_bg, &room_bg, "sonnet46");
+        send(
+            &base_bg,
+            &room_bg,
+            "sonnet46",
+            "joined late, here is the reply",
+        );
+    });
+
     let polled = Command::cargo_bin("cbc")
         .unwrap()
-        .args(["poll", &room_id, "--model", "opus47", "--as", "opus47"])
+        .args([
+            "poll",
+            &room_id,
+            "--model",
+            "opus47",
+            "--as",
+            "opus47",
+            "--join-backoff-secs",
+            "1",
+            "--max-join-wait-secs",
+            "30",
+        ])
         .env("CBC_SERVER", &base)
         .assert()
         .success();
+    counterpart.join().unwrap();
     let out = String::from_utf8(polled.get_output().stdout.clone()).unwrap();
     assert!(
-        out.contains("awaiting_counterpart"),
-        "lone-participant poll should exit with awaiting_counterpart; got:\n{out}"
+        out.contains("joined late, here is the reply"),
+        "poll must wait through awaiting_counterpart and deliver the first message; got:\n{out}"
+    );
+}
+
+#[test]
+fn poll_gives_up_after_join_wait_bound_when_no_one_joins() {
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "cli poll join-giveup");
+    join(&base, &room_id, "opus47");
+
+    // Lone participant, counterpart never joins. With a 2s join-wait bound and a
+    // 1s backoff the loop RE-CHECKS for the join (it does not exit on the first
+    // awaiting_counterpart like the old behavior), then gives up and tells the
+    // agent to re-surface the room id — never hanging on the real cap.
+    let start = Instant::now();
+    let polled = Command::cargo_bin("cbc")
+        .unwrap()
+        .args([
+            "poll",
+            &room_id,
+            "--model",
+            "opus47",
+            "--as",
+            "opus47",
+            "--join-backoff-secs",
+            "1",
+            "--max-join-wait-secs",
+            "2",
+        ])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let elapsed = start.elapsed();
+    let out = String::from_utf8(polled.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.to_lowercase().contains("room id"),
+        "join-wait give-up should tell the agent to re-surface the room id; got:\n{out}"
+    );
+    // Structurally prove the loop re-checked (did not exit on the first
+    // awaiting_counterpart): a 2s bound at 1s backoff cannot finish under a second.
+    assert!(
+        elapsed >= Duration::from_secs(1),
+        "the loop must re-check at least once before giving up; got {elapsed:?}"
     );
 }
 

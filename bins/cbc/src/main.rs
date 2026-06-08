@@ -149,6 +149,17 @@ enum Command {
         /// daemon restart / dropped long-poll). Tuning/test knob; default 2.
         #[arg(long, default_value_t = 2)]
         error_backoff_secs: u64,
+        /// Seconds between re-checks while the counterpart has not joined yet
+        /// (`awaiting_counterpart` returns instantly, so the loop backs off on its
+        /// own cadence). Joins are human-paced; default 5.
+        #[arg(long, default_value_t = 5)]
+        join_backoff_secs: u64,
+        /// Give up if no counterpart joins within this many seconds (0 = wait
+        /// forever). Lets an initiator launch the poll right after surfacing the
+        /// room id and go hands-free, while a never-pasted id still terminates.
+        /// Default 300 (5 min).
+        #[arg(long, default_value_t = 300)]
+        max_join_wait_secs: u64,
         /// Emit the delivered event as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
@@ -368,6 +379,8 @@ async fn main() -> anyhow::Result<()> {
             poll_cap_secs,
             max_polls,
             error_backoff_secs,
+            join_backoff_secs,
+            max_join_wait_secs,
             json,
         } => {
             let repo = context::detect_repo();
@@ -387,6 +400,8 @@ async fn main() -> anyhow::Result<()> {
                 poll_cap_secs,
                 max_polls,
                 error_backoff_secs,
+                join_backoff_secs,
+                max_join_wait_secs,
                 json,
             )
             .await
@@ -550,6 +565,8 @@ async fn poll_until_event(
     poll_cap_secs: u32,
     max_polls: u32,
     error_backoff_secs: u64,
+    join_backoff_secs: u64,
+    max_join_wait_secs: u64,
     json: bool,
 ) -> anyhow::Result<()> {
     const MAX_CONSECUTIVE_ERRORS: u32 = 5;
@@ -557,8 +574,15 @@ async fn poll_until_event(
     // returns `paused_by_timeout` instantly with no retry_after (belt-and-
     // suspenders alongside the poll_cap_secs clamp at the call site).
     const MIN_REPOLL_SLEEP_SECS: u64 = 1;
+    // Same floor for the join wait: `awaiting_counterpart` also returns instantly,
+    // so a 0 backoff must not turn the pre-join wait into a tight loop.
+    const MIN_JOIN_BACKOFF_SECS: u64 = 1;
+    let join_backoff_secs = join_backoff_secs.max(MIN_JOIN_BACKOFF_SECS);
     let mut empty_polls: u32 = 0;
     let mut consecutive_errors: u32 = 0;
+    // Accumulated seconds spent waiting for a counterpart to join, so the loop can
+    // give up at `max_join_wait_secs` instead of waiting on a never-pasted id.
+    let mut join_wait_secs: u64 = 0;
 
     loop {
         let resp = match client
@@ -612,6 +636,20 @@ async fn poll_until_event(
                 let sleep_secs =
                     (retry_after.map(u64::from).unwrap_or(0)).max(MIN_REPOLL_SLEEP_SECS);
                 tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
+            }
+            // The counterpart has not joined yet. The server returns this instantly
+            // (no park). Unlike `cbc wait` — which hands back to the user here — the
+            // background poll waits THROUGH the join: the agent already surfaced the
+            // room id before launching this, so we back off and re-check, waking the
+            // agent only when the counterpart actually arrives and speaks. Bounded by
+            // `max_join_wait_secs` so a never-shared id still terminates.
+            WaitResponse::Timeout { status, .. } if status == "awaiting_counterpart" => {
+                if max_join_wait_secs != 0 && join_wait_secs >= max_join_wait_secs {
+                    emit_poll_join_giveup(join_wait_secs, json);
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_secs(join_backoff_secs)).await;
+                join_wait_secs += join_backoff_secs;
             }
             // Everything else needs the agent: a terminal state, or a decision.
             WaitResponse::Timeout { status, .. } => {
@@ -683,6 +721,25 @@ fn emit_poll_giveup(polls: u32, json: bool) {
         "Gave up after {polls} empty poll(s) with no message. The conversation is still alive — \
          relaunch cbc poll to keep waiting."
     );
+}
+
+/// Print the give-up outcome when no counterpart joins within the join-wait bound.
+/// The room id was already surfaced; the agent should re-surface it and confirm
+/// the user shared it, then relaunch the poll.
+fn emit_poll_join_giveup(waited_secs: u64, json: bool) {
+    const GUIDANCE: &str = "No counterpart joined yet. Re-surface the room id to your user and \
+         confirm they pasted it to the other agent, then relaunch cbc poll to keep waiting.";
+    if json {
+        let payload = serde_json::json!({
+            "event": "awaiting_counterpart_gave_up",
+            "waited_secs": waited_secs,
+            "next": GUIDANCE,
+        });
+        println!("{payload}");
+        return;
+    }
+    println!("No counterpart joined after waiting {waited_secs}s.");
+    println!("{GUIDANCE}");
 }
 
 /// The action a waking agent should take for each non-message poll outcome,
