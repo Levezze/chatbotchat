@@ -986,7 +986,8 @@ fn poll_loops_on_timeout_then_gives_up_at_max_polls() {
 
     // No message: each 1s-capped wait returns paused_by_timeout. --max-polls 2
     // proves the loop RE-WAITS on a timeout instead of exiting on the first one,
-    // then gives up at the bound (bounded ~2s, never the real 10-min cap).
+    // then gives up at the bound (bounded ~3s, never the real 10-min cap).
+    let start = Instant::now();
     let polled = Command::cargo_bin("cbc")
         .unwrap()
         .args([
@@ -1004,9 +1005,44 @@ fn poll_loops_on_timeout_then_gives_up_at_max_polls() {
         .env("CBC_SERVER", &base)
         .assert()
         .success();
+    let elapsed = start.elapsed();
     let out = String::from_utf8(polled.get_output().stdout.clone()).unwrap();
     assert!(
         out.to_lowercase().contains("gave up"),
         "poll should loop through timeouts and report giving up at --max-polls; got:\n{out}"
     );
+    // Structurally prove the loop re-waited (not arithmetic on --max-polls alone):
+    // two ~1s-capped polls cannot complete in under a second.
+    assert!(
+        elapsed >= Duration::from_secs(1),
+        "two 1s-capped polls must take >=1s, proving the loop re-waited; got {elapsed:?}"
+    );
+}
+
+#[test]
+fn poll_bails_after_repeated_wait_errors_against_a_dead_server() {
+    // Reserve a port, then close it so every connection is refused.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let dead = format!("http://{}", listener.local_addr().expect("addr"));
+    drop(listener);
+
+    // No daemon: every `wait` errors (connection refused). With --error-backoff-secs 0
+    // the loop bails immediately after MAX_CONSECUTIVE_ERRORS and exits nonzero —
+    // proving the transient-error retry path terminates instead of looping forever
+    // (the resilience logic that is the whole point of background polling).
+    Command::cargo_bin("cbc")
+        .unwrap()
+        .args([
+            "poll",
+            "dead-room-20260101-0000",
+            "--model",
+            "opus47",
+            "--as",
+            "opus47",
+            "--error-backoff-secs",
+            "0",
+        ])
+        .env("CBC_SERVER", &dead)
+        .assert()
+        .failure();
 }

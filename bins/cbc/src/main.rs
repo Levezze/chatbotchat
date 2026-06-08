@@ -137,13 +137,18 @@ enum Command {
         #[arg(long = "as")]
         identity: Option<String>,
         /// Per-call long-poll cap (seconds): each underlying wait blocks up to
-        /// this, and the loop re-waits on a timeout. Default 50.
+        /// this, and the loop re-waits on a timeout. Clamped to [1, 590] (a 0
+        /// would make the server return instantly and the loop spin). Default 50.
         #[arg(long, default_value_t = 50)]
         poll_cap_secs: u32,
         /// Give up after this many consecutive empty polls (0 = never give up).
         /// Mainly for tests and bounded runs; background callers leave it 0.
         #[arg(long, default_value_t = 0)]
         max_polls: u32,
+        /// Seconds to wait between retries after a transient `wait` error (a
+        /// daemon restart / dropped long-poll). Tuning/test knob; default 2.
+        #[arg(long, default_value_t = 2)]
+        error_backoff_secs: u64,
         /// Emit the delivered event as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
@@ -362,11 +367,16 @@ async fn main() -> anyhow::Result<()> {
             identity,
             poll_cap_secs,
             max_polls,
+            error_backoff_secs,
             json,
         } => {
             let repo = context::detect_repo();
             let cwd = context::detect_cwd();
             let instance = context::detect_instance(identity.as_deref());
+            // Clamp the cap to [1, 590] (mirrors the MCP cbc_wait clamp): a 0 cap
+            // makes the server return instantly with no retry_after, which would
+            // otherwise spin the loop; 590 stays under the server's 600s cap.
+            let poll_cap_secs = poll_cap_secs.clamp(1, 590);
             poll_until_event(
                 &client,
                 &room_id,
@@ -376,6 +386,7 @@ async fn main() -> anyhow::Result<()> {
                 &instance,
                 poll_cap_secs,
                 max_polls,
+                error_backoff_secs,
                 json,
             )
             .await
@@ -538,9 +549,14 @@ async fn poll_until_event(
     instance: &str,
     poll_cap_secs: u32,
     max_polls: u32,
+    error_backoff_secs: u64,
     json: bool,
 ) -> anyhow::Result<()> {
     const MAX_CONSECUTIVE_ERRORS: u32 = 5;
+    // Floor between re-waits so the loop can never busy-spin even if a wait
+    // returns `paused_by_timeout` instantly with no retry_after (belt-and-
+    // suspenders alongside the poll_cap_secs clamp at the call site).
+    const MIN_REPOLL_SLEEP_SECS: u64 = 1;
     let mut empty_polls: u32 = 0;
     let mut consecutive_errors: u32 = 0;
 
@@ -560,7 +576,7 @@ async fn poll_until_event(
                         "poll: giving up after {consecutive_errors} consecutive wait errors: {e}"
                     ));
                 }
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                tokio::time::sleep(Duration::from_secs(error_backoff_secs)).await;
                 continue;
             }
         };
@@ -569,10 +585,16 @@ async fn poll_until_event(
             WaitResponse::Message {
                 message,
                 surface_to_user,
+                retry_after,
                 room_state,
-                ..
             } => {
-                emit_poll_message(&message, surface_to_user, room_state.as_deref(), json);
+                emit_poll_message(
+                    &message,
+                    surface_to_user,
+                    retry_after,
+                    room_state.as_deref(),
+                    json,
+                );
                 return Ok(());
             }
             // The only keep-waiting status: nothing addressed to us arrived yet.
@@ -585,9 +607,11 @@ async fn poll_until_event(
                     emit_poll_giveup(empty_polls, json);
                     return Ok(());
                 }
-                if let Some(secs) = retry_after {
-                    tokio::time::sleep(Duration::from_secs(secs as u64)).await;
-                }
+                // Honor the server's backoff hint, but never sleep less than the
+                // floor — a fast/zero-cap return must not turn into a tight loop.
+                let sleep_secs =
+                    (retry_after.map(u64::from).unwrap_or(0)).max(MIN_REPOLL_SLEEP_SECS);
+                tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
             }
             // Everything else needs the agent: a terminal state, or a decision.
             WaitResponse::Timeout { status, .. } => {
@@ -603,6 +627,7 @@ async fn poll_until_event(
 fn emit_poll_message(
     message: &MessageView,
     surface_to_user: bool,
+    retry_after: Option<u32>,
     room_state: Option<&str>,
     json: bool,
 ) {
@@ -611,6 +636,7 @@ fn emit_poll_message(
             "event": "message",
             "message": message,
             "surface_to_user": surface_to_user,
+            "retry_after": retry_after,
             "room_state": room_state,
             "next": POLL_REGROUND_NEXT,
         });
@@ -618,6 +644,10 @@ fn emit_poll_message(
         return;
     }
     print_message_human(message, surface_to_user, room_state);
+    // Surface the backoff hint (set for a delivered waiting_user sentinel / busy
+    // counterpart) the same way `cbc wait` does — dropping it would let a waking
+    // agent re-poll immediately instead of honoring the requested interval.
+    print_backoff(retry_after);
     println!("{POLL_REGROUND_NEXT}");
 }
 
@@ -649,7 +679,6 @@ fn emit_poll_giveup(polls: u32, json: bool) {
         println!("{payload}");
         return;
     }
-    println!("paused_by_timeout");
     println!(
         "Gave up after {polls} empty poll(s) with no message. The conversation is still alive — \
          relaunch cbc poll to keep waiting."
@@ -687,7 +716,7 @@ fn print_message_human(message: &MessageView, surface_to_user: bool, room_state:
     if let Some(rs) = room_state {
         println!(
             "[room {rs}] delivered from a {rs} room — read it; you cannot just reply. Keep \
-             polling to drain any backlog until you get status {rs}."
+             waiting/polling to drain any remaining backlog until you get status {rs}."
         );
     }
     println!("From: {}", message.from);
