@@ -42,7 +42,7 @@ async fn open_then_status_over_real_tcp() {
         .expect("open json");
 
     let room_id = open["room_id"].as_str().expect("room_id");
-    assert!(room_id.starts_with("real-tcp-test-"));
+    assert!(room_id.starts_with("cbc-real-tcp-test-"));
 
     let status: Value = client
         .get(format!("{base}/rooms/{room_id}"))
