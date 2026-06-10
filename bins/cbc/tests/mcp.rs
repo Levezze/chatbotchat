@@ -70,7 +70,7 @@ async fn mcp_lists_and_calls_open_room() {
         "open result should carry the full OpenRoomResponse shape; got: {rendered}"
     );
     assert!(
-        rendered.contains("Join CBC room mcp-smoke-"),
+        rendered.contains("Join CBC room cbc-mcp-smoke-"),
         "open result should carry the slash-free share line; got: {rendered}"
     );
     assert!(
@@ -80,7 +80,7 @@ async fn mcp_lists_and_calls_open_room() {
 
     // Extract the room id (scan from the known prefix over id-legal chars) and
     // confirm cbc_status returns the same room over MCP.
-    let start = rendered.find("mcp-smoke-").expect("room id prefix");
+    let start = rendered.find("cbc-mcp-smoke-").expect("room id prefix");
     let room_id: String = rendered[start..]
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
@@ -148,7 +148,7 @@ async fn mcp_send_and_wait_round_trip() {
         .await
         .expect("open room");
     let opened_rendered = serde_json::to_string(&opened).expect("serialize");
-    let start = opened_rendered.find("mcp-send-wait-").expect("room id");
+    let start = opened_rendered.find("cbc-mcp-send-wait-").expect("room id");
     let room_id: String = opened_rendered[start..]
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
@@ -241,7 +241,9 @@ async fn mcp_signal_and_wait_round_trip() {
         .await
         .expect("open room");
     let opened_rendered = serde_json::to_string(&opened).expect("serialize");
-    let start = opened_rendered.find("mcp-signal-wait-").expect("room id");
+    let start = opened_rendered
+        .find("cbc-mcp-signal-wait-")
+        .expect("room id");
     let room_id: String = opened_rendered[start..]
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
@@ -341,7 +343,9 @@ async fn mcp_join_room_is_idempotent_within_a_session() {
         .await
         .expect("open room");
     let opened_rendered = serde_json::to_string(&opened).expect("serialize");
-    let start = opened_rendered.find("join-idempotent-").expect("room id");
+    let start = opened_rendered
+        .find("cbc-join-idempotent-")
+        .expect("room id");
     let room_id: String = opened_rendered[start..]
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
@@ -436,7 +440,7 @@ async fn mcp_recap_is_advertised_and_returns_message_bodies() {
         .await
         .expect("open room");
     let opened_rendered = serde_json::to_string(&opened).expect("serialize");
-    let start = opened_rendered.find("mcp-recap-").expect("room id");
+    let start = opened_rendered.find("cbc-mcp-recap-").expect("room id");
     let room_id: String = opened_rendered[start..]
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
@@ -523,7 +527,7 @@ async fn mcp_recap_does_not_advance_the_read_cursor() {
         .await
         .expect("open room");
     let opened_rendered = serde_json::to_string(&opened).expect("serialize");
-    let start = opened_rendered.find("recap-cursor-").expect("room id");
+    let start = opened_rendered.find("cbc-recap-cursor-").expect("room id");
     let room_id: String = opened_rendered[start..]
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
@@ -651,7 +655,9 @@ async fn mcp_send_nudges_substance_and_wait_steers_reground() {
         .await
         .expect("open room");
     let opened_rendered = serde_json::to_string(&opened).expect("serialize");
-    let start = opened_rendered.find("mcp-reground-next-").expect("room id");
+    let start = opened_rendered
+        .find("cbc-mcp-reground-next-")
+        .expect("room id");
     let room_id: String = opened_rendered[start..]
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
