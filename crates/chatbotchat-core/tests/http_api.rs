@@ -74,7 +74,7 @@ async fn open_room_then_status_round_trips() {
     let open_body = body_json(open_resp.into_body()).await;
     let room_id = open_body["room_id"].as_str().expect("room_id present");
     assert!(
-        room_id.starts_with("slider-labels-"),
+        room_id.starts_with("cbc-slider-labels-"),
         "room id should be kebab subject + timestamp, got {room_id}"
     );
     assert_eq!(

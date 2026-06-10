@@ -1,6 +1,6 @@
 use time::OffsetDateTime;
 
-/// Derive a room id of the form `<subject-kebab>-<YYYYMMDD-HHMM>`.
+/// Derive a room id of the form `cbc-<subject-kebab>-<YYYYMMDD-HHMM>`.
 ///
 /// Pure: the timestamp is passed in so callers control it and tests stay
 /// deterministic. The slug is lowercased, non-alphanumeric runs collapse to a
@@ -17,7 +17,7 @@ pub fn room_id(subject: &str, now: OffsetDateTime) -> String {
         now.hour(),
         now.minute(),
     );
-    format!("{slug}-{stamp}")
+    format!("cbc-{slug}-{stamp}")
 }
 
 /// The line a user pastes into another agent's session to join a room.
@@ -56,7 +56,7 @@ mod tests {
     #[test]
     fn builds_kebab_plus_timestamp() {
         let now = datetime!(2026-05-28 14:23:09 UTC);
-        assert_eq!(room_id("Slider Labels", now), "slider-labels-20260528-1423");
+        assert_eq!(room_id("Slider Labels", now), "cbc-slider-labels-20260528-1423");
     }
 
     #[test]
@@ -64,14 +64,14 @@ mod tests {
         let now = datetime!(2026-01-02 03:04:00 UTC);
         assert_eq!(
             room_id("  Per-position slider labels?! ", now),
-            "per-position-slider-labels-20260102-0304"
+            "cbc-per-position-slider-labels-20260102-0304"
         );
     }
 
     #[test]
     fn empty_subject_falls_back() {
         let now = datetime!(2026-01-02 03:04:00 UTC);
-        assert_eq!(room_id("!!!", now), "room-20260102-0304");
+        assert_eq!(room_id("!!!", now), "cbc-room-20260102-0304");
     }
 
     #[test]
