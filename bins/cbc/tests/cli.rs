@@ -41,11 +41,11 @@ fn open_prints_room_id_and_share_line() {
 
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(
-        stdout.contains("cli-smoke-"),
+        stdout.contains("cbc-cli-smoke-"),
         "open stdout should contain the room id; got:\n{stdout}"
     );
     assert!(
-        stdout.contains("Join CBC room cli-smoke-"),
+        stdout.contains("Join CBC room cbc-cli-smoke-"),
         "open stdout should contain the slash-free share line; got:\n{stdout}"
     );
     assert!(
@@ -479,7 +479,7 @@ fn status_reports_open_room() {
     let open_out = String::from_utf8(open.get_output().stdout.clone()).unwrap();
     let room_id = open_out
         .split_whitespace()
-        .find(|tok| tok.starts_with("status-check-"))
+        .find(|tok| tok.starts_with("cbc-status-check-"))
         .expect("room id in open output")
         .to_string();
 
