@@ -165,6 +165,22 @@ enum Command {
         /// Default 300 (5 min).
         #[arg(long, default_value_t = 300)]
         max_join_wait_secs: u64,
+        /// Seconds between re-checks while a counterpart that HAD joined has gone
+        /// silent (`counterpart_stale`, >15 min with no poll). The poll holds the
+        /// line at this slower cadence instead of stopping — a quiet counterpart
+        /// is usually an idle session that will resume, not a dead one. Larger
+        /// than `join_backoff_secs` on purpose (the counterpart is away, not
+        /// arriving). Default 30.
+        #[arg(long, default_value_t = 30)]
+        stale_backoff_secs: u64,
+        /// Give up holding once a stale counterpart stays silent this many seconds
+        /// (measured from when it first went stale). Then the poll surfaces so the
+        /// agent can tell its user the counterpart is unresponsive. Unlike the
+        /// join wait, holding here refreshes the poller's own liveness each cycle,
+        /// so there is no sole-participant stale cap to stay under. `0` means hold
+        /// indefinitely. Default 900 (15 min).
+        #[arg(long, default_value_t = 900)]
+        max_stale_wait_secs: u64,
         /// Emit the delivered event as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
@@ -207,6 +223,19 @@ enum Command {
         /// agree or keep talking). Use `--force` to unilaterally end a room.
         #[arg(long)]
         force: bool,
+    },
+    /// Vote to extend the room's message cap by +10 (consensus extend); repo and
+    /// cwd are auto-detected. Like close, it is a vote: the cap bumps only once a
+    /// quorum of live participants have voted. Repeatable (10 -> 20 -> 30 …).
+    Extend {
+        /// Room id whose cap to extend.
+        room_id: String,
+        /// Self-declared model name (your identity; e.g. opus47).
+        #[arg(long)]
+        model: String,
+        /// Optional identity label (see `join --as`); pass the value you joined with.
+        #[arg(long = "as")]
+        identity: Option<String>,
     },
     /// Pause a room; repo and cwd are auto-detected.
     Pause {
@@ -386,6 +415,8 @@ async fn main() -> anyhow::Result<()> {
             error_backoff_secs,
             join_backoff_secs,
             max_join_wait_secs,
+            stale_backoff_secs,
+            max_stale_wait_secs,
             json,
         } => {
             let repo = context::detect_repo();
@@ -410,6 +441,8 @@ async fn main() -> anyhow::Result<()> {
                 error_backoff_secs,
                 join_backoff_secs,
                 max_join_wait_secs,
+                stale_backoff_secs,
+                max_stale_wait_secs,
                 json,
             )
             .await
@@ -493,6 +526,34 @@ async fn main() -> anyhow::Result<()> {
                     );
                 }
                 _ => println!("State: {}", resp.state),
+            }
+        }
+        Command::Extend {
+            room_id,
+            model,
+            identity,
+        } => {
+            let repo = context::detect_repo();
+            let cwd = context::detect_cwd();
+            let instance = context::detect_instance(identity.as_deref());
+            let resp = client
+                .extend(&room_id, &repo, &model, &cwd, &instance)
+                .await
+                .context("extending room cap")?;
+            match resp.status.as_str() {
+                "extend_proposed" => {
+                    let have = resp.votes.unwrap_or(0);
+                    let need = resp.needed.unwrap_or(0);
+                    println!(
+                        "Extend proposed ({have}/{need}) — waiting for the other agent to agree. \
+                         They will see it on their next wait and can agree (cbc extend) to bump \
+                         the cap by +10."
+                    );
+                }
+                _ => match resp.hard_cap {
+                    Some(cap) => println!("Cap extended — hard cap is now {cap}."),
+                    None => println!("Cap extended."),
+                },
             }
         }
         Command::Pause {
@@ -583,6 +644,172 @@ fn effective_max_join_wait(secs: u64) -> u64 {
 /// it sees a single wake carrying the payload rather than a stream of empty
 /// polls. Transient `wait` errors (a daemon restart, a dropped long-poll) are
 /// retried with a short backoff; the loop fails only after several in a row.
+// Floor between re-waits so the loop can never busy-spin even if a wait returns
+// `paused_by_timeout` instantly with no retry_after (belt-and-suspenders
+// alongside the poll_cap_secs clamp at the call site).
+const MIN_REPOLL_SLEEP_SECS: u64 = 1;
+// Same floor for the join/stale backoffs: `awaiting_counterpart` and
+// `counterpart_stale` both return instantly, so a 0 backoff must not turn the
+// re-check into a tight loop.
+const MIN_BACKOFF_SECS: u64 = 1;
+
+/// Mutable bookkeeping + resolved knobs threaded through [`poll_decision`], so
+/// the loop's control flow is a pure function of (wait result, accumulated
+/// state) and can be unit-tested without a live server. Config fields are the
+/// already-clamped CLI knobs; the rest are counters that accumulate across polls.
+struct PollState {
+    // Resolved config.
+    max_polls: u32,
+    join_backoff_secs: u64,
+    max_join_wait_secs: u64,
+    stale_backoff_secs: u64,
+    max_stale_wait_secs: u64,
+    // Counters.
+    empty_polls: u32,
+    join_wait_secs: u64,
+    stale_wait_secs: u64,
+    /// Whether the one-time "counterpart quiet, holding the line" heads-up has
+    /// already been emitted for the current stale spell (reset when the
+    /// counterpart returns), so it fires once per spell, not every cycle.
+    stale_announced: bool,
+}
+
+impl PollState {
+    fn new(
+        max_polls: u32,
+        join_backoff_secs: u64,
+        max_join_wait_secs: u64,
+        stale_backoff_secs: u64,
+        max_stale_wait_secs: u64,
+    ) -> Self {
+        PollState {
+            max_polls,
+            join_backoff_secs: join_backoff_secs.max(MIN_BACKOFF_SECS),
+            max_join_wait_secs,
+            stale_backoff_secs: stale_backoff_secs.max(MIN_BACKOFF_SECS),
+            max_stale_wait_secs,
+            empty_polls: 0,
+            join_wait_secs: 0,
+            stale_wait_secs: 0,
+            stale_announced: false,
+        }
+    }
+
+    /// Clear stale tracking once the counterpart is no longer dark, so a peer
+    /// that flaps stale -> active -> stale gets a fresh hold budget and a fresh
+    /// heads-up each spell rather than tripping the give-up early.
+    fn clear_stale(&mut self) {
+        self.stale_wait_secs = 0;
+        self.stale_announced = false;
+    }
+}
+
+/// What [`poll_until_event`] should do with one wait result. Pure: derived only
+/// from the response and the accumulated [`PollState`], with no I/O — so the
+/// keep-waiting / give-up / hand-back control flow is unit-testable.
+#[derive(Debug, PartialEq, Eq)]
+enum PollAction {
+    /// A real message arrived — emit it and exit.
+    Deliver,
+    /// A terminal room state or a decision-needed status (close_proposed /
+    /// extend_proposed) — emit it and exit so the agent acts.
+    ExitStatus,
+    /// A bounded poll exhausted its `--max-polls` budget with no message.
+    GiveUpEmpty,
+    /// No counterpart joined within the join-wait bound.
+    GiveUpJoin,
+    /// A stale counterpart stayed silent past the hold window.
+    GiveUpStale,
+    /// Keep waiting: sleep `secs`, then re-poll. `announce_stale` prints the
+    /// one-time hold heads-up before sleeping.
+    Wait { secs: u64, announce_stale: bool },
+}
+
+/// Decide the next step for one `cbc poll` wait result, mutating the counters in
+/// `st`. Mirrors the wake semantics the CBC guidance promises: a message or a
+/// decision/terminal status hands back to the agent; a missing counterpart
+/// (`awaiting_counterpart`) or a quiet one (`counterpart_stale`) is HELD — the
+/// poll keeps the line, never bouncing the turn back to the user — each bounded
+/// by its own wait window.
+fn poll_decision(resp: &WaitResponse, st: &mut PollState) -> PollAction {
+    match resp {
+        WaitResponse::Message { .. } => {
+            st.clear_stale();
+            PollAction::Deliver
+        }
+        WaitResponse::Timeout {
+            status,
+            retry_after,
+        } => match status.as_str() {
+            // Nothing addressed to us arrived yet — the only plain keep-waiting status.
+            "paused_by_timeout" => {
+                st.clear_stale();
+                st.empty_polls += 1;
+                if st.max_polls != 0 && st.empty_polls >= st.max_polls {
+                    return PollAction::GiveUpEmpty;
+                }
+                // Honor the server's backoff hint, but never sleep less than the
+                // floor — a fast/zero-cap return must not turn into a tight loop.
+                let secs = retry_after
+                    .map(u64::from)
+                    .unwrap_or(0)
+                    .max(MIN_REPOLL_SLEEP_SECS);
+                PollAction::Wait {
+                    secs,
+                    announce_stale: false,
+                }
+            }
+            // The counterpart has not joined yet (server returns this instantly, no
+            // park). Unlike `cbc wait` — which hands back to the user here — the
+            // background poll waits THROUGH the join: the id was already surfaced,
+            // so back off and re-check. Bounded so a never-shared id still terminates.
+            "awaiting_counterpart" => {
+                if st.max_join_wait_secs != 0 && st.join_wait_secs >= st.max_join_wait_secs {
+                    return PollAction::GiveUpJoin;
+                }
+                let secs = st.join_backoff_secs;
+                st.join_wait_secs += secs;
+                PollAction::Wait {
+                    secs,
+                    announce_stale: false,
+                }
+            }
+            // A counterpart that HAD joined has gone silent (>15 min). This is NOT a
+            // stop: a quiet peer is usually an idle session that will resume. Hold
+            // the line at the slower stale cadence, refreshing our own liveness each
+            // cycle (the wait path touches last_poll_at), and surface only after the
+            // hold window. One heads-up per spell so a watching human knows.
+            "counterpart_stale" => {
+                if st.max_stale_wait_secs != 0 && st.stale_wait_secs >= st.max_stale_wait_secs {
+                    return PollAction::GiveUpStale;
+                }
+                let announce_stale = !st.stale_announced;
+                st.stale_announced = true;
+                let secs = st.stale_backoff_secs;
+                st.stale_wait_secs += secs;
+                PollAction::Wait {
+                    secs,
+                    announce_stale,
+                }
+            }
+            // Everything else needs the agent: a terminal state, or a decision
+            // (close_proposed / extend_proposed). Hand back so it can act/vote.
+            _ => PollAction::ExitStatus,
+        },
+    }
+}
+
+/// The deterministic, background-friendly poll loop behind `cbc poll`. It
+/// long-polls in `poll_cap_secs` chunks and returns only on a meaningful event —
+/// a delivered message, a terminal room state, or a state needing a decision
+/// (`close_proposed` / `extend_proposed`). It loops internally on
+/// `paused_by_timeout` (honoring any server `retry_after`), waits THROUGH a
+/// not-yet-joined counterpart (`awaiting_counterpart`), and HOLDS through a quiet
+/// one (`counterpart_stale`) at a slower cadence — so the agent driving it sees a
+/// single wake carrying the payload rather than a stream of empty polls or a
+/// premature hand-back. Transient `wait` errors are retried with a short backoff;
+/// the loop fails only after several in a row. Control flow lives in the pure
+/// [`poll_decision`]; this body owns only the I/O and the side effects.
 #[allow(clippy::too_many_arguments)]
 async fn poll_until_event(
     client: &HttpClient,
@@ -596,22 +823,19 @@ async fn poll_until_event(
     error_backoff_secs: u64,
     join_backoff_secs: u64,
     max_join_wait_secs: u64,
+    stale_backoff_secs: u64,
+    max_stale_wait_secs: u64,
     json: bool,
 ) -> anyhow::Result<()> {
     const MAX_CONSECUTIVE_ERRORS: u32 = 5;
-    // Floor between re-waits so the loop can never busy-spin even if a wait
-    // returns `paused_by_timeout` instantly with no retry_after (belt-and-
-    // suspenders alongside the poll_cap_secs clamp at the call site).
-    const MIN_REPOLL_SLEEP_SECS: u64 = 1;
-    // Same floor for the join wait: `awaiting_counterpart` also returns instantly,
-    // so a 0 backoff must not turn the pre-join wait into a tight loop.
-    const MIN_JOIN_BACKOFF_SECS: u64 = 1;
-    let join_backoff_secs = join_backoff_secs.max(MIN_JOIN_BACKOFF_SECS);
-    let mut empty_polls: u32 = 0;
     let mut consecutive_errors: u32 = 0;
-    // Accumulated seconds spent waiting for a counterpart to join, so the loop can
-    // give up at `max_join_wait_secs` instead of waiting on a never-pasted id.
-    let mut join_wait_secs: u64 = 0;
+    let mut st = PollState::new(
+        max_polls,
+        join_backoff_secs,
+        max_join_wait_secs,
+        stale_backoff_secs,
+        max_stale_wait_secs,
+    );
 
     loop {
         let resp = match client
@@ -634,56 +858,51 @@ async fn poll_until_event(
             }
         };
 
-        match resp {
-            WaitResponse::Message {
-                message,
-                surface_to_user,
-                retry_after,
-                room_state,
-            } => {
-                emit_poll_message(
-                    &message,
+        match poll_decision(&resp, &mut st) {
+            PollAction::Deliver => {
+                if let WaitResponse::Message {
+                    message,
                     surface_to_user,
                     retry_after,
-                    room_state.as_deref(),
-                    json,
-                );
+                    room_state,
+                } = &resp
+                {
+                    emit_poll_message(
+                        message,
+                        *surface_to_user,
+                        *retry_after,
+                        room_state.as_deref(),
+                        json,
+                    );
+                }
                 return Ok(());
             }
-            // The only keep-waiting status: nothing addressed to us arrived yet.
-            WaitResponse::Timeout {
-                status,
-                retry_after,
-            } if status == "paused_by_timeout" => {
-                empty_polls += 1;
-                if max_polls != 0 && empty_polls >= max_polls {
-                    emit_poll_giveup(empty_polls, json);
-                    return Ok(());
+            PollAction::ExitStatus => {
+                if let WaitResponse::Timeout { status, .. } = &resp {
+                    emit_poll_status(status, json);
                 }
-                // Honor the server's backoff hint, but never sleep less than the
-                // floor — a fast/zero-cap return must not turn into a tight loop.
-                let sleep_secs =
-                    (retry_after.map(u64::from).unwrap_or(0)).max(MIN_REPOLL_SLEEP_SECS);
-                tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
-            }
-            // The counterpart has not joined yet. The server returns this instantly
-            // (no park). Unlike `cbc wait` — which hands back to the user here — the
-            // background poll waits THROUGH the join: the agent already surfaced the
-            // room id before launching this, so we back off and re-check, waking the
-            // agent only when the counterpart actually arrives and speaks. Bounded by
-            // `max_join_wait_secs` so a never-shared id still terminates.
-            WaitResponse::Timeout { status, .. } if status == "awaiting_counterpart" => {
-                if max_join_wait_secs != 0 && join_wait_secs >= max_join_wait_secs {
-                    emit_poll_join_giveup(join_wait_secs, json);
-                    return Ok(());
-                }
-                tokio::time::sleep(Duration::from_secs(join_backoff_secs)).await;
-                join_wait_secs += join_backoff_secs;
-            }
-            // Everything else needs the agent: a terminal state, or a decision.
-            WaitResponse::Timeout { status, .. } => {
-                emit_poll_status(&status, json);
                 return Ok(());
+            }
+            PollAction::GiveUpEmpty => {
+                emit_poll_giveup(st.empty_polls, json);
+                return Ok(());
+            }
+            PollAction::GiveUpJoin => {
+                emit_poll_join_giveup(st.join_wait_secs, json);
+                return Ok(());
+            }
+            PollAction::GiveUpStale => {
+                emit_poll_stale_giveup(st.stale_wait_secs, json);
+                return Ok(());
+            }
+            PollAction::Wait {
+                secs,
+                announce_stale,
+            } => {
+                if announce_stale {
+                    emit_poll_stale_heads_up(st.max_stale_wait_secs);
+                }
+                tokio::time::sleep(Duration::from_secs(secs)).await;
             }
         }
     }
@@ -771,6 +990,46 @@ fn emit_poll_join_giveup(waited_secs: u64, json: bool) {
     println!("{GUIDANCE}");
 }
 
+/// One-time, non-blocking notice (to stderr, so it never pollutes the single
+/// stdout event a `--json` consumer parses) that the poll has started holding the
+/// line through a quiet counterpart. The background-task agent only reads stdout
+/// on completion, so this is for a human tailing the poll — it requires no action.
+fn emit_poll_stale_heads_up(hold_secs: u64) {
+    if hold_secs == 0 {
+        eprintln!(
+            "[counterpart quiet] The other agent has gone silent (>15 min). Holding the line at a \
+             slower cadence — not a stop. No action needed; the poll keeps waiting."
+        );
+    } else {
+        eprintln!(
+            "[counterpart quiet] The other agent has gone silent (>15 min). Holding the line at a \
+             slower cadence for up to ~{hold_secs}s before surfacing — not a stop. No action \
+             needed; the poll keeps waiting."
+        );
+    }
+}
+
+/// Print the give-up outcome when a stale counterpart stays silent through the
+/// whole hold window. The room is not necessarily dead — the agent surfaces a
+/// heads-up and may relaunch the poll to keep holding, or move on.
+fn emit_poll_stale_giveup(waited_secs: u64, json: bool) {
+    const GUIDANCE: &str =
+        "The counterpart stayed silent through the stale-hold window. Give your \
+         user a one-line heads-up that the other agent is unresponsive; you may relaunch cbc poll \
+         to keep holding, or move on. Do not assume the room is dead.";
+    if json {
+        let payload = serde_json::json!({
+            "event": "counterpart_stale_gave_up",
+            "waited_secs": waited_secs,
+            "next": GUIDANCE,
+        });
+        println!("{payload}");
+        return;
+    }
+    println!("Counterpart still silent after holding {waited_secs}s.");
+    println!("{GUIDANCE}");
+}
+
 /// The action a waking agent should take for each non-message poll outcome,
 /// kept in lockstep with the MCP `wait_next` guidance so both surfaces agree.
 fn poll_status_guidance(status: &str) -> &'static str {
@@ -787,9 +1046,17 @@ fn poll_status_guidance(status: &str) -> &'static str {
              call cbc_close to agree; if you have more to say, cbc_send (which cancels the \
              proposal)."
         }
+        "extend_proposed" => {
+            "The other agent proposed extending the message cap (+10). If you also want to keep \
+             going, call cbc_extend to agree — the cap bumps once you both vote; if you would \
+             rather wrap up, cbc_close or just keep talking."
+        }
+        // The poll loop now HOLDS through `counterpart_stale` (see poll_decision),
+        // so this arm is unreachable via `cbc poll` — kept only for parity with the
+        // MCP `wait_next` mapping, which the direct `cbc_wait` path still uses.
         "counterpart_stale" => {
-            "The other agent has gone silent (>15 min with no poll). Stop polling and tell your \
-             user the counterpart is unresponsive."
+            "The other agent has gone quiet (>15 min with no poll). This is not a stop: give your \
+             user a one-line heads-up and keep the (slower) poll alive — it usually resumes."
         }
         "paused" => "The room is paused. Stop polling — it needs an explicit cbc_wake to resume.",
         "closed" | "archived" => "The room is over. Stop polling.",
@@ -819,6 +1086,11 @@ fn print_message_human(message: &MessageView, surface_to_user: bool, room_state:
         }
         if let Some(q) = &message.question_text {
             println!("Asking its user: {q}");
+        }
+        // An `extend` notice carries its meaning in the body (e.g. "cap extended
+        // to 20"); surface it rather than just the bare signal type.
+        if message.msg_type == "extend" && !message.body.is_empty() {
+            println!("{}", message.body);
         }
     } else {
         println!("Body: {}", message.body);
@@ -931,6 +1203,195 @@ mod tests {
         assert_eq!(
             effective_max_join_wait(SAFE_JOIN_WAIT_CAP_SECS),
             SAFE_JOIN_WAIT_CAP_SECS
+        );
+    }
+
+    // --- poll_decision: the pure control flow behind `cbc poll` ---
+
+    fn timeout(status: &str) -> WaitResponse {
+        WaitResponse::Timeout {
+            status: status.to_string(),
+            retry_after: None,
+        }
+    }
+
+    fn a_message() -> WaitResponse {
+        WaitResponse::Message {
+            message: MessageView {
+                seq: 1,
+                from: "peer".into(),
+                to: None,
+                body: "hi".into(),
+                created_at: "2026-06-10T00:00:00Z".into(),
+                msg_type: "msg".into(),
+                severity: None,
+                question_text: None,
+            },
+            surface_to_user: false,
+            retry_after: None,
+            room_state: None,
+        }
+    }
+
+    /// Default knobs: never-give-up on empty polls, 5s join backoff, 30s stale
+    /// backoff, 900s stale window, 300s join window — the CLI defaults.
+    fn state() -> PollState {
+        PollState::new(0, 5, 300, 30, 900)
+    }
+
+    #[test]
+    fn a_message_is_delivered() {
+        assert_eq!(
+            poll_decision(&a_message(), &mut state()),
+            PollAction::Deliver
+        );
+    }
+
+    #[test]
+    fn a_decision_or_terminal_status_hands_back() {
+        for status in [
+            "close_proposed",
+            "extend_proposed",
+            "closed",
+            "paused",
+            "archived",
+            "something_unknown",
+        ] {
+            assert_eq!(
+                poll_decision(&timeout(status), &mut state()),
+                PollAction::ExitStatus,
+                "{status} should hand back to the agent"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quiet_counterpart_is_held_not_stopped() {
+        let mut st = state();
+        // First stale tick: hold at the slower cadence, announce once.
+        assert_eq!(
+            poll_decision(&timeout("counterpart_stale"), &mut st),
+            PollAction::Wait {
+                secs: 30,
+                announce_stale: true
+            }
+        );
+        // Subsequent ticks keep holding but do not re-announce.
+        assert_eq!(
+            poll_decision(&timeout("counterpart_stale"), &mut st),
+            PollAction::Wait {
+                secs: 30,
+                announce_stale: false
+            }
+        );
+        assert_eq!(st.stale_wait_secs, 60);
+    }
+
+    #[test]
+    fn a_stale_hold_gives_up_only_past_the_window() {
+        // A 60s window at 30s cadence: hold, hold, then give up.
+        let mut st = PollState::new(0, 5, 300, 30, 60);
+        assert!(matches!(
+            poll_decision(&timeout("counterpart_stale"), &mut st),
+            PollAction::Wait { .. }
+        ));
+        assert!(matches!(
+            poll_decision(&timeout("counterpart_stale"), &mut st),
+            PollAction::Wait { .. }
+        ));
+        assert_eq!(
+            poll_decision(&timeout("counterpart_stale"), &mut st),
+            PollAction::GiveUpStale
+        );
+    }
+
+    #[test]
+    fn a_zero_stale_window_holds_indefinitely() {
+        let mut st = PollState::new(0, 5, 300, 30, 0);
+        for _ in 0..100 {
+            assert!(matches!(
+                poll_decision(&timeout("counterpart_stale"), &mut st),
+                PollAction::Wait { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn a_returning_counterpart_resets_the_stale_hold() {
+        let mut st = state();
+        // Accrue some stale time + the announce flag.
+        poll_decision(&timeout("counterpart_stale"), &mut st);
+        poll_decision(&timeout("counterpart_stale"), &mut st);
+        assert!(st.stale_announced && st.stale_wait_secs > 0);
+        // The peer comes back (a normal empty poll) — stale tracking clears...
+        poll_decision(&timeout("paused_by_timeout"), &mut st);
+        assert!(!st.stale_announced && st.stale_wait_secs == 0);
+        // ...so a fresh spell announces again with a full budget.
+        assert_eq!(
+            poll_decision(&timeout("counterpart_stale"), &mut st),
+            PollAction::Wait {
+                secs: 30,
+                announce_stale: true
+            }
+        );
+    }
+
+    #[test]
+    fn awaiting_counterpart_is_held_until_the_join_bound() {
+        // 10s join window at 5s backoff: hold, hold, then give up on the join.
+        let mut st = PollState::new(0, 5, 10, 30, 900);
+        assert_eq!(
+            poll_decision(&timeout("awaiting_counterpart"), &mut st),
+            PollAction::Wait {
+                secs: 5,
+                announce_stale: false
+            }
+        );
+        assert!(matches!(
+            poll_decision(&timeout("awaiting_counterpart"), &mut st),
+            PollAction::Wait { .. }
+        ));
+        assert_eq!(
+            poll_decision(&timeout("awaiting_counterpart"), &mut st),
+            PollAction::GiveUpJoin
+        );
+    }
+
+    #[test]
+    fn empty_polls_keep_waiting_until_the_max_polls_bound() {
+        // max_polls = 2: one keep-waiting, then give up.
+        let mut st = PollState::new(2, 5, 300, 30, 900);
+        assert_eq!(
+            poll_decision(&timeout("paused_by_timeout"), &mut st),
+            PollAction::Wait {
+                secs: MIN_REPOLL_SLEEP_SECS,
+                announce_stale: false
+            }
+        );
+        assert_eq!(
+            poll_decision(&timeout("paused_by_timeout"), &mut st),
+            PollAction::GiveUpEmpty
+        );
+    }
+
+    #[test]
+    fn a_zero_backoff_never_tight_loops() {
+        // A 0 join/stale backoff is floored to MIN_BACKOFF_SECS so the re-check
+        // cannot busy-spin on the instant-return statuses.
+        let mut st = PollState::new(0, 0, 300, 0, 900);
+        assert_eq!(
+            poll_decision(&timeout("awaiting_counterpart"), &mut st),
+            PollAction::Wait {
+                secs: MIN_BACKOFF_SECS,
+                announce_stale: false
+            }
+        );
+        assert_eq!(
+            poll_decision(&timeout("counterpart_stale"), &mut st),
+            PollAction::Wait {
+                secs: MIN_BACKOFF_SECS,
+                announce_stale: true
+            }
         );
     }
 }

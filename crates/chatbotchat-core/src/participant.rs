@@ -34,4 +34,12 @@ pub struct Participant {
     /// participant sends a conversational message — a deterministic "continue".
     /// `None` means no pending vote.
     pub wants_close_at: Option<OffsetDateTime>,
+    /// Pending vote to extend the message cap (consensus extend, `cbc_extend`).
+    /// `Some(ts)` means this participant voted to raise the hard cap by +10; the
+    /// cap bumps once a quorum of live participants have voted, at which point all
+    /// extend votes clear. Unlike `wants_close_at`, a conversational message does
+    /// NOT clear it — wanting to extend and continuing to talk are not opposites,
+    /// and clearing on send would wipe a proposal before the counterpart saw it.
+    /// `None` means no pending vote.
+    pub wants_extend_at: Option<OffsetDateTime>,
 }

@@ -957,6 +957,75 @@ fn poll_exits_on_closed_room() {
 }
 
 #[test]
+fn poll_wakes_on_an_extend_proposal() {
+    // The F1×F2 composition guard. F1 makes a background `cbc poll` the default
+    // wait after every send; F2 surfaces a cap-extend as `extend_proposed`. If the
+    // poll did not treat that as exit-for-decision (like close_proposed), a parked
+    // counterpart would never wake to vote and the cap would never bump — F2 would
+    // silently not work under F1's own default. This pins that they compose.
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "cli poll extend");
+    join(&base, &room_id, "opus47");
+    join(&base, &room_id, "opus48");
+
+    // Agent A proposes an extend — with a live counterpart this is a proposal.
+    Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["extend", &room_id, "--model", "opus47", "--as", "opus47"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+
+    // Agent B's background poll must WAKE on the pending proposal and exit so B can
+    // decide, rather than swallowing it.
+    let polled = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["poll", &room_id, "--model", "opus48", "--as", "opus48"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(polled.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("extend_proposed"),
+        "the background poll must surface a pending extend proposal so B can vote; got:\n{out}"
+    );
+}
+
+#[test]
+fn extend_is_consensus_then_both_agents_agree_over_cli() {
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "cli extend");
+    join(&base, &room_id, "opus47");
+    join(&base, &room_id, "opus48");
+
+    // Agent A votes to extend — with a live counterpart this is a PROPOSAL.
+    let proposed = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["extend", &room_id, "--model", "opus47", "--as", "opus47"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(proposed.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("Extend proposed (1/2)"),
+        "one of two live agents extending is a proposal; got:\n{out}"
+    );
+
+    // Agent B agrees — quorum met, the cap bumps by +10 (10 → 20).
+    let extended = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["extend", &room_id, "--model", "opus48", "--as", "opus48"])
+        .env("CBC_SERVER", &base)
+        .assert()
+        .success();
+    let out = String::from_utf8(extended.get_output().stdout.clone()).unwrap();
+    assert!(
+        out.contains("hard cap is now 20"),
+        "the second agent's vote should bump the cap to 20; got:\n{out}"
+    );
+}
+
+#[test]
 fn poll_requires_an_explicit_identity() {
     // `cbc poll` owns the read cursor, so it MUST share one identity with the
     // agent's MCP join/send. A missing `--as` would fall back to a per-process

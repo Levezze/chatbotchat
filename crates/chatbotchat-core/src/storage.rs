@@ -118,8 +118,8 @@ impl Storage {
 
         sqlx::query(
             "INSERT INTO participants \
-             (handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname, wants_close_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname, wants_close_at, wants_extend_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&p.handle)
         .bind(&p.room_id)
@@ -133,6 +133,12 @@ impl Storage {
         .bind(&p.nickname)
         .bind(
             p.wants_close_at
+                .map(|ts| ts.format(&Rfc3339))
+                .transpose()
+                .map_err(fmt_err)?,
+        )
+        .bind(
+            p.wants_extend_at
                 .map(|ts| ts.format(&Rfc3339))
                 .transpose()
                 .map_err(fmt_err)?,
@@ -188,6 +194,56 @@ impl Storage {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Record (or clear) a participant's pending extend vote. Consensus extend: the
+    /// hard cap bumps by +10 only once a quorum of live participants have a non-NULL
+    /// `wants_extend_at`. Passing `None` retracts the vote. Unlike a close vote, a
+    /// conversational message does NOT clear this (see `Participant::wants_extend_at`).
+    pub async fn set_extend_vote(
+        &self,
+        handle: &str,
+        at: Option<OffsetDateTime>,
+    ) -> Result<(), StorageError> {
+        let ts = at
+            .map(|t| t.format(&Rfc3339))
+            .transpose()
+            .map_err(fmt_err)?;
+        sqlx::query("UPDATE participants SET wants_extend_at = ? WHERE handle = ?")
+            .bind(ts)
+            .bind(handle)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Clear every pending extend vote in a room. Called only after an extend
+    /// actually lands (the cap bumped) — extend votes do not clear on a message.
+    pub async fn clear_extend_votes(&self, room_id: &str) -> Result<(), StorageError> {
+        sqlx::query("UPDATE participants SET wants_extend_at = NULL WHERE room_id = ?")
+            .bind(room_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Atomically raise a room's hard message cap by `by` and return the new cap.
+    /// Consensus extend (`cbc_extend`) bumps it by +10 each time both agents agree.
+    /// The cap lives inside the JSON `config` column, so the increment uses SQLite's
+    /// `json_set`/`json_extract` in a single `UPDATE ... RETURNING` statement — atomic,
+    /// so concurrent extends cannot lose an increment.
+    pub async fn bump_hard_cap(&self, room_id: &str, by: u32) -> Result<u32, StorageError> {
+        let new_cap: i64 = sqlx::query_scalar(
+            "UPDATE rooms \
+             SET config = json_set(config, '$.hard_cap', json_extract(config, '$.hard_cap') + ?) \
+             WHERE id = ? \
+             RETURNING json_extract(config, '$.hard_cap')",
+        )
+        .bind(by as i64)
+        .bind(room_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(new_cap as u32)
     }
 
     /// Append a `msg` to a room. Returns the persisted message with its assigned
@@ -630,7 +686,7 @@ impl Storage {
         instance: &str,
     ) -> Result<Option<Participant>, StorageError> {
         let row = sqlx::query(
-            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname, wants_close_at \
+            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname, wants_close_at, wants_extend_at \
              FROM participants \
              WHERE room_id = ? AND instance = ?",
         )
@@ -656,7 +712,7 @@ impl Storage {
         cwd: &str,
     ) -> Result<Option<Participant>, StorageError> {
         let row = sqlx::query(
-            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname, wants_close_at \
+            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname, wants_close_at, wants_extend_at \
              FROM participants \
              WHERE room_id = ? AND repo = ? AND model = ? AND cwd = ?",
         )
@@ -675,7 +731,7 @@ impl Storage {
 
     pub async fn list_participants(&self, room_id: &str) -> Result<Vec<Participant>, StorageError> {
         let rows = sqlx::query(
-            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname, wants_close_at \
+            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname, wants_close_at, wants_extend_at \
              FROM participants WHERE room_id = ? ORDER BY joined_at",
         )
         .bind(room_id)
@@ -916,6 +972,10 @@ fn row_to_participant(row: &sqlx::sqlite::SqliteRow) -> Result<Participant, Stor
         nickname: row.try_get("nickname")?,
         wants_close_at: row
             .try_get::<Option<String>, _>("wants_close_at")?
+            .map(|s| parse_ts(&s))
+            .transpose()?,
+        wants_extend_at: row
+            .try_get::<Option<String>, _>("wants_extend_at")?
             .map(|s| parse_ts(&s))
             .transpose()?,
     })

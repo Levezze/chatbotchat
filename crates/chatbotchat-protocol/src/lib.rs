@@ -170,6 +170,39 @@ pub struct LifecycleResponse {
     pub needed: Option<u32>,
 }
 
+/// Request body for `POST /rooms/:id/extend`. Identity is the `(repo, model,
+/// cwd)` tuple (same as send/close — the caller must already be a participant).
+/// Extending takes no parameters beyond identity: the step is a fixed +10 and
+/// there is no force escape hatch (extending only raises a cap, so consensus is
+/// the whole point — a unilateral bump would be meaningless).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtendRequest {
+    pub repo: String,
+    pub model: String,
+    pub cwd: String,
+    /// Identity key — same resolution as `JoinRoomRequest::instance`.
+    #[serde(default)]
+    pub instance: String,
+}
+
+/// Response body for `POST /rooms/:id/extend`. `status` is `"extended"` (quorum
+/// met — the hard cap bumped, `hard_cap` carries the new value) or
+/// `"extend_proposed"` (the vote is recorded, the room is unchanged, `votes`/
+/// `needed` show progress toward quorum). Mirrors the consensus shape of
+/// `LifecycleResponse` for close.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtendResponse {
+    pub state: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub votes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needed: Option<u32>,
+    /// The new hard cap after a successful extend; `None` while merely proposed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hard_cap: Option<u32>,
+}
+
 /// Query parameters for `GET /rooms/:id/wait`. Same tuple identity as send.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WaitRequest {
@@ -210,10 +243,12 @@ pub struct WaitRequest {
 /// `awaiting_counterpart` is a distinct, NON-terminal status: the caller is the
 /// only participant — no second agent has joined yet — so the server returns
 /// immediately instead of long-polling for someone who has not been told the room
-/// id. It means "stop polling now, surface the room id to your user and end your
-/// turn; resume `cbc_wait` once the other agent joins." It is neither a re-poll
-/// signal (do not tight-loop) nor terminal (do not abandon the room). Carries no
-/// `retry_after` (there is no counterpart to back off behind).
+/// id. It is NOT a hand-back: the background `cbc poll` waits THROUGH the join
+/// (backing off and re-checking) so the agent surfaces the room id once and stays
+/// hands-free; only the direct `cbc_wait` path re-calls after a short backoff. It
+/// is neither a re-poll-immediately signal (do not tight-loop) nor terminal (do
+/// not abandon the room). Carries no `retry_after` (no counterpart to back off
+/// behind).
 /// `skip_serializing_if` keeps it *off the wire* — not `null` — when the
 /// counterpart is neither paused nor busy, which is the contract. Untagged
 /// disambiguation is unaffected: `message`/`status` stay the keys that pick the

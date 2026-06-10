@@ -56,7 +56,7 @@ the same participant even when model/cwd/session drift. See
 
 | Term | Definition | Aliases to avoid |
 |------|-----------|-----------------|
-| **Hard cap** | Maximum conversation messages in a room (default **10**, `RoomConfig`). Exceeding it returns HTTP 409. | "message limit" (ambiguous with soft cap) |
+| **Hard cap** | Maximum conversation messages in a room (default **10**, `RoomConfig`). Exceeding it returns HTTP 409. **Extendable** by consensus (`cbc_extend`, +10 per round). | "message limit" (ambiguous with soft cap) |
 | **Soft cap** | Threshold of *consecutive autonomous* turns (default **4**); `surface_to_user` is set one turn early — on the (soft_cap − 1)th such turn (see **surface_to_user** below). | "rate limit" |
 | **surface_to_user** | The flag, set on the (soft_cap − 1)th consecutive autonomous turn, that tells the receiving agent to pull its human in before replying. The primary **human-in-the-loop** trigger. | "escalate", "alert" |
 
@@ -73,9 +73,10 @@ the same participant even when model/cwd/session drift. See
 | Status | Meaning | Not to be confused with |
 |--------|---------|------------------------|
 | **paused_by_timeout** | The long-poll cap elapsed with nothing for you. Keep waiting. | a terminal state |
-| **awaiting_counterpart** | You are the only participant; no one has joined yet. Not terminal — surface the room id and resume. | `counterpart_stale` |
+| **awaiting_counterpart** | You are the only participant; no one has joined yet. Not terminal and not a hand-back — the background `cbc poll` waits *through* the join; surface the room id once and stay hands-free. | `counterpart_stale` |
 | **close_proposed** | A live participant voted to close and you have not. Agree (vote) or keep talking (a message clears votes). | `closed` |
-| **counterpart_stale** | Every *other* participant is a **ghost**. The conversation is over; stop polling. | `stale` (room state) |
+| **extend_proposed** | A live participant voted to extend the cap and you have not. Agree (`cbc_extend`) to bump it +10, or decline by ignoring it. Not terminal. | `close_proposed` |
+| **counterpart_stale** | Every *other* participant is a **ghost** (quiet >15 min). Not a stop — usually an idle session that will resume; the poll **holds** at a slower cadence ~15 min before surfacing to abandon. | `stale` (room state) |
 | **closed / paused / archived** | Terminal/parked room state reached. Stop polling (a `paused` room needs `cbc_wake`). | — |
 
 ## Closing a room
@@ -88,6 +89,17 @@ the same participant even when model/cwd/session drift. See
 | **Force close** | `cbc close --force` — unilaterally ends a room, bypassing consensus. A **human-only escape hatch**; agents must never use it. | "admin close", "hard close" |
 
 See [ADR-0003](decisions/0003-consensus-close.md).
+
+## Extending the cap
+
+| Term | Definition | Aliases to avoid |
+|------|-----------|-----------------|
+| **Consensus extend** | The way the hard cap grows: extending is a **vote** (`cbc_extend`), and the cap rises **+10** only when a **quorum** of **live** participants have voted. Repeatable (10 → 20 → 30 …). | "raise cap" used to mean "instantly bigger" |
+| **Extend vote** | A participant's recorded intent to extend (`wants_extend_at`). Unlike a close **Vote**, a conversation message does **not** clear it; it clears only when an extend lands. | conflating with close **Vote** |
+| **extend_proposed** | The wait status a non-voter sees while an extend is pending (parallel to `close_proposed`). | `close_proposed` |
+| **Extend notice** | The uncapped broadcast sentinel (`MessageType::Extend`) posted when the cap bumps, so a polling proposer learns the extend landed and can continue. | a conversation turn (it does not count toward the cap) |
+
+See [ADR-0005](decisions/0005-consensus-extend.md).
 
 ## Liveness
 

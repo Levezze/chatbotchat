@@ -99,6 +99,7 @@ mod tests {
             last_read_seq: 0,
             nickname: None,
             wants_close_at: None,
+            wants_extend_at: None,
         }
     }
 
