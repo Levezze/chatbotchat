@@ -56,7 +56,10 @@ mod tests {
     #[test]
     fn builds_kebab_plus_timestamp() {
         let now = datetime!(2026-05-28 14:23:09 UTC);
-        assert_eq!(room_id("Slider Labels", now), "cbc-slider-labels-20260528-1423");
+        assert_eq!(
+            room_id("Slider Labels", now),
+            "cbc-slider-labels-20260528-1423"
+        );
     }
 
     #[test]
