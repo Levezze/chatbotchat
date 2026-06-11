@@ -2,9 +2,10 @@
 //! `reqwest` against the chatbotchat daemon.
 
 use chatbotchat_protocol::{
-    ErrorEnvelope, JoinRoomRequest, JoinRoomResponse, LifecycleRequest, LifecycleResponse,
-    OpenRoomRequest, OpenRoomResponse, RoomStatus, RoomSummary, RoomTranscript, SendMessageRequest,
-    SendMessageResponse, SignalRequest, SignalResponse, WaitRequest, WaitResponse,
+    ErrorEnvelope, ExtendRequest, ExtendResponse, JoinRoomRequest, JoinRoomResponse,
+    LifecycleRequest, LifecycleResponse, OpenRoomRequest, OpenRoomResponse, RoomStatus,
+    RoomSummary, RoomTranscript, SendMessageRequest, SendMessageResponse, SignalRequest,
+    SignalResponse, WaitRequest, WaitResponse,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -266,6 +267,32 @@ impl HttpClient {
     ) -> Result<LifecycleResponse, ClientError> {
         self.lifecycle(room_id, "wake", repo, model, cwd, instance, None, false)
             .await
+    }
+
+    /// Vote to extend the room's message cap by +10 (consensus extend). Identity
+    /// is the `(repo, model, cwd)` tuple; the caller must be a participant. The
+    /// response `status` is `"extended"` (quorum met — `hard_cap` is the new cap)
+    /// or `"extend_proposed"` (recorded, awaiting the counterpart).
+    pub async fn extend(
+        &self,
+        room_id: &str,
+        repo: &str,
+        model: &str,
+        cwd: &str,
+        instance: &str,
+    ) -> Result<ExtendResponse, ClientError> {
+        let resp = self
+            .http
+            .post(format!("{}/rooms/{room_id}/extend", self.base_url))
+            .json(&ExtendRequest {
+                repo: repo.to_string(),
+                model: model.to_string(),
+                cwd: cwd.to_string(),
+                instance: instance.to_string(),
+            })
+            .send()
+            .await?;
+        decode(resp).await
     }
 
     /// Shared POST for the close/pause/wake lifecycle endpoints.

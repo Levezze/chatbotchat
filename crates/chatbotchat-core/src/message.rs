@@ -12,6 +12,11 @@ pub enum MessageType {
     BlockerRealWork,
     Fold,
     Close,
+    /// Broadcast notice that the message cap was extended by consensus (+10).
+    /// A sentinel (uncapped, never resets the soft-cap counter); its body names
+    /// the new cap. Delivered so a polling proposer learns the extend landed and
+    /// can take its turn.
+    Extend,
 }
 
 impl MessageType {
@@ -22,6 +27,7 @@ impl MessageType {
             MessageType::BlockerRealWork => "blocker_real_work",
             MessageType::Fold => "fold",
             MessageType::Close => "close",
+            MessageType::Extend => "extend",
         }
     }
 
@@ -32,6 +38,7 @@ impl MessageType {
             "blocker_real_work" => MessageType::BlockerRealWork,
             "fold" => MessageType::Fold,
             "close" => MessageType::Close,
+            "extend" => MessageType::Extend,
             _ => return None,
         })
     }
@@ -105,6 +112,7 @@ mod tests {
             MessageType::BlockerRealWork,
             MessageType::Fold,
             MessageType::Close,
+            MessageType::Extend,
         ] {
             assert_eq!(
                 MessageType::parse(t.as_str()),

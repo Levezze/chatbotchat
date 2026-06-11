@@ -1,7 +1,7 @@
 use crate::event::{Event, EventKind};
 use crate::message::{Message, MessageType, Severity};
 use crate::participant::Participant;
-use crate::room::{Room, RoomConfig, RoomState};
+use crate::room::{CloseQuorum, Room, RoomConfig, RoomState};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use std::str::FromStr;
@@ -39,6 +39,14 @@ pub struct Storage {
 pub struct RoomSummaryRow {
     pub room: Room,
     pub participant_count: i64,
+}
+
+/// Result of [`Storage::try_extend`]: either the cap bumped (quorum met) or the
+/// vote is recorded as a pending proposal awaiting the counterpart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtendOutcome {
+    Extended { hard_cap: u32 },
+    Proposed { votes: u32, needed: u32 },
 }
 
 impl Storage {
@@ -118,8 +126,8 @@ impl Storage {
 
         sqlx::query(
             "INSERT INTO participants \
-             (handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname, wants_close_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname, wants_close_at, wants_extend_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&p.handle)
         .bind(&p.room_id)
@@ -133,6 +141,12 @@ impl Storage {
         .bind(&p.nickname)
         .bind(
             p.wants_close_at
+                .map(|ts| ts.format(&Rfc3339))
+                .transpose()
+                .map_err(fmt_err)?,
+        )
+        .bind(
+            p.wants_extend_at
                 .map(|ts| ts.format(&Rfc3339))
                 .transpose()
                 .map_err(fmt_err)?,
@@ -188,6 +202,99 @@ impl Storage {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Clear every pending extend vote in a room. Called after an extend lands
+    /// (inside [`try_extend`]'s transaction) and when a conversational message is
+    /// sent (a deterministic "continue — I have room, didn't need the extend",
+    /// symmetric with `clear_close_votes`).
+    pub async fn clear_extend_votes(&self, room_id: &str) -> Result<(), StorageError> {
+        sqlx::query("UPDATE participants SET wants_extend_at = NULL WHERE room_id = ?")
+            .bind(room_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Record the caller's extend vote and, if a quorum of live participants has now
+    /// voted, bump the hard cap by `step` and clear the votes — **all in one
+    /// transaction**, so two agents casting the deciding vote concurrently cannot
+    /// both bump (the loser's tx reads the already-cleared votes and falls below
+    /// quorum). `ghost_cutoff` is `now - GHOST_AFTER`: only participants polled at or
+    /// after it count as live. Returns whether the cap bumped (with the new value)
+    /// or the vote is still a pending proposal (with progress toward quorum).
+    pub async fn try_extend(
+        &self,
+        room_id: &str,
+        voter_handle: &str,
+        step: u32,
+        now: OffsetDateTime,
+        ghost_cutoff: OffsetDateTime,
+        quorum: CloseQuorum,
+    ) -> Result<ExtendOutcome, StorageError> {
+        let ts = now.format(&Rfc3339).map_err(fmt_err)?;
+        let cutoff = ghost_cutoff.format(&Rfc3339).map_err(fmt_err)?;
+
+        // One transaction holds the connection across vote -> count -> bump+clear,
+        // so concurrent extends serialize (mirrors `update_room_state`'s tx pattern;
+        // statements run on the tx connection, not `self.pool`, to avoid a second
+        // connection deadlocking the single-connection in-memory test pool).
+        let mut tx = self.pool.begin().await?;
+
+        // Record the vote and refresh liveness (voting proves presence).
+        sqlx::query(
+            "UPDATE participants SET wants_extend_at = ?, last_poll_at = ? WHERE handle = ?",
+        )
+        .bind(&ts)
+        .bind(&ts)
+        .bind(voter_handle)
+        .execute(&mut *tx)
+        .await?;
+
+        // Count live participants and live voters (live = polled at/after the cutoff).
+        let live: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM participants WHERE room_id = ? AND last_poll_at >= ?",
+        )
+        .bind(room_id)
+        .bind(&cutoff)
+        .fetch_one(&mut *tx)
+        .await?;
+        let voted: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM participants \
+             WHERE room_id = ? AND last_poll_at >= ? AND wants_extend_at IS NOT NULL",
+        )
+        .bind(room_id)
+        .bind(&cutoff)
+        .fetch_one(&mut *tx)
+        .await?;
+        let needed = quorum.needed(live.max(0) as usize) as i64;
+
+        if voted >= needed {
+            let new_cap: i64 = sqlx::query_scalar(
+                "UPDATE rooms \
+                 SET config = json_set(config, '$.hard_cap', json_extract(config, '$.hard_cap') + ?) \
+                 WHERE id = ? \
+                 RETURNING json_extract(config, '$.hard_cap')",
+            )
+            .bind(step as i64)
+            .bind(room_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            sqlx::query("UPDATE participants SET wants_extend_at = NULL WHERE room_id = ?")
+                .bind(room_id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            Ok(ExtendOutcome::Extended {
+                hard_cap: new_cap.max(0) as u32,
+            })
+        } else {
+            tx.commit().await?;
+            Ok(ExtendOutcome::Proposed {
+                votes: voted.max(0) as u32,
+                needed: needed.max(0) as u32,
+            })
+        }
     }
 
     /// Append a `msg` to a room. Returns the persisted message with its assigned
@@ -630,7 +737,7 @@ impl Storage {
         instance: &str,
     ) -> Result<Option<Participant>, StorageError> {
         let row = sqlx::query(
-            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname, wants_close_at \
+            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname, wants_close_at, wants_extend_at \
              FROM participants \
              WHERE room_id = ? AND instance = ?",
         )
@@ -656,7 +763,7 @@ impl Storage {
         cwd: &str,
     ) -> Result<Option<Participant>, StorageError> {
         let row = sqlx::query(
-            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname, wants_close_at \
+            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname, wants_close_at, wants_extend_at \
              FROM participants \
              WHERE room_id = ? AND repo = ? AND model = ? AND cwd = ?",
         )
@@ -675,7 +782,7 @@ impl Storage {
 
     pub async fn list_participants(&self, room_id: &str) -> Result<Vec<Participant>, StorageError> {
         let rows = sqlx::query(
-            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname, wants_close_at \
+            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname, wants_close_at, wants_extend_at \
              FROM participants WHERE room_id = ? ORDER BY joined_at",
         )
         .bind(room_id)
@@ -916,6 +1023,10 @@ fn row_to_participant(row: &sqlx::sqlite::SqliteRow) -> Result<Participant, Stor
         nickname: row.try_get("nickname")?,
         wants_close_at: row
             .try_get::<Option<String>, _>("wants_close_at")?
+            .map(|s| parse_ts(&s))
+            .transpose()?,
+        wants_extend_at: row
+            .try_get::<Option<String>, _>("wants_extend_at")?
             .map(|s| parse_ts(&s))
             .transpose()?,
     })

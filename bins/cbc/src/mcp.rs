@@ -145,6 +145,21 @@ pub struct CloseArgs {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ExtendArgs {
+    #[schemars(description = "Room id whose message cap to extend")]
+    pub room_id: String,
+    #[schemars(
+        description = "Self-declared model name (your identity; e.g. opus47). repo and cwd are auto-detected from the server's working directory."
+    )]
+    pub model: String,
+    #[schemars(
+        description = "Optional identity label (see cbc_join_room). Pass the same value you joined with."
+    )]
+    #[serde(default, rename = "as")]
+    pub identity: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct PauseArgs {
     #[schemars(description = "Room id to pause")]
     pub room_id: String,
@@ -284,7 +299,7 @@ impl CbcMcp {
     }
 
     #[tool(
-        description = "Long-poll for the next message addressed to you (or broadcast) in a room. Identity is (repo, model, cwd) — repo and cwd are auto-detected, you supply the model (slice-3 identity arg). Blocks up to a short per-call cap (default 50s, set by CBC_MCP_WAIT_CAP) so the tool call returns before your client's tool-call timeout rather than erroring. Returns {\"message\":{...},\"surface_to_user\":bool} when a message arrives, or {\"status\":\"paused_by_timeout\"} when the cap elapses with nothing for you — that is NOT the end of the conversation: call cbc_wait again to keep waiting. Other terminal statuses (\"paused\", \"closed\", \"archived\", \"counterpart_stale\") mean stop polling — BUT a closed/paused/archived room still drains: cbc_wait first hands back any unread messages (each carrying a \"room_state\" field naming the terminal state — read them, you cannot reply) and only reports the terminal status once the backlog is empty, so always keep calling cbc_wait until you actually receive the status. The status \"close_proposed\" is NOT terminal: the other agent voted to close (consensus close) — if you agree the conversation is done, call cbc_close to agree (the room then closes); if you have more to say, call cbc_send instead, which cancels the proposal. The status \"awaiting_counterpart\" is NOT terminal: the other agent has not joined yet — surface the room id to your user and end your turn, then resume cbc_wait after they confirm the join; do not abandon the room and do not tight-loop. When surface_to_user is true the conversation has hit the soft cap — consult your user and send your next turn with human=true. The response may also carry \"retry_after\" (seconds): the counterpart is engaged — either paused consulting its user, or it has read your last message and is composing a reply (a long autonomous turn emits no signal, so the server infers this). Either way the conversation is alive: stay quiet that long, then call cbc_wait again. Do NOT loop tightly, and do NOT give up or ask your human to ping the other side — keep waiting. The field grows the longer the counterpart stays silent."
+        description = "Long-poll for the next message addressed to you (or broadcast) in a room. Identity is (repo, model, cwd) — repo and cwd are auto-detected, you supply the model (slice-3 identity arg). Blocks up to a short per-call cap (default 50s, set by CBC_MCP_WAIT_CAP) so the tool call returns before your client's tool-call timeout rather than erroring. Returns {\"message\":{...},\"surface_to_user\":bool} when a message arrives, or {\"status\":\"paused_by_timeout\"} when the cap elapses with nothing for you — that is NOT the end of the conversation: call cbc_wait again to keep waiting. Other terminal statuses (\"paused\", \"closed\", \"archived\", \"counterpart_stale\") mean stop polling — BUT a closed/paused/archived room still drains: cbc_wait first hands back any unread messages (each carrying a \"room_state\" field naming the terminal state — read them, you cannot reply) and only reports the terminal status once the backlog is empty, so always keep calling cbc_wait until you actually receive the status. The status \"close_proposed\" is NOT terminal: the other agent voted to close (consensus close) — if you agree the conversation is done, call cbc_close to agree (the room then closes); if you have more to say, call cbc_send instead, which cancels the proposal. The status \"awaiting_counterpart\" is NOT terminal and NOT a hand-back: the other agent has not joined yet — surface the room id to your user ONCE (if you have not already), then keep waiting (a background `cbc poll` waits through the join automatically; or call cbc_wait again after a short backoff). Do NOT end your turn to wait for the user to confirm the join, and do not tight-loop. The status \"counterpart_stale\" means a counterpart that HAD joined has gone quiet (>15 min) — also not a stop: give your user a one-line heads-up and keep the (slower) poll alive; it usually resumes. When surface_to_user is true the conversation has hit the soft cap — consult your user and send your next turn with human=true. The response may also carry \"retry_after\" (seconds): the counterpart is engaged — either paused consulting its user, or it has read your last message and is composing a reply (a long autonomous turn emits no signal, so the server infers this). Either way the conversation is alive: stay quiet that long, then call cbc_wait again. Do NOT loop tightly, and do NOT give up or ask your human to ping the other side — keep waiting. The field grows the longer the counterpart stays silent."
     )]
     async fn cbc_wait(
         &self,
@@ -398,6 +413,45 @@ impl CbcMcp {
     }
 
     #[tool(
+        description = "Vote to EXTEND the room's message cap by +10 (consensus extend). Rooms have a hard cap (default 10) so agents converge instead of chatting forever — when the conversation is genuinely productive and BOTH sides want to keep going, this raises the ceiling. Like close, it is a CONSENSUS vote, not unilateral: the cap bumps only once a quorum of live participants have voted (default: all live agents — for a 2-agent room, both). Repeatable: 10 -> 20 -> 30 … The vote is uncapped, so you can call it even after hitting the cap wall (a 409 on cbc_send). Identity is (repo, model, cwd) — repo and cwd auto-detected, you supply the model. You must have joined first. Returns JSON with `status`: `extended` (quorum met — `hard_cap` is the new cap, keep talking) or `extend_proposed` with `votes`/`needed` (your vote is recorded, the cap is unchanged — call cbc_wait: you will get the counterpart's reply once they agree). Like close, a normal conversational message cancels a pending extend (a landed message means there was cap room, so it reads as an implicit decline). Prefer extending over forcing terse turns when the conversation is worth continuing."
+    )]
+    async fn cbc_extend(
+        &self,
+        Parameters(ExtendArgs {
+            room_id,
+            model,
+            identity,
+        }): Parameters<ExtendArgs>,
+    ) -> String {
+        let repo = crate::context::detect_repo();
+        let cwd = crate::context::detect_cwd();
+        let instance = crate::context::detect_instance(identity.as_deref());
+        match self
+            .client
+            .extend(&room_id, &repo, &model, &cwd, &instance)
+            .await
+        {
+            Ok(resp) if resp.status == "extend_proposed" => json_with_next(
+                &resp,
+                "Your extend vote is recorded but the cap is unchanged — the other agent has not \
+                 agreed yet. Keep polling (background cbc poll, or cbc_wait): you will get status \
+                 `extend_proposed` reflected to them, then the cap bumps and their reply arrives \
+                 once they also vote cbc_extend.",
+            ),
+            Ok(resp) => json_with_next(
+                &resp,
+                "Quorum met — the cap is extended (see `hard_cap`). Continue with cbc_send if it \
+                 is your turn, or resume your poll for the other agent's next turn (the proposer \
+                 often has the reply that hit the wall).",
+            ),
+            Err(e) => err_with_next(
+                &e.to_string(),
+                "If this failed because the room is closed/paused, you cannot extend it — stop or wake it first.",
+            ),
+        }
+    }
+
+    #[tool(
         description = "Pause a room (park it; only an explicit wake resumes it). Optional `reason` is recorded in the audit log. Identity is (repo, model, cwd) — repo and cwd auto-detected, you supply the model. You must have joined first. Non-idempotent: pausing an already-paused room is a 409. Returns {state} as JSON"
     )]
     async fn cbc_pause(
@@ -501,21 +555,23 @@ chatbotchat (CBC) is a local message bus that lets AI agents in different repos 
 
 IF YOUR USER GIVES YOU A BARE TOKEN shaped like `slug-YYYYMMDD-HHMM` (e.g. `slider-labels-20260604-1933`), that is a CBC room id: call cbc_join_room(room_id, model) then cbc_wait(room_id, model). There is NO `/cbc-join` skill or slash command — never try to invoke one. A leading-slash form you may see in older text is not a command; ignore the slash and use the id.
 
-The loop: cbc_open_room -> cbc_join_room + cbc_send your opening question -> surface the bare room id to your user and END YOUR TURN -> (the other agent joins and answers) -> cbc_send / cbc_wait ping-pong -> cbc_close when done. Closing is by CONSENSUS: cbc_close is a vote, and the room closes only once the other live agent also closes (you will see status `close_proposed` until then). Do not assume a room is closed just because you called cbc_close.
+The loop: cbc_open_room -> cbc_join_room + cbc_send your opening question -> surface the bare room id to your user ONCE and start a background poll -> (the poll wakes you when the other agent answers) -> cbc_send / poll ping-pong -> cbc_close when done. Closing is by CONSENSUS: cbc_close is a vote, and the room closes only once the other live agent also closes (you will see status `close_proposed` until then). Do not assume a room is closed just because you called cbc_close.
 
-cbc_open_room only creates the room — it does NOT join you or post anything. So after opening: cbc_join_room, then cbc_send your opening question (so it is queued for the other agent), then output the room id verbatim on its own line, no slash prefix, so your user can paste it to the other agent. Then stop — do NOT call cbc_wait until your user confirms the other agent joined. (If you wait while still alone, cbc_wait returns status `awaiting_counterpart`: surface the id and end your turn.)
+cbc_open_room only creates the room — it does NOT join you or post anything. So after opening: cbc_join_room, then cbc_send your opening question (so it is queued for the other agent), then output the room id verbatim on its own line, no slash prefix, so your user can paste it to the other agent. Then START THE BACKGROUND POLL and end your turn — `cbc poll` waits THROUGH the join, so you do NOT need your user to confirm the other agent joined. Surface the id once, start the poll, stay out of the way.
 
 Waiting (cbc_wait long-polls ~50s server-side):
 - status `paused_by_timeout` -> nothing yet, the conversation is alive: call cbc_wait again.
 - a `retry_after` (seconds) on any response -> the counterpart is busy or away: stay quiet that long, then call cbc_wait again. Never tight-loop; never ask your user to ping the other side.
-- status `awaiting_counterpart` -> the other agent has not joined yet: surface the room id, end your turn, resume cbc_wait once they join. NOT terminal — do not abandon the room.
+- status `awaiting_counterpart` -> the other agent has not joined yet. NOT a stop and NOT a hand-back: a background `cbc poll` waits through the join for you; calling cbc_wait directly, surface the id once (if you haven't) and re-call after a short backoff. Never end your turn to wait for the user to confirm the join.
+- status `counterpart_stale` -> a counterpart that HAD joined has gone quiet (>15 min). NOT a stop: it is usually an idle session that will resume. Give your user a one-line heads-up and keep the (slower) poll alive (`cbc poll` holds through this ~15 min); surface to abandon only if it stays silent past that window.
 - status `close_proposed` -> the other agent voted to close. Agree with cbc_close (then it closes), or keep talking with cbc_send (which cancels the proposal). NOT terminal.
-- status `paused` / `closed` / `archived` / `counterpart_stale` -> stop polling. (But a closed/paused/archived room still drains first: any unread messages come back with a `room_state` field — read them, you can't reply — and you only get the terminal status once the backlog is empty. Keep calling cbc_wait until you actually receive the status.)
+- status `extend_proposed` -> the other agent voted to extend the message cap (+10). If you also want to keep going, agree with cbc_extend (the cap bumps once you both vote); otherwise cbc_close or keep talking. NOT terminal.
+- status `paused` / `closed` / `archived` -> stop polling. (But a closed/paused/archived room still drains first: any unread messages come back with a `room_state` field — read them, you can't reply — and you only get the terminal status once the backlog is empty. Keep calling cbc_wait until you actually receive the status.)
 - `surface_to_user: true` -> consult your user, then send your next turn with human=true.
 
 RE-GROUND BEFORE YOU RECAP OR DECIDE. Your own conversation context goes stale and gets compacted; the room does not. Before you summarize \"where things stand\", make a decision, reply after a /compact, or assert that something shipped/merged/deployed, call cbc_recap to re-read the WHOLE room (it does not consume your cursor) and re-verify external claims against live truth (git/gh). NEVER recap from memory — that is the single biggest cause of agents talking past each other with stale conclusions.
 
-PREFER BACKGROUND POLLING over sitting in a manual cbc_wait loop. After cbc_send, run `cbc poll <room> --model <m> --as <id>` as a background task (e.g. via /loop) and end your turn; it long-polls and wakes you once with the message instead of dribbling empty polls into your context, and once the counterpart has joined it keeps your presence live so they never see you as stale. Use ONE identity for join+send+poll (pass --as), and while a poller runs do NOT also call cbc_wait yourself — the poller owns the read cursor. cbc_wait remains the fallback where background tasks are unavailable.
+ALWAYS BE POLLING — the default after EVERY cbc_send. Run `cbc poll <room> --model <m> --as <id>` as a background task (e.g. via /loop) and end your turn; it long-polls and wakes you once with the message instead of dribbling empty polls into your context, waits through the counterpart joining, holds through a quiet counterpart, and keeps your presence live so they never see you as stale. Unless your user EXPLICITLY tells you to stop or pause, do NOT end your turn by putting the ball back in your user's court — never \"tell me when they joined / replied and I'll resume.\" Surface the room id once, start the poll, stay engaged. Use ONE identity for join+send+poll (pass --as), and while a poller runs do NOT also call cbc_wait yourself — the poller owns the read cursor. Where background tasks are unavailable, fall back to `/loop` running one bounded `cbc poll --max-polls 1` per tick (natural spacing), or a manual cbc_wait loop as a last resort.
 
 When YOU step away to research or consult your user, FIRST call cbc_signal(type=waiting_user, severity, question_text) so the counterpart's cbc_wait backs off the right amount. Fold your user's input back in with cbc_send(human=true).
 
@@ -591,15 +647,19 @@ fn wait_next(resp: &WaitResponse) -> String {
                     "{prefix}call cbc_wait again — nothing arrived yet but the conversation is alive. Do not give up."
                 ),
                 "awaiting_counterpart" => {
-                    "The other agent has not joined yet. Surface the room id to your user and END YOUR TURN; resume cbc_wait only after they confirm the join. Do not abandon the room and do not tight-loop."
+                    "The other agent has not joined yet — this is NOT a stop and NOT a hand-back. Keep waiting: the background `cbc poll` waits THROUGH the join automatically. If you are calling cbc_wait directly, surface the room id once (if you have not already) and call cbc_wait again after a short backoff. Do NOT end your turn to wait for your user to confirm the join."
                         .to_string()
                 }
                 "counterpart_stale" => {
-                    "The other agent has gone silent (>15 min with no poll). Stop polling and tell your user the counterpart is unresponsive."
+                    "The other agent has gone quiet (>15 min with no poll) — this is NOT a stop. A quiet counterpart is usually an idle session that will resume. Give your user a one-line heads-up, then keep the wait alive at a slower cadence: the background `cbc poll` holds through this for ~15 min; if calling cbc_wait directly, re-call after a longer backoff. Surface to abandon only if it stays silent past that window."
                         .to_string()
                 }
                 "close_proposed" => {
                     "The other agent proposed closing the room. If you also think the conversation is done, call cbc_close to agree — the room then closes. If you have more to say, call cbc_send instead: that cancels the proposal and continues the conversation."
+                        .to_string()
+                }
+                "extend_proposed" => {
+                    "The other agent proposed extending the message cap (+10) so you can keep talking. If you also want to continue, call cbc_extend to agree — the cap bumps once you both vote. If you would rather wrap up, call cbc_close, or just keep talking."
                         .to_string()
                 }
                 "paused" | "closed" | "archived" => {
@@ -746,14 +806,28 @@ mod tests {
             "got: {busy}"
         );
 
-        // Yield-not-terminal bucket.
+        // Keep-waiting-not-a-hand-back bucket. The guidance deliberately NO LONGER
+        // tells the agent to end its turn here — that "surface and yield" model was
+        // the hand-back bug; the background poll waits through the join instead.
         let alone = wait_next(&WaitResponse::Timeout {
             status: "awaiting_counterpart".into(),
             retry_after: None,
         });
         assert!(
-            alone.contains("END YOUR TURN") && alone.contains("not joined"),
-            "awaiting_counterpart must tell the agent to surface and yield; got: {alone}"
+            alone.contains("not joined")
+                && alone.contains("NOT a stop")
+                && alone.contains("Keep waiting"),
+            "awaiting_counterpart must say keep-waiting, not hand back; got: {alone}"
+        );
+
+        // A quiet counterpart is also held, not stopped.
+        let stale = wait_next(&WaitResponse::Timeout {
+            status: "counterpart_stale".into(),
+            retry_after: None,
+        });
+        assert!(
+            stale.contains("NOT a stop") && stale.contains("slower cadence"),
+            "counterpart_stale must say hold-the-line, not stop; got: {stale}"
         );
 
         // Terminal bucket.

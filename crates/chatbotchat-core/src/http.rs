@@ -4,7 +4,7 @@ use crate::lifecycle::{self, LifecycleEvent};
 use crate::message::{Message, MessageType, Severity};
 use crate::participant::Participant;
 use crate::room::{Room, RoomConfig, RoomState};
-use crate::storage::{RoomSummaryRow, Storage, StorageError};
+use crate::storage::{ExtendOutcome, RoomSummaryRow, Storage, StorageError};
 use crate::waiter::{backoff_secs, wait_for_message, wait_for_message_until, Hub, WaitOutcome};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -12,10 +12,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chatbotchat_protocol::{
-    ErrorEnvelope, JoinRoomRequest, JoinRoomResponse, LifecycleRequest, LifecycleResponse,
-    MessageView, OpenRoomRequest, OpenRoomResponse, ParticipantView, RoomStatus, RoomSummary,
-    RoomTranscript, SendMessageRequest, SendMessageResponse, SignalRequest, SignalResponse,
-    WaitRequest, WaitResponse,
+    ErrorEnvelope, ExtendRequest, ExtendResponse, JoinRoomRequest, JoinRoomResponse,
+    LifecycleRequest, LifecycleResponse, MessageView, OpenRoomRequest, OpenRoomResponse,
+    ParticipantView, RoomStatus, RoomSummary, RoomTranscript, SendMessageRequest,
+    SendMessageResponse, SignalRequest, SignalResponse, WaitRequest, WaitResponse,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -75,6 +75,7 @@ pub fn router(state: AppState) -> Router {
         .route("/rooms/{id}/signals", post(signal_room))
         .route("/rooms/{id}/wait", get(wait_room))
         .route("/rooms/{id}/close", post(close_room))
+        .route("/rooms/{id}/extend", post(extend_room))
         .route("/rooms/{id}/pause", post(pause_room))
         .route("/rooms/{id}/wake", post(wake_room))
         .with_state(state)
@@ -316,6 +317,7 @@ async fn join_room(
             last_read_seq: start_seq,
             nickname: nickname.clone(),
             wants_close_at: None,
+            wants_extend_at: None,
         };
 
         match state.storage.create_participant(&participant).await {
@@ -543,7 +545,7 @@ async fn send_message(
         .await?
         .ok_or_else(|| {
             ApiError::Conflict(format!(
-                "hard cap reached ({} messages); raise the cap or close the room",
+                "hard cap reached ({} messages); cbc_extend (consensus +10) to keep going, or close the room",
                 room.config.hard_cap
             ))
         })?;
@@ -554,6 +556,12 @@ async fn send_message(
     // `close_proposed` status. Signals (waiting_user etc.) deliberately do NOT
     // clear — stepping away is not "keep talking".
     state.storage.clear_close_votes(&id).await?;
+    // It also clears any pending EXTEND proposal: a landed message means the room
+    // had cap room, so the sender did not need the extend — a correct implicit
+    // decline (symmetric with close). This only runs when the message actually
+    // landed, so a send refused at the cap wall (409, above) never clears an
+    // extend the agents are mid-negotiating.
+    state.storage.clear_extend_votes(&id).await?;
 
     // Activity bookkeeping. The timestamp bump drives the sweeper's idle/stale
     // timing on every msg; and a msg landing on an `idle`/`stale` room revives it
@@ -853,6 +861,109 @@ fn close_response(
     }
 }
 
+/// How much each agreed consensus extend adds to the hard message cap. Fixed so
+/// the vote is a plain "extend, yes/no" with no number for the two agents to
+/// disagree on; stacking repeated extends grows the cap 10 → 20 → 30 …
+const EXTEND_STEP: u32 = 10;
+
+/// Vote to extend the room's message cap by +10 (consensus extend, mirroring
+/// consensus close). Records the caller's vote; the cap bumps only once a quorum
+/// of *live* participants have voted, at which point all extend votes clear and a
+/// broadcast `extend` sentinel tells both sides (so a polling proposer learns it
+/// can take its turn). Below quorum, the counterpart learns of the proposal via a
+/// computed `extend_proposed` wait status and either agrees (votes too) or
+/// declines by ignoring it. A non-participant → 400; a terminal room → 409. The
+/// vote itself is uncapped, so an agent that has hit the cap wall can still call it.
+async fn extend_room(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ExtendRequest>,
+) -> Result<Json<ExtendResponse>, ApiError> {
+    let room = state
+        .storage
+        .get_room(&id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+
+    // You cannot extend a room that is no longer taking messages.
+    if matches!(
+        room.state,
+        RoomState::Paused | RoomState::Closed | RoomState::Archived
+    ) {
+        return Err(ApiError::Conflict(format!(
+            "cannot extend from {}",
+            room.state.as_str()
+        )));
+    }
+
+    let voter = state
+        .storage
+        .get_participant_by_instance(
+            &id,
+            &effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
+        )
+        .await?
+        .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
+
+    let now = OffsetDateTime::now_utc();
+    let ghost_cutoff = now - lifecycle::GHOST_AFTER;
+
+    // Record the vote, count live voters, and (if quorum met) bump + clear — all in
+    // one transaction, so two agents casting the deciding vote concurrently cannot
+    // double-bump the cap. Reuses the close quorum policy (default `All` live).
+    match state
+        .storage
+        .try_extend(
+            &id,
+            &voter.handle,
+            EXTEND_STEP,
+            now,
+            ghost_cutoff,
+            room.config.close_quorum,
+        )
+        .await?
+    {
+        ExtendOutcome::Extended { hard_cap } => {
+            // Broadcast an uncapped sentinel so a polling proposer learns the extend
+            // landed (its own poll otherwise just sees paused_by_timeout and would
+            // not know it can now take its turn). Does not count toward the cap and
+            // does not reset the soft-cap counter.
+            state
+                .storage
+                .create_message_typed(
+                    &id,
+                    &voter.handle,
+                    None,
+                    &format!("Message cap extended to {hard_cap} by consensus (+{EXTEND_STEP})."),
+                    now,
+                    MessageType::Extend,
+                    None,
+                    None,
+                )
+                .await?;
+            state.hub.notify(&id);
+            Ok(Json(ExtendResponse {
+                state: room.state.as_str().to_string(),
+                status: "extended".to_string(),
+                votes: None,
+                needed: None,
+                hard_cap: Some(hard_cap),
+            }))
+        }
+        ExtendOutcome::Proposed { votes, needed } => {
+            // Wake any parked counterpart so it surfaces `extend_proposed` now.
+            state.hub.notify(&id);
+            Ok(Json(ExtendResponse {
+                state: room.state.as_str().to_string(),
+                status: "extend_proposed".to_string(),
+                votes: Some(votes),
+                needed: Some(needed),
+                hard_cap: None,
+            }))
+        }
+    }
+}
+
 /// Explicitly pause a room (the durable park). The caller must be a participant.
 /// Drives a `Pause` transition; the optional `reason` is recorded in the audit
 /// row's `detail`. `Err` (e.g. already paused, or from `stale`) → 409.
@@ -1057,6 +1168,7 @@ async fn wait_room(
         full_cap.min(Duration::from_secs(secs as u64))
     } else if counterpart_is_stale(&state.storage, &id, &caller.handle).await?
         || close_proposed(&state.storage, &id, &caller.handle).await?
+        || extend_proposed(&state.storage, &id, &caller.handle).await?
     {
         Duration::ZERO
     } else {
@@ -1172,6 +1284,15 @@ async fn timeout_response(
             retry_after: None,
         });
     }
+    // A pending extend proposal also needs the caller's decision. Checked after
+    // close (ending the room outranks growing it) but before the stale/plain
+    // timeouts so the counterpart can agree promptly.
+    if extend_proposed(&state.storage, id, handle).await? {
+        return Ok(WaitResponse::Timeout {
+            status: "extend_proposed".to_string(),
+            retry_after: None,
+        });
+    }
     if !away_active && counterpart_is_stale(&state.storage, id, handle).await? {
         return Ok(WaitResponse::Timeout {
             status: "counterpart_stale".to_string(),
@@ -1207,7 +1328,8 @@ async fn wait_relevant_change(
     if halted {
         return Ok(true);
     }
-    close_proposed(storage, room_id, handle).await
+    Ok(close_proposed(storage, room_id, handle).await?
+        || extend_proposed(storage, room_id, handle).await?)
 }
 
 /// True when at least one participant other than `handle` has joined the room
@@ -1247,6 +1369,30 @@ async fn close_proposed(
     Ok(participants.iter().any(|p| {
         p.handle != handle
             && p.wants_close_at.is_some()
+            && now - p.last_poll_at <= lifecycle::GHOST_AFTER
+    }))
+}
+
+/// True when a *live* other participant has voted to extend the cap (consensus
+/// extend) and the caller has not yet voted — i.e. a pending extend proposal
+/// awaiting the caller's decision. Same live-voter / caller-already-voted logic as
+/// [`close_proposed`].
+async fn extend_proposed(
+    storage: &Storage,
+    room_id: &str,
+    handle: &str,
+) -> Result<bool, StorageError> {
+    let now = OffsetDateTime::now_utc();
+    let participants = storage.list_participants(room_id).await?;
+    let caller_voted = participants
+        .iter()
+        .any(|p| p.handle == handle && p.wants_extend_at.is_some());
+    if caller_voted {
+        return Ok(false);
+    }
+    Ok(participants.iter().any(|p| {
+        p.handle != handle
+            && p.wants_extend_at.is_some()
             && now - p.last_poll_at <= lifecycle::GHOST_AFTER
     }))
 }
