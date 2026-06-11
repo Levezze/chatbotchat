@@ -8,6 +8,9 @@ mod context;
 mod install;
 mod mcp;
 mod settings;
+mod wait_status;
+
+use wait_status::WaitStatus;
 
 /// Output format for `cbc show`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -740,9 +743,9 @@ fn poll_decision(resp: &WaitResponse, st: &mut PollState) -> PollAction {
         WaitResponse::Timeout {
             status,
             retry_after,
-        } => match status.as_str() {
+        } => match WaitStatus::from_wire(status) {
             // Nothing addressed to us arrived yet — the only plain keep-waiting status.
-            "paused_by_timeout" => {
+            WaitStatus::PausedByTimeout => {
                 st.clear_stale();
                 st.empty_polls += 1;
                 if st.max_polls != 0 && st.empty_polls >= st.max_polls {
@@ -763,7 +766,7 @@ fn poll_decision(resp: &WaitResponse, st: &mut PollState) -> PollAction {
             // park). Unlike `cbc wait` — which hands back to the user here — the
             // background poll waits THROUGH the join: the id was already surfaced,
             // so back off and re-check. Bounded so a never-shared id still terminates.
-            "awaiting_counterpart" => {
+            WaitStatus::AwaitingCounterpart => {
                 if st.max_join_wait_secs != 0 && st.join_wait_secs >= st.max_join_wait_secs {
                     return PollAction::GiveUpJoin;
                 }
@@ -779,7 +782,7 @@ fn poll_decision(resp: &WaitResponse, st: &mut PollState) -> PollAction {
             // the line at the slower stale cadence, refreshing our own liveness each
             // cycle (the wait path touches last_poll_at), and surface only after the
             // hold window. One heads-up per spell so a watching human knows.
-            "counterpart_stale" => {
+            WaitStatus::CounterpartStale => {
                 if st.max_stale_wait_secs != 0 && st.stale_wait_secs >= st.max_stale_wait_secs {
                     return PollAction::GiveUpStale;
                 }
@@ -794,7 +797,16 @@ fn poll_decision(resp: &WaitResponse, st: &mut PollState) -> PollAction {
             }
             // Everything else needs the agent: a terminal state, or a decision
             // (close_proposed / extend_proposed). Hand back so it can act/vote.
-            _ => PollAction::ExitStatus,
+            // Listed explicitly (no catch-all) so a new wait status is a
+            // compiler-forced edit here, not a silent default. `Unknown` — a
+            // status from a differently-versioned server — also exits, the safe
+            // default: hand to the agent rather than swallow it in a wait loop.
+            WaitStatus::CloseProposed
+            | WaitStatus::ExtendProposed
+            | WaitStatus::Paused
+            | WaitStatus::Closed
+            | WaitStatus::Archived
+            | WaitStatus::Unknown(_) => PollAction::ExitStatus,
         },
     }
 }
@@ -940,17 +952,18 @@ fn emit_poll_message(
 /// Print a non-message poll outcome (terminal state or a decision-needed state)
 /// plus the action the agent should take, mirroring the MCP `wait_next` guidance.
 fn emit_poll_status(status: &str, json: bool) {
+    let guidance = wait_status::WaitStatus::from_wire(status).guidance();
     if json {
         let payload = serde_json::json!({
             "event": "status",
             "status": status,
-            "next": poll_status_guidance(status),
+            "next": guidance,
         });
         println!("{payload}");
         return;
     }
     println!("{status}");
-    println!("{}", poll_status_guidance(status));
+    println!("{guidance}");
 }
 
 /// Print the give-up outcome when a bounded poll (`--max-polls`) exhausts its
@@ -1028,40 +1041,6 @@ fn emit_poll_stale_giveup(waited_secs: u64, json: bool) {
     }
     println!("Counterpart still silent after holding {waited_secs}s.");
     println!("{GUIDANCE}");
-}
-
-/// The action a waking agent should take for each non-message poll outcome,
-/// kept in lockstep with the MCP `wait_next` guidance so both surfaces agree.
-fn poll_status_guidance(status: &str) -> &'static str {
-    match status {
-        // Retained only for parity with the MCP `wait_next` mapping. The poll loop
-        // intercepts `awaiting_counterpart` (waits through it, then `emit_poll_join_giveup`)
-        // before this is ever reached, so this arm is unreachable via `cbc poll`.
-        "awaiting_counterpart" => {
-            "The other agent has not joined yet. Surface the room id to your user and end your \
-             turn; resume polling once they join. Do not abandon the room."
-        }
-        "close_proposed" => {
-            "The other agent proposed closing the room. If you agree the conversation is done, \
-             call cbc_close to agree; if you have more to say, cbc_send (which cancels the \
-             proposal)."
-        }
-        "extend_proposed" => {
-            "The other agent proposed extending the message cap (+10). If you also want to keep \
-             going, call cbc_extend to agree — the cap bumps once you both vote; if you would \
-             rather wrap up, cbc_close or just keep talking."
-        }
-        // The poll loop now HOLDS through `counterpart_stale` (see poll_decision),
-        // so this arm is unreachable via `cbc poll` — kept only for parity with the
-        // MCP `wait_next` mapping, which the direct `cbc_wait` path still uses.
-        "counterpart_stale" => {
-            "The other agent has gone quiet (>15 min with no poll). This is not a stop: give your \
-             user a one-line heads-up and keep the (slower) poll alive — it usually resumes."
-        }
-        "paused" => "The room is paused. Stop polling — it needs an explicit cbc_wake to resume.",
-        "closed" | "archived" => "The room is over. Stop polling.",
-        _ => "Stop polling unless you know how to resume.",
-    }
 }
 
 /// Render a delivered message the way `cbc wait` / `cbc poll` surface it: a

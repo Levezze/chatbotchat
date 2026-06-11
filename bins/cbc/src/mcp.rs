@@ -5,6 +5,7 @@
 //! client error the JSON carries an `error` field rather than failing the call,
 //! which keeps the smoke surface simple for slice 1.
 
+use crate::wait_status::WaitStatus;
 use chatbotchat_client::HttpClient;
 use chatbotchat_protocol::WaitResponse;
 use rmcp::{
@@ -639,33 +640,17 @@ fn wait_next(resp: &WaitResponse) -> String {
             status,
             retry_after,
         } => {
-            let prefix = retry_after
-                .map(|s| format!("Stay quiet ~{s}s, then "))
-                .unwrap_or_default();
-            match status.as_str() {
-                "paused_by_timeout" => format!(
-                    "{prefix}call cbc_wait again — nothing arrived yet but the conversation is alive. Do not give up."
-                ),
-                "awaiting_counterpart" => {
-                    "The other agent has not joined yet — this is NOT a stop and NOT a hand-back. Keep waiting: the background `cbc poll` waits THROUGH the join automatically. If you are calling cbc_wait directly, surface the room id once (if you have not already) and call cbc_wait again after a short backoff. Do NOT end your turn to wait for your user to confirm the join."
-                        .to_string()
-                }
-                "counterpart_stale" => {
-                    "The other agent has gone quiet (>15 min with no poll) — this is NOT a stop. A quiet counterpart is usually an idle session that will resume. Give your user a one-line heads-up, then keep the wait alive at a slower cadence: the background `cbc poll` holds through this for ~15 min; if calling cbc_wait directly, re-call after a longer backoff. Surface to abandon only if it stays silent past that window."
-                        .to_string()
-                }
-                "close_proposed" => {
-                    "The other agent proposed closing the room. If you also think the conversation is done, call cbc_close to agree — the room then closes. If you have more to say, call cbc_send instead: that cancels the proposal and continues the conversation."
-                        .to_string()
-                }
-                "extend_proposed" => {
-                    "The other agent proposed extending the message cap (+10) so you can keep talking. If you also want to continue, call cbc_extend to agree — the cap bumps once you both vote. If you would rather wrap up, call cbc_close, or just keep talking."
-                        .to_string()
-                }
-                "paused" | "closed" | "archived" => {
-                    format!("The room is {status}. Stop polling.")
-                }
-                other => format!("Room status: {other}. Stop polling unless you know how to resume."),
+            // Single source of the per-status guidance (see `crate::wait_status`);
+            // this surface and the CLI `cbc poll` output share it.
+            let ws = WaitStatus::from_wire(status);
+            let guidance = ws.guidance();
+            // Only `paused_by_timeout` carries a `retry_after` hint server-side;
+            // prepend the "stay quiet" lead-in there, where the guidance text reads
+            // as its continuation. Every other status passes `retry_after: None`.
+            if let (WaitStatus::PausedByTimeout, Some(s)) = (&ws, retry_after) {
+                format!("Stay quiet ~{s}s, then {guidance}")
+            } else {
+                guidance.into_owned()
             }
         }
     }
