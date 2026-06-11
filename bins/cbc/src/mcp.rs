@@ -5,9 +5,9 @@
 //! client error the JSON carries an `error` field rather than failing the call,
 //! which keeps the smoke surface simple for slice 1.
 
-use crate::wait_status::WaitStatus;
+use crate::wait_status::WaitGuidance;
 use chatbotchat_client::HttpClient;
-use chatbotchat_protocol::WaitResponse;
+use chatbotchat_protocol::{WaitResponse, WaitStatus};
 use rmcp::{
     handler::server::wrapper::Parameters,
     model::{ServerCapabilities, ServerInfo},

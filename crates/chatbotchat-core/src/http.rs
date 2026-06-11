@@ -15,7 +15,7 @@ use chatbotchat_protocol::{
     ErrorEnvelope, ExtendRequest, ExtendResponse, JoinRoomRequest, JoinRoomResponse,
     LifecycleRequest, LifecycleResponse, MessageView, OpenRoomRequest, OpenRoomResponse,
     ParticipantView, RoomStatus, RoomSummary, RoomTranscript, SendMessageRequest,
-    SendMessageResponse, SignalRequest, SignalResponse, WaitRequest, WaitResponse,
+    SendMessageResponse, SignalRequest, SignalResponse, WaitRequest, WaitResponse, WaitStatus,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -1117,14 +1117,16 @@ async fn wait_room(
     // Sole-participant gate: when no counterpart has joined yet, do not long-poll.
     // The opener silently blocking here — waiting for someone who has not even been
     // told the room id — is the original "it just polls, I have to hit escape" bug.
-    // Return immediately with the non-terminal `awaiting_counterpart` so the agent
-    // surfaces the room id to its user and ends its turn; it resumes the wait once
-    // the other agent joins. Distinct from `counterpart_stale` (a counterpart
-    // joined, then went silent past GHOST_AFTER). Carries no hint — there is no
-    // counterpart to back off behind.
+    // Return immediately with the non-terminal `awaiting_counterpart`: the caller
+    // is the only participant yet. NOT a hand-back — the background `cbc poll`
+    // waits THROUGH the join (the agent surfaces the room id once and stays
+    // hands-free); only the direct `cbc_wait` path re-calls after a backoff.
+    // Distinct from `counterpart_stale` (a counterpart joined, then went silent
+    // past GHOST_AFTER). Carries no hint — there is no counterpart to back off
+    // behind.
     if !has_counterpart(&state.storage, &id, &caller.handle).await? {
         return Ok(Json(WaitResponse::Timeout {
-            status: "awaiting_counterpart".to_string(),
+            status: WaitStatus::AwaitingCounterpart.as_wire().to_string(),
             retry_after: None,
         }));
     }
@@ -1280,7 +1282,7 @@ async fn timeout_response(
     // reorder this below the away check.
     if close_proposed(&state.storage, id, handle).await? {
         return Ok(WaitResponse::Timeout {
-            status: "close_proposed".to_string(),
+            status: WaitStatus::CloseProposed.as_wire().to_string(),
             retry_after: None,
         });
     }
@@ -1289,18 +1291,18 @@ async fn timeout_response(
     // timeouts so the counterpart can agree promptly.
     if extend_proposed(&state.storage, id, handle).await? {
         return Ok(WaitResponse::Timeout {
-            status: "extend_proposed".to_string(),
+            status: WaitStatus::ExtendProposed.as_wire().to_string(),
             retry_after: None,
         });
     }
     if !away_active && counterpart_is_stale(&state.storage, id, handle).await? {
         return Ok(WaitResponse::Timeout {
-            status: "counterpart_stale".to_string(),
+            status: WaitStatus::CounterpartStale.as_wire().to_string(),
             retry_after: None,
         });
     }
     Ok(WaitResponse::Timeout {
-        status: "paused_by_timeout".to_string(),
+        status: WaitStatus::PausedByTimeout.as_wire().to_string(),
         retry_after,
     })
 }

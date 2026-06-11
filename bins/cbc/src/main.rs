@@ -1,6 +1,6 @@
 use anyhow::Context;
 use chatbotchat_client::HttpClient;
-use chatbotchat_protocol::{MessageView, RoomTranscript, WaitResponse};
+use chatbotchat_protocol::{MessageView, RoomTranscript, WaitResponse, WaitStatus};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::time::Duration;
 
@@ -10,7 +10,7 @@ mod mcp;
 mod settings;
 mod wait_status;
 
-use wait_status::WaitStatus;
+use wait_status::WaitGuidance;
 
 /// Output format for `cbc show`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -952,7 +952,7 @@ fn emit_poll_message(
 /// Print a non-message poll outcome (terminal state or a decision-needed state)
 /// plus the action the agent should take, mirroring the MCP `wait_next` guidance.
 fn emit_poll_status(status: &str, json: bool) {
-    let guidance = wait_status::WaitStatus::from_wire(status).guidance();
+    let guidance = WaitStatus::from_wire(status).guidance();
     if json {
         let payload = serde_json::json!({
             "event": "status",

@@ -278,6 +278,85 @@ pub enum WaitResponse {
     },
 }
 
+/// The closed vocabulary of `WaitResponse::Timeout::status` values — the set of
+/// non-message outcomes a waiter must react to.
+///
+/// The status travels the wire as a plain `String` (above); this enum is the
+/// shared parse of it, so the producer (the server's `timeout_response`) and the
+/// consumers (the `cbc` poll/`cbc_wait` surfaces) name the same closed set
+/// instead of trading hand-typed string literals that can drift. The server
+/// builds the wire value with [`WaitStatus::as_wire`]; the client reconstructs it
+/// with [`WaitStatus::from_wire`]. The two are exact inverses for every known
+/// variant and round-trip the raw string through [`WaitStatus::Unknown`], so a
+/// status one side does not recognize (version skew) survives rather than
+/// erroring. Agent-facing guidance text for each status lives with the client
+/// surfaces (`cbc`'s `wait_status` module), not here — this crate owns only the
+/// vocabulary, not the prose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WaitStatus {
+    /// The long-poll elapsed with nothing addressed to us; the conversation is
+    /// alive — keep waiting. The only status carrying a `retry_after` hint.
+    PausedByTimeout,
+    /// We are the only participant: the counterpart has not joined yet. Not a
+    /// stop — the background poll waits through the join.
+    AwaitingCounterpart,
+    /// A counterpart that HAD joined has gone silent past the ghost window
+    /// (>15 min). Not a stop — hold the line at a slower cadence.
+    CounterpartStale,
+    /// The counterpart voted to close; our decision (agree or keep talking) is
+    /// needed.
+    CloseProposed,
+    /// The counterpart voted to extend the message cap; our decision (agree,
+    /// close, or keep talking) is needed.
+    ExtendProposed,
+    /// The room is paused — terminal for polling until an explicit `cbc_wake`.
+    Paused,
+    /// The room is closed — terminal.
+    Closed,
+    /// The room is archived — terminal.
+    Archived,
+    /// A status neither side's build recognizes. Carries the raw wire string so
+    /// it survives a round-trip and the surfaces can still echo it.
+    Unknown(String),
+}
+
+impl WaitStatus {
+    /// Parse a `WaitResponse::Timeout::status` string. Never fails: an
+    /// unrecognized status becomes [`WaitStatus::Unknown`].
+    pub fn from_wire(status: &str) -> Self {
+        match status {
+            "paused_by_timeout" => Self::PausedByTimeout,
+            "awaiting_counterpart" => Self::AwaitingCounterpart,
+            "counterpart_stale" => Self::CounterpartStale,
+            "close_proposed" => Self::CloseProposed,
+            "extend_proposed" => Self::ExtendProposed,
+            "paused" => Self::Paused,
+            "closed" => Self::Closed,
+            "archived" => Self::Archived,
+            other => Self::Unknown(other.to_string()),
+        }
+    }
+
+    /// The wire string for this status — the exact inverse of [`from_wire`] for
+    /// every known variant. The server uses this to build the `Timeout` status so
+    /// the literal lives in one place.
+    ///
+    /// [`from_wire`]: WaitStatus::from_wire
+    pub fn as_wire(&self) -> &str {
+        match self {
+            Self::PausedByTimeout => "paused_by_timeout",
+            Self::AwaitingCounterpart => "awaiting_counterpart",
+            Self::CounterpartStale => "counterpart_stale",
+            Self::CloseProposed => "close_proposed",
+            Self::ExtendProposed => "extend_proposed",
+            Self::Paused => "paused",
+            Self::Closed => "closed",
+            Self::Archived => "archived",
+            Self::Unknown(s) => s,
+        }
+    }
+}
+
 /// Response body for `POST /rooms/:id/join`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JoinRoomResponse {
@@ -364,6 +443,33 @@ impl ErrorEnvelope {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// `as_wire` and `from_wire` are exact inverses for every known status, so a
+    /// status the server emits is the status the client reconstructs.
+    #[test]
+    fn wait_status_wire_round_trips_every_known_variant() {
+        for v in [
+            WaitStatus::PausedByTimeout,
+            WaitStatus::AwaitingCounterpart,
+            WaitStatus::CounterpartStale,
+            WaitStatus::CloseProposed,
+            WaitStatus::ExtendProposed,
+            WaitStatus::Paused,
+            WaitStatus::Closed,
+            WaitStatus::Archived,
+        ] {
+            assert_eq!(WaitStatus::from_wire(v.as_wire()), v, "round-trip {v:?}");
+        }
+    }
+
+    /// An unrecognized status (version skew) survives the round-trip via
+    /// `Unknown`, carrying its raw string unchanged.
+    #[test]
+    fn wait_status_preserves_an_unknown_status_through_the_round_trip() {
+        let ws = WaitStatus::from_wire("some_future_status");
+        assert_eq!(ws, WaitStatus::Unknown("some_future_status".to_string()));
+        assert_eq!(ws.as_wire(), "some_future_status");
+    }
 
     /// A `waiting_user` sentinel view serializes the type under the wire key
     /// `type` and carries its severity + question, and survives a full
