@@ -95,7 +95,7 @@ See [ADR-0003](decisions/0003-consensus-close.md).
 | Term | Definition | Aliases to avoid |
 |------|-----------|-----------------|
 | **Consensus extend** | The way the hard cap grows: extending is a **vote** (`cbc_extend`), and the cap rises **+10** only when a **quorum** of **live** participants have voted. Repeatable (10 → 20 → 30 …). | "raise cap" used to mean "instantly bigger" |
-| **Extend vote** | A participant's recorded intent to extend (`wants_extend_at`). Unlike a close **Vote**, a conversation message does **not** clear it; it clears only when an extend lands. | conflating with close **Vote** |
+| **Extend vote** | A participant's recorded intent to extend (`wants_extend_at`). Like a close **Vote**, a conversation message clears it (a landed message means there was cap room → implicit decline); it also clears when an extend lands. | conflating with close **Vote** |
 | **extend_proposed** | The wait status a non-voter sees while an extend is pending (parallel to `close_proposed`). | `close_proposed` |
 | **Extend notice** | The uncapped broadcast sentinel (`MessageType::Extend`) posted when the cap bumps, so a polling proposer learns the extend landed and can continue. | a conversation turn (it does not count toward the cap) |
 

@@ -4,7 +4,7 @@ use crate::lifecycle::{self, LifecycleEvent};
 use crate::message::{Message, MessageType, Severity};
 use crate::participant::Participant;
 use crate::room::{Room, RoomConfig, RoomState};
-use crate::storage::{RoomSummaryRow, Storage, StorageError};
+use crate::storage::{ExtendOutcome, RoomSummaryRow, Storage, StorageError};
 use crate::waiter::{backoff_secs, wait_for_message, wait_for_message_until, Hub, WaitOutcome};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -556,6 +556,12 @@ async fn send_message(
     // `close_proposed` status. Signals (waiting_user etc.) deliberately do NOT
     // clear — stepping away is not "keep talking".
     state.storage.clear_close_votes(&id).await?;
+    // It also clears any pending EXTEND proposal: a landed message means the room
+    // had cap room, so the sender did not need the extend — a correct implicit
+    // decline (symmetric with close). This only runs when the message actually
+    // landed, so a send refused at the cap wall (409, above) never clears an
+    // extend the agents are mid-negotiating.
+    state.storage.clear_extend_votes(&id).await?;
 
     // Activity bookkeeping. The timestamp bump drives the sweeper's idle/stale
     // timing on every msg; and a msg landing on an `idle`/`stale` room revives it
@@ -900,65 +906,61 @@ async fn extend_room(
         .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
 
     let now = OffsetDateTime::now_utc();
+    let ghost_cutoff = now - lifecycle::GHOST_AFTER;
 
-    // Record the vote; voting also proves the voter is live.
-    state.storage.touch_last_poll(&voter.handle, now).await?;
-    state
+    // Record the vote, count live voters, and (if quorum met) bump + clear — all in
+    // one transaction, so two agents casting the deciding vote concurrently cannot
+    // double-bump the cap. Reuses the close quorum policy (default `All` live).
+    match state
         .storage
-        .set_extend_vote(&voter.handle, Some(now))
-        .await?;
-
-    // Count votes among LIVE participants only — symmetric with consensus close.
-    let participants = state.storage.list_participants(&id).await?;
-    let live = participants
-        .iter()
-        .filter(|p| now - p.last_poll_at <= lifecycle::GHOST_AFTER)
-        .count();
-    let votes = participants
-        .iter()
-        .filter(|p| p.wants_extend_at.is_some() && now - p.last_poll_at <= lifecycle::GHOST_AFTER)
-        .count();
-    // Reuse the close quorum policy: default `All` live participants must agree.
-    let needed = room.config.close_quorum.needed(live);
-
-    if votes >= needed {
-        let new_cap = state.storage.bump_hard_cap(&id, EXTEND_STEP).await?;
-        state.storage.clear_extend_votes(&id).await?;
-        // Broadcast an uncapped sentinel so a polling proposer learns the extend
-        // landed (its own poll otherwise just sees paused_by_timeout and would not
-        // know it can now take its turn). Does not count toward the cap and does
-        // not reset the soft-cap counter.
-        state
-            .storage
-            .create_message_typed(
-                &id,
-                &voter.handle,
-                None,
-                &format!("Message cap extended to {new_cap} by consensus (+{EXTEND_STEP})."),
-                now,
-                MessageType::Extend,
-                None,
-                None,
-            )
-            .await?;
-        state.hub.notify(&id);
-        Ok(Json(ExtendResponse {
-            state: room.state.as_str().to_string(),
-            status: "extended".to_string(),
-            votes: None,
-            needed: None,
-            hard_cap: Some(new_cap),
-        }))
-    } else {
-        // Wake any parked counterpart so it surfaces `extend_proposed` now.
-        state.hub.notify(&id);
-        Ok(Json(ExtendResponse {
-            state: room.state.as_str().to_string(),
-            status: "extend_proposed".to_string(),
-            votes: Some(votes as u32),
-            needed: Some(needed as u32),
-            hard_cap: None,
-        }))
+        .try_extend(
+            &id,
+            &voter.handle,
+            EXTEND_STEP,
+            now,
+            ghost_cutoff,
+            room.config.close_quorum,
+        )
+        .await?
+    {
+        ExtendOutcome::Extended { hard_cap } => {
+            // Broadcast an uncapped sentinel so a polling proposer learns the extend
+            // landed (its own poll otherwise just sees paused_by_timeout and would
+            // not know it can now take its turn). Does not count toward the cap and
+            // does not reset the soft-cap counter.
+            state
+                .storage
+                .create_message_typed(
+                    &id,
+                    &voter.handle,
+                    None,
+                    &format!("Message cap extended to {hard_cap} by consensus (+{EXTEND_STEP})."),
+                    now,
+                    MessageType::Extend,
+                    None,
+                    None,
+                )
+                .await?;
+            state.hub.notify(&id);
+            Ok(Json(ExtendResponse {
+                state: room.state.as_str().to_string(),
+                status: "extended".to_string(),
+                votes: None,
+                needed: None,
+                hard_cap: Some(hard_cap),
+            }))
+        }
+        ExtendOutcome::Proposed { votes, needed } => {
+            // Wake any parked counterpart so it surfaces `extend_proposed` now.
+            state.hub.notify(&id);
+            Ok(Json(ExtendResponse {
+                state: room.state.as_str().to_string(),
+                status: "extend_proposed".to_string(),
+                votes: Some(votes),
+                needed: Some(needed),
+                hard_cap: None,
+            }))
+        }
     }
 }
 

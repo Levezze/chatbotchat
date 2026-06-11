@@ -3304,20 +3304,21 @@ async fn a_lone_live_agent_extends_immediately_when_counterpart_is_a_ghost() {
 }
 
 #[tokio::test]
-async fn a_conversational_send_does_not_cancel_a_pending_extend() {
-    // The key divergence from close: a normal message does NOT clear an extend vote
-    // (wanting to extend and continuing to talk are not opposites). So after A
-    // proposes and B sends a message, A's vote persists — B's own extend vote then
-    // meets quorum, rather than being a fresh 1/2 proposal as it would for close.
+async fn a_conversational_send_cancels_a_pending_extend() {
+    // Symmetric with close: a landed message clears a pending extend vote — it means
+    // the room had cap room, so the sender did not need the extend (implicit
+    // decline). So after A proposes and B sends a message, A's vote is gone, and B
+    // voting extend is a FRESH 1/2 proposal, not a 2/2 bump. This is what lets a
+    // declined extend settle instead of pinning the counterpart's poll open.
     let app = test_router().await;
-    let room_id = open_with_caps(&app, "no cancel", Some(10), None).await;
+    let room_id = open_with_caps(&app, "extend cancel", Some(10), None).await;
     join(&app, &room_id, "repo-a", "opus47", "/a").await;
     join(&app, &room_id, "repo-b", "opus47", "/b").await;
 
     let (_, p) = lifecycle_op(&app, &room_id, "extend", "repo-a", "opus47", "/a", None).await;
     assert_eq!(p["status"].as_str(), Some("extend_proposed"), "got {p}");
 
-    // B keeps talking — this must NOT clear A's extend vote.
+    // B keeps talking under the cap — this clears A's extend vote.
     let (s, _) = send(
         &app,
         &room_id,
@@ -3330,14 +3331,52 @@ async fn a_conversational_send_does_not_cancel_a_pending_extend() {
     .await;
     assert_eq!(s, StatusCode::CREATED);
 
-    // B votes extend → A's vote survived, so this meets quorum (2/2) and bumps.
+    // B votes extend → A's vote was cleared, so this is a fresh 1/2 proposal, not a bump.
     let (_, ebody) = lifecycle_op(&app, &room_id, "extend", "repo-b", "opus47", "/b", None).await;
     assert_eq!(
         ebody["status"].as_str(),
-        Some("extended"),
-        "A's extend vote must survive a message, so B's vote meets quorum, got {ebody}"
+        Some("extend_proposed"),
+        "the message must have cleared A's vote, so B's vote is a fresh proposal, got {ebody}"
     );
-    assert_eq!(ebody["hard_cap"].as_u64(), Some(20), "got {ebody}");
+    assert_eq!(ebody["votes"].as_u64(), Some(1), "got {ebody}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_deciding_votes_bump_the_cap_exactly_once() {
+    // Both agents fire the extend vote at the same time. `try_extend` records the
+    // vote, counts, and bumps+clears inside ONE transaction, so the two requests
+    // serialize: exactly one sees quorum and bumps (+10 to 20), the other lands as
+    // a proposal or reads the already-cleared votes — never a double-bump to 30.
+    // (The pre-tx per-statement code could interleave at await points and bump
+    // twice; this test guards that regression.)
+    let app = test_router().await;
+    let room_id = open_with_caps(&app, "concurrent extend", Some(10), None).await;
+    join(&app, &room_id, "repo-a", "opus47", "/a").await;
+    join(&app, &room_id, "repo-b", "opus47", "/b").await;
+
+    let (ra, rb) = tokio::join!(
+        lifecycle_op(&app, &room_id, "extend", "repo-a", "opus47", "/a", None),
+        lifecycle_op(&app, &room_id, "extend", "repo-b", "opus47", "/b", None),
+    );
+
+    let extended = [&ra.1, &rb.1]
+        .iter()
+        .filter(|b| b["status"].as_str() == Some("extended"))
+        .count();
+    assert_eq!(
+        extended, 1,
+        "exactly one vote completes the extend, got {} / {}",
+        ra.1, rb.1
+    );
+    let caps: Vec<u64> = [&ra.1, &rb.1]
+        .iter()
+        .filter_map(|b| b["hard_cap"].as_u64())
+        .collect();
+    assert_eq!(
+        caps,
+        vec![20],
+        "the cap rises by exactly +10, never double-bumped, got {caps:?}"
+    );
 }
 
 #[tokio::test]

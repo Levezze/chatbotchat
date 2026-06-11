@@ -31,24 +31,27 @@ structurally identical to consensus close (ADR-0003).
 - **The step is a fixed +10, not a parameter.** Agents agree to "extend", not to a
   number — there is nothing for the two votes to disagree on. Extends **stack**:
   each consensus round adds another +10 (10 → 20 → 30 …), with no ceiling.
-- The bump uses an atomic `json_set` on the room's JSON `config` column
-  (`bump_hard_cap`), so concurrent extends cannot lose an increment.
+- The whole sequence — record the vote, count live voters, and (if quorum met) bump
+  the cap and clear the votes — runs in **one transaction** (`Storage::try_extend`),
+  so two agents casting the deciding vote concurrently cannot double-bump (the
+  loser's transaction reads the already-cleared votes and falls below quorum). The
+  bump itself is a `json_set` on the room's JSON `config` column.
+- **A conversation message clears a pending extend vote**, symmetric with close. A
+  *landed* message means the room had cap room, so the sender did not need the
+  extend — a correct implicit decline. (A send refused at the cap wall is a 409 and
+  never lands, so it cannot clear an extend the agents are mid-negotiating.) This
+  matters in the always-poll world: without it, a *declined* extend would never
+  clear, and `extend_proposed` would re-fire on every counterpart wait — pinning the
+  background poll open. Clearing on a message lets a declined proposal settle.
 
-**Two deliberate differences from consensus close:**
-
-1. **A conversation message does NOT clear a pending extend vote.** For close,
-   sending is the opposite of closing, so a message cancels the proposal. For
-   extend it is not — you can want more room *and* keep talking. Clearing on send
-   would also let an in-flight reply silently wipe a proposal before the
-   counterpart ever saw it. Extend votes are live-gated and cleared only when an
-   extend actually lands.
-2. **A successful extend broadcasts an `extend` sentinel** ("cap extended to N").
-   Close ends the room, so the proposer's poll learns the outcome via the terminal
-   `closed` status. Extend leaves the room open and active, so without a positive
-   signal a proposer that proposed and is now polling would not know the cap grew
-   and could wait for a turn the agreeing agent never sends. The uncapped sentinel
-   (a new `MessageType::Extend`) is delivered to the counterpart so the proposer
-   resumes. It does not count toward the cap and does not reset the soft-cap counter.
+**One deliberate difference from consensus close: the bump broadcasts an `extend`
+sentinel** ("cap extended to N"). Close ends the room, so the proposer's poll learns
+the outcome via the terminal `closed` status. Extend leaves the room open and active,
+so without a positive signal a proposer that proposed and is now polling would not
+know the cap grew and could wait for a turn the agreeing agent never sends. The
+uncapped sentinel (a new `MessageType::Extend`) is delivered to the counterpart so
+the proposer resumes. It does not count toward the cap and does not reset the
+soft-cap counter.
 
 **The vote is uncapped.** An agent that has already hit the wall (a 409 on send)
 can still call `cbc_extend`; once quorum is met, sends resume. There is no `--force`
@@ -61,7 +64,7 @@ meaningless; consensus is the whole point.
   context, but only by mutual agreement — neither agent can unilaterally grow a
   shared budget.
 - The cap is no longer fixed for a room's lifetime; `RoomConfig.hard_cap` is now
-  mutable (via `bump_hard_cap`) where before it was write-once at open.
+  mutable (via `try_extend`) where before it was write-once at open.
 - `extend_proposed` joins `close_proposed` as a non-terminal wait status the
   background poll (ADR-0004) must wake on, so a parked counterpart can vote. The
   CLI `cbc poll` treats it as exit-for-decision, exactly like `close_proposed`.
