@@ -43,7 +43,7 @@ impl WaitGuidance for WaitStatus {
                 "call cbc_wait again — nothing arrived yet but the conversation is alive. Do not give up.",
             ),
             WaitStatus::AwaitingCounterpart => Cow::Borrowed(
-                "The other agent has not joined yet — this is NOT a stop and NOT a hand-back. Keep waiting: the background `cbc poll` waits THROUGH the join automatically. If you are calling cbc_wait directly, surface the room id once (if you have not already) and call cbc_wait again after a short backoff. Do NOT end your turn to wait for your user to confirm the join.",
+                "The other agent has not joined yet — this is NOT a stop and NOT a hand-back. Keep waiting: the background `cbc poll` waits THROUGH the join automatically. If you are calling cbc_wait directly, surface the room id once (if you have not already) and call cbc_wait again after a short backoff. Do NOT end your turn to wait for your user to confirm the join, and do NOT drift back to other work with no poll running — opening or joining a room obligates you to pace it.",
             ),
             WaitStatus::CounterpartStale => Cow::Borrowed(
                 "The other agent has gone quiet (>15 min with no poll) — this is NOT a stop. A quiet counterpart is usually an idle session that will resume. Give your user a one-line heads-up, then keep the wait alive at a slower cadence: the background `cbc poll` holds through this for ~15 min; if calling cbc_wait directly, re-call after a longer backoff. Surface to abandon only if it stays silent past that window.",

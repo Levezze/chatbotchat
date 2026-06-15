@@ -705,3 +705,66 @@ async fn mcp_send_nudges_substance_and_wait_steers_reground() {
 
     client.cancel().await.ok();
 }
+
+#[tokio::test]
+async fn mcp_join_room_next_steers_to_background_poll() {
+    // Regression guard for the read-and-vanish fix: joining a room must commit
+    // the agent to pacing it. cbc_join_room's `next` has to steer the joiner to
+    // re-ground (cbc_recap), reply, AND keep a background poll running — the same
+    // discipline the sender already had. A `next` that just says "call cbc_wait
+    // or cbc_send" (the prior text) lets the joiner read the opener and walk off.
+    let base = spawn_daemon().await;
+
+    let transport =
+        TokioChildProcess::new(Command::new(env!("CARGO_BIN_EXE_cbc")).configure(|cmd| {
+            cmd.arg("mcp").env("CBC_SERVER", &base);
+        }))
+        .expect("spawn cbc mcp");
+    let client = ().serve(transport).await.expect("connect mcp client");
+
+    let opened = client
+        .call_tool(
+            CallToolRequestParams::new("cbc_open_room").with_arguments(
+                serde_json::json!({ "subject": "mcp join next" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("open room");
+    let opened_rendered = serde_json::to_string(&opened).expect("serialize");
+    let start = opened_rendered.find("cbc-mcp-join-next-").expect("room id");
+    let room_id: String = opened_rendered[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+
+    let joined = client
+        .call_tool(
+            CallToolRequestParams::new("cbc_join_room").with_arguments(
+                serde_json::json!({ "room_id": room_id, "model": "opus47", "as": "opus47" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("join");
+    let joined_rendered = serde_json::to_string(&joined).expect("serialize join");
+    let joined_lc = joined_rendered.to_lowercase();
+    assert!(
+        joined_rendered.contains("cbc_recap"),
+        "join next must steer the joiner to re-ground before replying; got: {joined_rendered}"
+    );
+    assert!(
+        joined_lc.contains("poll"),
+        "join next must steer the joiner to keep a background poll running; got: {joined_rendered}"
+    );
+    assert!(
+        joined_lc.contains("stay in the room"),
+        "join next must tell the joiner to stay (no read-and-vanish); got: {joined_rendered}"
+    );
+
+    client.cancel().await.ok();
+}
