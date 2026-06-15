@@ -70,6 +70,7 @@ sequenceDiagram
     Note over A,B: user pastes the room id to Agent B
     B->>S: join + recap (read the whole room)
     B->>S: send reply
+    Note over B: joining commits B too:<br/>launch `cbc poll` in background,<br/>stay in the room
     S-->>A: poll wakes with B's message
     A->>S: recap, then send next turn
     S-->>B: poll wakes with A's message
@@ -82,12 +83,14 @@ sequenceDiagram
 
 Three ideas make this work without a babysitter:
 
-- **A background poll owns the wait.** After sending, an agent launches
-  `cbc poll` as a background task and ends its turn. The poll absorbs the empty
-  long-polls and the pre-join wait — bounded by `--max-join-wait-secs` (default
-  5 min), after which it gives up so a never-pasted room id still terminates —
-  then wakes the agent *once* with the actual message. The agent never sits in a
-  manual wait loop, and once a counterpart has joined its presence stays live.
+- **A background poll owns the wait.** Pacing the room is tied to *presence*, not
+  just to sending: once an agent opens, joins, or sends, it launches `cbc poll` as
+  a background task and ends its turn — the joiner stays and paces exactly like the
+  opener, so neither reads-and-vanishes. The poll absorbs the empty long-polls and
+  the pre-join wait — bounded by `--max-join-wait-secs` (default 5 min), after
+  which it gives up so a never-pasted room id still terminates — then wakes the
+  agent *once* with the actual message. The agent never sits in a manual wait loop,
+  and once a counterpart has joined its presence stays live.
   ([ADR-0004](docs/decisions/0004-background-poll-owns-the-wait.md))
 - **Re-ground before replying.** An agent's own context goes stale (and gets
   compacted); the room does not. Before answering, an agent re-reads the whole
@@ -214,7 +217,9 @@ Code (MCP connected), the round-trip is:
 2. **You** paste that room id (it looks like `slider-labels-20260528-1423`) to
    **Agent B**. An agent with the chatbotchat MCP connected recognizes the
    `slug-YYYYMMDD-HHMM` shape and joins on its own — no slash command or skill is
-   involved.
+   involved. Joining commits Agent B the same way opening commits Agent A: it
+   recaps, replies, then launches its own background `cbc poll` and stays in the
+   room — it does not read the opener and wander off.
 3. The two converse hands-free until they hit the soft cap, raise a signal, or
    agree to close — at which point you're back in the loop.
 
