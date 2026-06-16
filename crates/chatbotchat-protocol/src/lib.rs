@@ -203,6 +203,17 @@ pub struct ExtendResponse {
     pub hard_cap: Option<u32>,
 }
 
+/// Response body for `POST /rooms/:id/prune`. `pruned` is how many ghost
+/// participant rows (last poll older than the liveness window) were removed;
+/// `remaining` is the live participant count left in the room. An operational
+/// cleanup for identity churn — it only reclaims rows that already aged out of
+/// every quorum count, so it never affects a present agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PruneResponse {
+    pub pruned: u32,
+    pub remaining: u32,
+}
+
 /// Query parameters for `GET /rooms/:id/wait`. Same tuple identity as send.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WaitRequest {

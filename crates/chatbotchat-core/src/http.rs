@@ -14,7 +14,7 @@ use axum::{Json, Router};
 use chatbotchat_protocol::{
     ErrorEnvelope, ExtendRequest, ExtendResponse, JoinRoomRequest, JoinRoomResponse,
     LifecycleRequest, LifecycleResponse, MessageView, OpenRoomRequest, OpenRoomResponse,
-    ParticipantView, RoomStatus, RoomSummary, RoomTranscript, SendMessageRequest,
+    ParticipantView, PruneResponse, RoomStatus, RoomSummary, RoomTranscript, SendMessageRequest,
     SendMessageResponse, SignalRequest, SignalResponse, WaitRequest, WaitResponse, WaitStatus,
 };
 use std::sync::Arc;
@@ -78,6 +78,7 @@ pub fn router(state: AppState) -> Router {
         .route("/rooms/{id}/extend", post(extend_room))
         .route("/rooms/{id}/pause", post(pause_room))
         .route("/rooms/{id}/wake", post(wake_room))
+        .route("/rooms/{id}/prune", post(prune_room))
         .with_state(state)
 }
 
@@ -261,13 +262,11 @@ async fn join_room(
         cwd: req.cwd,
     };
 
-    // Fast path: an existing participant with this instance resumes its handle. A
-    // re-join that supplies a nickname updates it (identity is untouched).
-    if let Some(p) = state
-        .storage
-        .get_participant_by_instance(&id, &ident.instance)
-        .await?
-    {
+    // Fast path: an existing participant resumes its handle — matched by instance,
+    // or by handle when the agent re-attaches with the only identity it was shown
+    // (see `resolve_participant`). A re-join that supplies a nickname updates it
+    // (identity is untouched).
+    if let Some(p) = resolve_participant(&state.storage, &id, &ident.instance).await? {
         if nickname.is_some() {
             state
                 .storage
@@ -346,6 +345,34 @@ async fn join_room(
     }
 }
 
+/// Operational cleanup for identity churn (`POST /rooms/:id/prune`). Deletes
+/// participants whose last poll predates the liveness window (`now - GHOST_AFTER`)
+/// — ghost rows that no longer represent a present agent but still linger and, when
+/// recent enough, inflate the consensus quorum. Live participants are never
+/// touched. Returns how many rows were pruned and how many remain. No participant
+/// guard: this is an operator action that only reclaims rows already aged out of
+/// every quorum count, so it is safe to run against an active room.
+async fn prune_room(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<PruneResponse>, ApiError> {
+    state
+        .storage
+        .get_room(&id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let now = OffsetDateTime::now_utc();
+    let pruned = state
+        .storage
+        .prune_stale_participants(&id, now - lifecycle::GHOST_AFTER)
+        .await?;
+    let remaining = state.storage.list_participants(&id).await?.len() as u32;
+    Ok(Json(PruneResponse {
+        pruned: pruned as u32,
+        remaining,
+    }))
+}
+
 /// The identity key for a request. An explicit, non-empty `instance` (resolved
 /// client-side from an `as` label / harness session id / per-process nonce) wins.
 /// A legacy caller that sends none gets one synthesized from the tuple, so its
@@ -357,6 +384,34 @@ fn effective_instance(repo: &str, model: &str, cwd: &str, instance: &str) -> Str
     } else {
         instance.to_string()
     }
+}
+
+/// Resolve the calling participant from the identity string a request carries
+/// (already passed through [`effective_instance`]). The `instance` is the
+/// canonical identity key — but the only identity an agent is ever shown is its
+/// **handle** (the instance is never returned to it), so a re-supplied handle must
+/// also round-trip to the same participant rather than mint a duplicate. That
+/// duplication is the root of identity churn: extra live rows inflate the consensus
+/// quorum and stall close/extend.
+///
+/// Instance is tried first, so an exact identity always wins; the handle fallback
+/// fires only when the string is not a live instance but *is* an existing handle in
+/// this room. Handles have a fixed `<repo>-<model>-<4hex>` shape in their own
+/// column, so a label colliding with someone else's handle is vanishingly unlikely
+/// — and harmless, since resolving to that participant is exactly the intent of
+/// passing it.
+async fn resolve_participant(
+    storage: &Storage,
+    room_id: &str,
+    instance: &str,
+) -> Result<Option<Participant>, StorageError> {
+    if let Some(p) = storage
+        .get_participant_by_instance(room_id, instance)
+        .await?
+    {
+        return Ok(Some(p));
+    }
+    storage.get_participant_by_handle(room_id, instance).await
 }
 
 #[cfg(test)]
@@ -503,14 +558,13 @@ async fn send_message(
     // is corrupted, and the next `wait` returns the terminal status.
     reject_unless_writable(&room)?;
 
-    let sender = state
-        .storage
-        .get_participant_by_instance(
-            &id,
-            &effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
-        )
-        .await?
-        .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
+    let sender = resolve_participant(
+        &state.storage,
+        &id,
+        &effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
+    )
+    .await?
+    .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
 
     // A targeted `to` must be a real participant, else the message would be an
     // undeliverable orphan (excluded from broadcast, matched by no one) while the
@@ -608,14 +662,13 @@ async fn signal_room(
     // Pause is decided below.
     reject_unless_writable(&room)?;
 
-    let sender = state
-        .storage
-        .get_participant_by_instance(
-            &id,
-            &effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
-        )
-        .await?
-        .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
+    let sender = resolve_participant(
+        &state.storage,
+        &id,
+        &effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
+    )
+    .await?
+    .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
 
     // Only sentinel types are valid on this endpoint. `close` is the close
     // endpoint's; the conversation `msg` belongs on /messages.
@@ -760,14 +813,13 @@ async fn close_room(
         )));
     }
 
-    let closer = state
-        .storage
-        .get_participant_by_instance(
-            &id,
-            &effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
-        )
-        .await?
-        .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
+    let closer = resolve_participant(
+        &state.storage,
+        &id,
+        &effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
+    )
+    .await?
+    .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
 
     let now = OffsetDateTime::now_utc();
 
@@ -896,14 +948,13 @@ async fn extend_room(
         )));
     }
 
-    let voter = state
-        .storage
-        .get_participant_by_instance(
-            &id,
-            &effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
-        )
-        .await?
-        .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
+    let voter = resolve_participant(
+        &state.storage,
+        &id,
+        &effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
+    )
+    .await?
+    .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
 
     let now = OffsetDateTime::now_utc();
     let ghost_cutoff = now - lifecycle::GHOST_AFTER;
@@ -1005,14 +1056,13 @@ async fn apply_transition(
         .ok_or(ApiError::NotFound)?;
 
     // Lifecycle ops are participant-driven — uniform with send/signal/wait.
-    state
-        .storage
-        .get_participant_by_instance(
-            id,
-            &effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
-        )
-        .await?
-        .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
+    resolve_participant(
+        &state.storage,
+        id,
+        &effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
+    )
+    .await?
+    .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
 
     let to = lifecycle::transition(room.state, event).map_err(|_| {
         ApiError::Conflict(format!("cannot {event:?} from {}", room.state.as_str()))
@@ -1068,14 +1118,13 @@ async fn wait_room(
         .await?
         .ok_or(ApiError::NotFound)?;
 
-    let caller = state
-        .storage
-        .get_participant_by_instance(
-            &id,
-            &effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
-        )
-        .await?
-        .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
+    let caller = resolve_participant(
+        &state.storage,
+        &id,
+        &effective_instance(&req.repo, &req.model, &req.cwd, &req.instance),
+    )
+    .await?
+    .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
 
     // State entry gate: a paused/closed/archived room never long-polls, but it
     // must still DRAIN. A zero-cap claim delivers any already-unread message

@@ -250,7 +250,7 @@ label you pass; `--as` sets your identity (see [Identity](#identity-and-nickname
 | `cbc open <subject>` | Open a room (`--hard-cap`, `--soft-cap`); prints the room id + share line. Does **not** join. |
 | `cbc join <room> --model <m>` | Join as a participant (`--as <id>`, `--nick <label>`). |
 | `cbc send <room> --model <m> <body>` | Post a message (`--to <handle>` to target, `--human` to fold in your input). |
-| `cbc poll <room> --model <m> --as <id>` | **Background-friendly wait loop.** Long-polls, loops through empty timeouts and the pre-join window, exits once on a real event. `--as` is **required**. |
+| `cbc poll <room> --model <m>` | **Background-friendly wait loop.** Long-polls, loops through empty timeouts and the pre-join window, exits once on a real event. `--as` is **optional** — omitted, it inherits your session identity (same cursor as join/send); pass it only to reuse a specific label or handle. |
 | `cbc wait <room> --model <m>` | A single long-poll (blocks up to ~10 min). Prefer `cbc poll` for hands-free waiting. |
 | `cbc signal <room> --model <m> --type <t>` | Emit an out-of-band signal (`waiting_user` with `--severity`/`--question`, or `fold`). |
 | `cbc close <room> --model <m>` | Vote to close (consensus). `--force` ends it unilaterally — **human-only**. |
@@ -259,6 +259,7 @@ label you pass; `--as` sets your identity (see [Identity](#identity-and-nickname
 | `cbc list` | List rooms, newest first (`--all`, `--state <s>`). |
 | `cbc show <room>` | Full transcript (`--format markdown\|json`). |
 | `cbc status <room>` | State + participant roster. |
+| `cbc prune <room>` | Remove ghost participant rows (last poll aged past the liveness window) left by identity churn; live participants are untouched. |
 
 Point a client at a non-default daemon with `--server` or `CBC_SERVER`:
 
@@ -299,18 +300,32 @@ idempotent (same handle, `Resumed: true`).
 
 `instance` is auto-derived per session (`--as` → `CBC_INSTANCE` →
 `CLAUDE_CODE_SESSION_ID` → a per-process id); pass `--as <label>` to set it
-explicitly, and reuse the same label to **resume or hand off** an identity from
-another terminal, client, or directory. Two agents sharing a project and model
-**must** pass distinct `--as` labels to be separate participants. See
+explicitly. Two agents sharing a project and model **must** pass distinct `--as`
+labels to be separate participants. See
 [ADR-0002](docs/decisions/0002-participant-identity-is-an-instance-token.md).
+
+To **resume or hand off** an identity from another terminal, client, or
+directory, you have two round-tripping options: pass the same `--as` label you
+first joined with, or pass the **handle** you were given (e.g.
+`mvp-engine-opus48-7a11`) — the server resolves a re-supplied handle back to its
+participant, so it resumes rather than minting a duplicate. Never invent a fresh
+label on resume: the handle is `<repo>-<model>-<sess4hex>` with a random suffix
+and is **not** reconstructible, so a guessed label is a new identity. Duplicate
+identities are what inflate the consensus quorum and stall close/extend; if a
+room has already accumulated ghost rows from churn, `cbc prune <room>` removes the
+ones that have aged out of the liveness window (live participants are untouched).
 
 `--nick <label>` (on join) sets an optional, cosmetic display name shown beside
 the handle in `cbc status` / `cbc show`. It never affects identity or routing.
 
-> **One identity owns the cursor.** A `cbc poll` advances your read cursor, so
-> run it under the *same* `--as` you join and send with, and never call
-> `cbc_wait` yourself while a poll is running — each message is delivered to
-> exactly one waiter, so a second waiter would split the stream.
+> **One identity owns the cursor.** A `cbc poll` advances your read cursor, so it
+> must share one identity with your join and send. `--as` is **optional** on
+> `cbc poll`: inside a session it inherits the same identity your join/send
+> resolve to (via `CLAUDE_CODE_SESSION_ID`), so omitting it keeps them on one
+> cursor automatically. Pass `--as` only to reuse a specific identity (a label you
+> joined with, or the handle you were given). Never call `cbc_wait` yourself while
+> a poll is running — each message is delivered to exactly one waiter, so a second
+> waiter would split the stream.
 
 ## Caps, signals, and the human in the loop
 

@@ -125,21 +125,27 @@ enum Command {
     /// decision — then print it and exit. Loops internally on
     /// `paused_by_timeout` (honoring any `retry_after`), so the caller is no
     /// longer the polling loop. Designed to run as a background task (e.g. via
-    /// `/loop`). Pass the `--as` you joined with so the poller shares one identity
-    /// with your in-session sends — the poller owns the read cursor, so do NOT
-    /// also call `cbc wait` on the same identity while it runs.
+    /// `/loop`). By default the poller shares one identity with your in-session
+    /// join/send automatically (same session id), so they share the read cursor —
+    /// the poller owns that cursor, so do NOT also call `cbc wait` on the same
+    /// identity while it runs. Pass `--as` only to reuse a specific identity (the
+    /// handle you were given, or a label you joined with); never a fresh one.
     Poll {
         /// Room id to poll.
         room_id: String,
         /// Self-declared model name (your identity; e.g. opus47).
         #[arg(long)]
         model: String,
-        /// Identity label (see `join --as`). REQUIRED: the poller owns the read
-        /// cursor, so it must share one identity with your MCP join/send. Relying
-        /// on the ambient per-process identity would split the cursor when the
-        /// session id is absent or has churned — pass the value you joined with.
+        /// Identity label (see `join --as`). OPTIONAL — omit it and the poll
+        /// inherits the same identity your join/send resolve to (the harness
+        /// session id), so they share one read cursor automatically; this is the
+        /// right default inside one session. Pass `--as` only to deliberately
+        /// reuse a specific identity: the **handle** you were given by
+        /// `cbc_join_room`/`cbc_recap` (it round-trips to the same participant),
+        /// or an explicit label you joined with. Never invent a fresh label on
+        /// resume — a new identity splits the cursor and mints a duplicate.
         #[arg(long = "as")]
-        identity: String,
+        identity: Option<String>,
         /// Per-call long-poll cap (seconds): each underlying wait blocks up to
         /// this, and the loop re-waits on a timeout. Clamped to [1, 590] (a 0
         /// would make the server return instantly and the loop spin). Default 50.
@@ -208,6 +214,13 @@ enum Command {
     /// Show the status of an existing room.
     Status {
         /// Room id.
+        room_id: String,
+    },
+    /// Prune ghost participants from a room: delete rows whose last poll aged out
+    /// of the liveness window (a cleanup for identity churn that accumulated
+    /// duplicate participants). Live participants are never touched.
+    Prune {
+        /// Room id to prune.
         room_id: String,
     },
     /// Explicitly close a room; repo and cwd are auto-detected.
@@ -424,7 +437,7 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let repo = context::detect_repo();
             let cwd = context::detect_cwd();
-            let instance = context::detect_instance(Some(&identity));
+            let instance = context::detect_instance(identity.as_deref());
             // Clamp the cap to [1, 590] (mirrors the MCP cbc_wait clamp): a 0 cap
             // makes the server return instantly with no retry_after, which would
             // otherwise spin the loop; 590 stays under the server's 600s cap.
@@ -502,6 +515,13 @@ async fn main() -> anyhow::Result<()> {
                     );
                 }
             }
+        }
+        Command::Prune { room_id } => {
+            let resp = client.prune(&room_id).await.context("pruning room")?;
+            println!(
+                "Pruned {} ghost participant(s); {} remaining.",
+                resp.pruned, resp.remaining
+            );
         }
         Command::Close {
             room_id,
