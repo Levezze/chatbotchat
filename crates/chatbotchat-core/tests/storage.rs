@@ -152,6 +152,121 @@ async fn two_participants_identical_tuple_distinct_instance_coexist() {
     assert_eq!(listed.len(), 2, "both agents appear in the room");
 }
 
+#[tokio::test]
+async fn get_participant_by_handle_is_room_scoped() {
+    // The handle an agent is shown must be resolvable back to its participant so
+    // it can round-trip as an identity (resume without minting a duplicate). The
+    // lookup is scoped to the room: the same handle string in another room — or a
+    // handle that was never minted — does not resolve here.
+    let storage = fresh_storage().await;
+    let room = sample_room();
+    storage.create_room(&room).await.expect("create_room ok");
+
+    let p = sample_participant(&room.id, "/work/a");
+    storage.create_participant(&p).await.expect("create ok");
+
+    // The handle resolves to its own row within the room.
+    let fetched = storage
+        .get_participant_by_handle(&room.id, &p.handle)
+        .await
+        .expect("get ok")
+        .expect("participant exists");
+    assert_eq!(fetched, p);
+
+    // A handle that was never minted does not resolve.
+    let missing = storage
+        .get_participant_by_handle(&room.id, "never-minted-0000")
+        .await
+        .expect("get ok");
+    assert!(missing.is_none(), "unknown handle must not resolve");
+
+    // The same handle in a different room does not resolve here (room-scoped).
+    let other_room = Room {
+        id: "other-room-20260528-1600".into(),
+        ..sample_room()
+    };
+    storage
+        .create_room(&other_room)
+        .await
+        .expect("create other room");
+    let cross = storage
+        .get_participant_by_handle(&other_room.id, &p.handle)
+        .await
+        .expect("get ok");
+    assert!(
+        cross.is_none(),
+        "a handle belongs to its room; it must not resolve in another"
+    );
+}
+
+#[tokio::test]
+async fn prune_stale_participants_removes_only_stale_rows() {
+    // Ghost rows left by identity churn count toward quorum until they age out.
+    // Pruning drops the rows whose last poll predates the cutoff and leaves the
+    // live ones — so consensus reflects only the agents actually present.
+    let storage = fresh_storage().await;
+    let room = sample_room();
+    storage.create_room(&room).await.expect("create_room ok");
+
+    let now = OffsetDateTime::now_utc();
+    let cutoff = now - Duration::minutes(15);
+    let mk = |handle: &str, instance: &str, last_poll_at: OffsetDateTime| Participant {
+        handle: handle.into(),
+        room_id: room.id.clone(),
+        repo: "mvp-api".into(),
+        model: "opus48".into(),
+        cwd: "/work/mvp".into(),
+        instance: instance.into(),
+        joined_at: now - Duration::hours(1),
+        last_poll_at,
+        last_read_seq: 0,
+        nickname: None,
+        wants_close_at: None,
+        wants_extend_at: None,
+    };
+    // A live agent and two ghosts from earlier churn (polled >15m ago).
+    let live = mk("mvp-api-opus48-live", "session-live", now);
+    let ghost_a = mk(
+        "mvp-api-opus48-gsta",
+        "session-ghost-a",
+        now - Duration::minutes(20),
+    );
+    let ghost_b = mk(
+        "mvp-api-opus48-gstb",
+        "session-ghost-b",
+        now - Duration::hours(2),
+    );
+    storage
+        .create_participant(&live)
+        .await
+        .expect("create live");
+    storage
+        .create_participant(&ghost_a)
+        .await
+        .expect("create ghost a");
+    storage
+        .create_participant(&ghost_b)
+        .await
+        .expect("create ghost b");
+
+    let pruned = storage
+        .prune_stale_participants(&room.id, cutoff)
+        .await
+        .expect("prune ok");
+    assert_eq!(pruned, 2, "both ghosts pruned, the live row kept");
+
+    let listed = storage.list_participants(&room.id).await.expect("list ok");
+    assert_eq!(listed.len(), 1, "only the live participant remains");
+    assert_eq!(listed[0].handle, "mvp-api-opus48-live");
+
+    // A second prune is a no-op — nothing left below the cutoff.
+    let again = storage
+        .prune_stale_participants(&room.id, cutoff)
+        .await
+        .expect("prune ok");
+    assert_eq!(again, 0, "no stale rows remain");
+}
+
 fn participant_with_handle(room_id: &str, handle: &str, cwd: &str) -> Participant {
     let now = OffsetDateTime::now_utc();
     Participant {

@@ -3,9 +3,9 @@
 
 use chatbotchat_protocol::{
     ErrorEnvelope, ExtendRequest, ExtendResponse, JoinRoomRequest, JoinRoomResponse,
-    LifecycleRequest, LifecycleResponse, OpenRoomRequest, OpenRoomResponse, RoomStatus,
-    RoomSummary, RoomTranscript, SendMessageRequest, SendMessageResponse, SignalRequest,
-    SignalResponse, WaitRequest, WaitResponse,
+    LifecycleRequest, LifecycleResponse, OpenRoomRequest, OpenRoomResponse, PruneResponse,
+    RoomStatus, RoomSummary, RoomTranscript, SendMessageRequest, SendMessageResponse,
+    SignalRequest, SignalResponse, WaitRequest, WaitResponse,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -188,6 +188,19 @@ impl HttpClient {
         let resp = self
             .http
             .get(format!("{}/rooms/{room_id}", self.base_url))
+            .send()
+            .await?;
+        decode(resp).await
+    }
+
+    /// Prune ghost participant rows from a room (`cbc prune`): delete participants
+    /// whose last poll has aged out of the liveness window — an operational
+    /// cleanup for identity churn. Live participants are untouched. Returns how
+    /// many rows were pruned and how many remain.
+    pub async fn prune(&self, room_id: &str) -> Result<PruneResponse, ClientError> {
+        let resp = self
+            .http
+            .post(format!("{}/rooms/{room_id}/prune", self.base_url))
             .send()
             .await?;
         decode(resp).await

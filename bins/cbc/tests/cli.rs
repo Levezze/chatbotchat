@@ -1026,21 +1026,50 @@ fn extend_is_consensus_then_both_agents_agree_over_cli() {
 }
 
 #[test]
-fn poll_requires_an_explicit_identity() {
-    // `cbc poll` owns the read cursor, so it MUST share one identity with the
-    // agent's MCP join/send. A missing `--as` would fall back to a per-process
-    // identity that can mismatch (and split the cursor) when the ambient session
-    // id is absent or has churned — so the flag is required, rejected by the
-    // parser before any network call.
-    let failed = Command::cargo_bin("cbc")
+fn poll_without_as_inherits_the_ambient_identity() {
+    // `cbc poll` owns the read cursor, so it must share one identity with the
+    // agent's join/send. `--as` is OPTIONAL: omitted, the poll resolves identity
+    // through the same precedence as join (here the `CBC_INSTANCE` rung, the
+    // env-var analog of a harness session id). Forcing `--as` was the churn
+    // footgun — the only label an agent had to pass was its non-round-tripping
+    // handle, which minted a duplicate. Here join and a no-`--as` poll share the
+    // instance via the ambient env, so the poll resumes the same participant and
+    // is delivered the counterpart's message.
+    let base = spawn_daemon();
+    let room_id = open_room(&base, "cli poll no-as");
+    // The poller's participant joins under the ambient instance "shared".
+    join_as(&base, &room_id, "opus47", "shared");
+    join(&base, &room_id, "sonnet46");
+
+    // The counterpart posts BEFORE the poll so the first wait returns at once.
+    Command::cargo_bin("cbc")
         .unwrap()
-        .args(["poll", "some-room-20260101-0000", "--model", "opus47"])
+        .args([
+            "send",
+            &room_id,
+            "--model",
+            "sonnet46",
+            "--as",
+            "sonnet46",
+            "ping no-as",
+        ])
+        .env("CBC_SERVER", &base)
         .assert()
-        .failure();
-    let stderr = String::from_utf8(failed.get_output().stderr.clone()).unwrap();
+        .success();
+
+    // Poll with NO --as; CBC_INSTANCE supplies the same instance the join used.
+    let polled = Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["poll", &room_id, "--model", "opus47"])
+        .env("CBC_SERVER", &base)
+        .env("CBC_INSTANCE", "shared")
+        .assert()
+        .success();
+    let out = String::from_utf8(polled.get_output().stdout.clone()).unwrap();
     assert!(
-        stderr.contains("--as"),
-        "missing --as must be a parser error naming --as; got:\n{stderr}"
+        out.contains("ping no-as"),
+        "a no-`--as` poll must inherit the ambient identity and be delivered the \
+         message; got:\n{out}"
     );
 }
 

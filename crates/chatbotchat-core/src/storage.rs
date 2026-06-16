@@ -752,6 +752,32 @@ impl Storage {
         }
     }
 
+    /// Resolve a participant by its handle within a room. The handle is the only
+    /// identity an agent is ever shown (the canonical `instance` is never returned
+    /// to it), so this is what lets a re-supplied handle round-trip to the same
+    /// participant instead of minting a duplicate. Scoped to the room: the same
+    /// handle string is meaningful only inside the room that minted it.
+    pub async fn get_participant_by_handle(
+        &self,
+        room_id: &str,
+        handle: &str,
+    ) -> Result<Option<Participant>, StorageError> {
+        let row = sqlx::query(
+            "SELECT handle, room_id, repo, model, cwd, instance, joined_at, last_poll_at, last_read_seq, nickname, wants_close_at, wants_extend_at \
+             FROM participants \
+             WHERE room_id = ? AND handle = ?",
+        )
+        .bind(room_id)
+        .bind(handle)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            None => Ok(None),
+            Some(row) => Ok(Some(row_to_participant(&row)?)),
+        }
+    }
+
     /// Resolve a participant by the `(room_id, repo, model, cwd)` tuple. Retained
     /// as a descriptive-attribute query (not the identity key — see
     /// `get_participant_by_instance`).
@@ -778,6 +804,29 @@ impl Storage {
             None => Ok(None),
             Some(row) => Ok(Some(row_to_participant(&row)?)),
         }
+    }
+
+    /// Delete participants in a room whose last poll predates `cutoff` (the
+    /// liveness boundary, `now - GHOST_AFTER`). These are ghost rows — typically
+    /// duplicate identities left by churn — that no longer represent a present
+    /// agent but still linger in the table. Returns how many rows were removed.
+    /// Live participants (`last_poll_at >= cutoff`) are never touched, so this is
+    /// safe to run against an active room: it only reclaims what has already aged
+    /// out of every quorum count.
+    pub async fn prune_stale_participants(
+        &self,
+        room_id: &str,
+        cutoff: OffsetDateTime,
+    ) -> Result<u64, StorageError> {
+        let cutoff = cutoff.format(&Rfc3339).map_err(fmt_err)?;
+        let deleted =
+            sqlx::query("DELETE FROM participants WHERE room_id = ? AND last_poll_at < ?")
+                .bind(room_id)
+                .bind(&cutoff)
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
+        Ok(deleted)
     }
 
     pub async fn list_participants(&self, room_id: &str) -> Result<Vec<Participant>, StorageError> {

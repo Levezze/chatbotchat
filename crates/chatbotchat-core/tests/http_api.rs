@@ -1,11 +1,12 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chatbotchat_core::http::{router, AppState};
+use chatbotchat_core::participant::Participant;
 use chatbotchat_core::room::{Room, RoomConfig, RoomState};
 use chatbotchat_core::storage::Storage;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
-use time::OffsetDateTime;
+use time::{Duration, OffsetDateTime};
 use tower::ServiceExt; // for `oneshot`
 
 async fn test_router() -> axum::Router {
@@ -177,6 +178,45 @@ async fn join(
     let status = resp.status();
     let body = body_json(resp.into_body()).await;
     (status, body)
+}
+
+/// Join supplying an explicit `instance` identity (what the client resolves from
+/// an `--as` label / harness session id).
+async fn join_as(
+    app: &axum::Router,
+    room_id: &str,
+    repo: &str,
+    model: &str,
+    cwd: &str,
+    instance: &str,
+) -> (StatusCode, Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/rooms/{room_id}/join"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({ "repo": repo, "model": model, "cwd": cwd, "instance": instance }).to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = body_json(resp.into_body()).await;
+    (status, body)
+}
+
+/// Count the participant rows a room currently has (via its public roster).
+async fn participant_count(app: &axum::Router, room_id: &str) -> usize {
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/rooms/{room_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let body = body_json(resp.into_body()).await;
+    body["participants"]
+        .as_array()
+        .expect("participants array")
+        .len()
 }
 
 async fn send(
@@ -1206,6 +1246,157 @@ async fn join_is_idempotent_per_tuple_and_distinct_otherwise() {
     let (_, b4) = join(&app, &room_id, "mvp-engine", "sonnet46", "/work/a").await;
     assert_ne!(b4["handle"].as_str(), Some(h1.as_str()));
     assert_eq!(b4["resumed"].as_bool(), Some(false));
+}
+
+#[tokio::test]
+async fn resuming_with_the_handle_round_trips_to_the_same_participant() {
+    // The core identity-churn fix. The only identity an agent is ever shown is its
+    // handle (the canonical `instance` is never returned). When it re-attaches by
+    // passing that handle back as its identity, it must resume the SAME participant
+    // — not mint a duplicate. A duplicate is what inflates quorum and stalls
+    // close/extend consensus.
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "resume by handle").await;
+
+    // First join under a session-derived instance mints the handle the agent sees.
+    let (s1, b1) = join_as(
+        &app,
+        &room_id,
+        "mvp-engine",
+        "opus48",
+        "/work/a",
+        "session-1",
+    )
+    .await;
+    assert_eq!(s1, StatusCode::CREATED);
+    let handle = b1["handle"].as_str().expect("handle").to_string();
+    assert_eq!(b1["resumed"].as_bool(), Some(false));
+
+    // The agent lost its session id (reinstall / churn) and re-attaches with the
+    // only label it has: the handle it was shown.
+    let (s2, b2) = join_as(&app, &room_id, "mvp-engine", "opus48", "/work/a", &handle).await;
+    assert_eq!(s2, StatusCode::CREATED);
+    assert_eq!(
+        b2["resumed"].as_bool(),
+        Some(true),
+        "passing the handle back must resume, not mint"
+    );
+    assert_eq!(
+        b2["handle"].as_str(),
+        Some(handle.as_str()),
+        "same participant, same handle"
+    );
+
+    assert_eq!(
+        participant_count(&app, &room_id).await,
+        1,
+        "no duplicate participant row was created"
+    );
+}
+
+#[tokio::test]
+async fn calling_paths_accept_the_handle_as_identity() {
+    // Resuming by handle has to work on the *calling* paths too, not just join —
+    // otherwise `cbc poll --as <handle>` (the natural resume) is rejected as "not a
+    // participant", which is exactly the churn failure. Exercise it through `send`.
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "handle on calling paths").await;
+
+    let (_, b1) = join_as(
+        &app,
+        &room_id,
+        "mvp-engine",
+        "opus48",
+        "/work/a",
+        "session-1",
+    )
+    .await;
+    let handle = b1["handle"].as_str().expect("handle").to_string();
+
+    // Send identifying ourselves by the handle we were shown, not the instance.
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/rooms/{room_id}/messages"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({
+                "repo": "mvp-engine", "model": "opus48", "cwd": "/work/a",
+                "instance": handle, "body": "resumed by handle"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "the handle must resolve the sender, not 400"
+    );
+
+    // The message is attributed to the original participant, and no row was minted.
+    assert_eq!(participant_count(&app, &room_id).await, 1);
+}
+
+#[tokio::test]
+async fn prune_endpoint_drops_ghost_rows_and_keeps_live() {
+    // Operational cleanup for already-accumulated churn: a stale duplicate row is
+    // pruned, the live participant is kept, and the response reports both counts.
+    let (app, storage) = test_router_returning_storage().await;
+    let room_id = open_room_id(&app, "prune ghosts").await;
+
+    // One live participant (joins now), one ghost (last polled 20 min ago).
+    let (_, b1) = join_as(
+        &app,
+        &room_id,
+        "mvp-engine",
+        "opus48",
+        "/work/a",
+        "session-live",
+    )
+    .await;
+    assert_eq!(b1["resumed"].as_bool(), Some(false));
+
+    let now = OffsetDateTime::now_utc();
+    let ghost = Participant {
+        handle: "mvp-engine-opus48-ghst".into(),
+        room_id: room_id.clone(),
+        repo: "mvp-engine".into(),
+        model: "opus48".into(),
+        cwd: "/work/a".into(),
+        instance: "session-ghost".into(),
+        joined_at: now - Duration::hours(1),
+        last_poll_at: now - Duration::minutes(20),
+        last_read_seq: 0,
+        nickname: None,
+        wants_close_at: None,
+        wants_extend_at: None,
+    };
+    storage
+        .create_participant(&ghost)
+        .await
+        .expect("seed ghost");
+    assert_eq!(
+        participant_count(&app, &room_id).await,
+        2,
+        "ghost is present pre-prune"
+    );
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/rooms/{room_id}/prune"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp.into_body()).await;
+    assert_eq!(body["pruned"].as_u64(), Some(1), "the one ghost was pruned");
+    assert_eq!(
+        body["remaining"].as_u64(),
+        Some(1),
+        "the live participant remains"
+    );
+
+    assert_eq!(participant_count(&app, &room_id).await, 1);
 }
 
 #[tokio::test]
