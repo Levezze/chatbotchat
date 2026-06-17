@@ -10,8 +10,10 @@
 //! target currently is from an injected dir, and the read/back-up/write glue
 //! ([`install`]) is path-injected so every branch is tested against a tempdir. The
 //! sharp edge it guards: devkit symlinks `~/.claude/skills/cbc` → its own source, so
-//! writing through that symlink would corrupt devkit's file. [`classify`] detects the
-//! symlink via `symlink_metadata` and [`install`] refuses to follow it unless `force`.
+//! writing through that symlink would corrupt devkit's file. [`classify`] detects a
+//! symlink via `symlink_metadata` — at the `cbc` dir itself OR at the inner `SKILL.md`
+//! — and [`install`] refuses to follow either unless `force` (which removes the link
+//! itself, never its target).
 
 use anyhow::Context;
 use std::path::{Path, PathBuf};
@@ -34,10 +36,10 @@ pub enum Outcome {
     Updated,
     /// The on-disk SKILL.md already matched the bundled copy; nothing written.
     AlreadyPresent,
-    /// The skill dir is a symlink (a devkit-managed install) and `force` was not set,
-    /// so it was left untouched. Carries the link target for the message.
+    /// A symlink (the `cbc` dir, devkit-managed, or an inner `SKILL.md`) was found and
+    /// `force` was not set, so it was left untouched. Carries the link target.
     SkippedSymlink(PathBuf),
-    /// The skill dir was a symlink and `force` replaced it with a real bundled copy.
+    /// A symlink was found and `force` replaced it with a real bundled copy.
     ReplacedSymlink,
 }
 
@@ -45,10 +47,13 @@ pub enum Outcome {
 enum TargetState {
     /// Nothing at the path.
     Absent,
-    /// The path is a symlink (devkit-managed). Carries its link target.
-    Symlink(PathBuf),
-    /// A real directory; its `SKILL.md` either matches the bundled copy or does not
-    /// (a missing inner file counts as "does not match" → a rewrite fills it in).
+    /// A symlink we must not write *through* — either the `cbc` dir itself
+    /// (devkit-managed) or an inner `cbc/SKILL.md`. `link` is the symlink's own path
+    /// (what `force` removes); `target` is what it points at (for the message).
+    Symlink { link: PathBuf, target: PathBuf },
+    /// A real directory whose `SKILL.md` is a real file (or absent); it either matches
+    /// the bundled copy or does not (a missing inner file counts as "does not match" →
+    /// a rewrite fills it in).
     RealDir { matches: bool },
 }
 
@@ -71,9 +76,23 @@ fn classify(cbc_dir: &Path) -> anyhow::Result<TargetState> {
     };
     if meta.file_type().is_symlink() {
         let target = std::fs::read_link(cbc_dir).unwrap_or_else(|_| PathBuf::from("?"));
-        return Ok(TargetState::Symlink(target));
+        return Ok(TargetState::Symlink {
+            link: cbc_dir.to_path_buf(),
+            target,
+        });
     }
+    // `cbc` is a real dir. Guard the inner `SKILL.md` too: if it is itself a symlink,
+    // a write would follow it and clobber its target. Treat it like the dir case.
     let skill_file = cbc_dir.join("SKILL.md");
+    if let Ok(m) = std::fs::symlink_metadata(&skill_file) {
+        if m.file_type().is_symlink() {
+            let target = std::fs::read_link(&skill_file).unwrap_or_else(|_| PathBuf::from("?"));
+            return Ok(TargetState::Symlink {
+                link: skill_file,
+                target,
+            });
+        }
+    }
     let matches = std::fs::read(&skill_file)
         .map(|bytes| bytes == SKILL_BODY.as_bytes())
         .unwrap_or(false);
@@ -107,14 +126,16 @@ pub fn install(skills_dir: &Path, force: bool) -> anyhow::Result<Outcome> {
             write_skill(&cbc_dir, &skill_file)?;
             Ok(Outcome::Updated)
         }
-        TargetState::Symlink(target) => {
+        TargetState::Symlink { link, target } => {
             if !force {
                 return Ok(Outcome::SkippedSymlink(target));
             }
             // Remove the symlink ITSELF (not its target — `remove_file` on a symlink
-            // never touches what it points at), then write a real dir + file.
-            std::fs::remove_file(&cbc_dir)
-                .with_context(|| format!("removing the symlink at {}", cbc_dir.display()))?;
+            // never touches what it points at), then write a real dir + file. `link`
+            // is the `cbc` dir for a devkit symlink, or the inner `SKILL.md` for an
+            // inner-file symlink; removing either leaves a real dir to write into.
+            std::fs::remove_file(&link)
+                .with_context(|| format!("removing the symlink at {}", link.display()))?;
             write_skill(&cbc_dir, &skill_file)?;
             Ok(Outcome::ReplacedSymlink)
         }
@@ -273,6 +294,62 @@ mod tests {
         assert_eq!(
             read(&external_file),
             "DEVKIT SOURCE — must not be touched\n"
+        );
+    }
+
+    // A real `cbc/` dir whose inner `SKILL.md` is itself a symlink to an external
+    // source file. The undocumented-but-possible variant of the corruption vector:
+    // the dir is real (so the dir-level lstat guard does NOT fire), yet writing
+    // `SKILL.md` would follow the inner link and clobber its target. Returns
+    // (skills_dir, external_source_file) so assertions can prove the target is intact.
+    fn inner_file_symlinked(base: &Path) -> (PathBuf, PathBuf) {
+        let skills = base.join("skills");
+        let cbc = skills.join("cbc");
+        std::fs::create_dir_all(&cbc).unwrap();
+        let external_file = base.join("external-SKILL.md");
+        std::fs::write(&external_file, "EXTERNAL SOURCE — must not be touched\n").unwrap();
+        symlink(&external_file, cbc.join("SKILL.md")).unwrap();
+        (skills, external_file)
+    }
+
+    #[test]
+    fn install_skips_an_inner_file_symlink_without_force_and_leaves_target_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let (skills, external_file) = inner_file_symlinked(dir.path());
+
+        let outcome = install(&skills, false).unwrap();
+        match &outcome {
+            Outcome::SkippedSymlink(t) => assert_eq!(t, &external_file),
+            other => panic!("expected SkippedSymlink, got {other:?}"),
+        }
+        // The corruption guard for the inner-file case: the external target is intact.
+        assert_eq!(
+            read(&external_file),
+            "EXTERNAL SOURCE — must not be touched\n"
+        );
+    }
+
+    #[test]
+    fn force_replaces_an_inner_file_symlink_without_touching_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let (skills, external_file) = inner_file_symlinked(dir.path());
+
+        let outcome = install(&skills, true).unwrap();
+        assert_eq!(outcome, Outcome::ReplacedSymlink);
+
+        let skill_file = skills.join("cbc").join("SKILL.md");
+        assert!(
+            !std::fs::symlink_metadata(&skill_file)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the inner SKILL.md must now be a real file, not a symlink"
+        );
+        assert_eq!(read(&skill_file), SKILL_BODY);
+        // The external target the inner symlink pointed at is still untouched.
+        assert_eq!(
+            read(&external_file),
+            "EXTERNAL SOURCE — must not be touched\n"
         );
     }
 
