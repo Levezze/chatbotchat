@@ -30,16 +30,18 @@ pub struct Participant {
     pub nickname: Option<String>,
     /// Pending vote to close the room (consensus close). `Some(ts)` means this
     /// participant has called `cbc_close`; the room closes once a quorum of live
-    /// participants have voted. Cleared (set to `None`) for everyone when any
-    /// participant sends a conversational message — a deterministic "continue".
-    /// `None` means no pending vote.
+    /// participants have voted. Cleared (set to `None`) only for the SENDER when
+    /// *they* send a conversational message — a deterministic "I'll keep talking",
+    /// retracting just their own vote, not the counterpart's (clearing room-wide
+    /// here was the consensus-close deadlock). `None` means no pending vote.
     pub wants_close_at: Option<OffsetDateTime>,
     /// Pending vote to extend the message cap (consensus extend, `cbc_extend`).
-    /// `Some(ts)` means this participant voted to raise the hard cap by +10; the
+    /// `Some(ts)` means this participant voted to raise the hard cap by +20; the
     /// cap bumps once a quorum of live participants have voted, at which point all
     /// extend votes clear. Like `wants_close_at`, a conversational message clears it
-    /// — a landed message means the room had cap room, so the sender did not need
-    /// the extend (a correct implicit decline; a send refused at the cap wall is a
-    /// 409 and never lands, so it cannot clear). `None` means no pending vote.
+    /// only for the SENDER — a landed message means the room had cap room, so the
+    /// sender did not need the extend (a correct implicit self-decline; a send
+    /// refused at the cap wall is a 409 and never lands, so it cannot clear). `None`
+    /// means no pending vote.
     pub wants_extend_at: Option<OffsetDateTime>,
 }

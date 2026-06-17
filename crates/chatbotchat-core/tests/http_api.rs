@@ -1193,6 +1193,45 @@ async fn wait_with_no_counterpart_returns_awaiting_counterpart_immediately() {
 }
 
 #[tokio::test]
+async fn wait_refreshes_presence_even_on_awaiting_counterpart() {
+    // The sole-participant `awaiting_counterpart` path returns *before* the parking
+    // logic that normally refreshes liveness (the `wait_for_message_until` touch).
+    // Yet a background poll holding the line for a late joiner must keep proving it
+    // is alive — otherwise it ages past GHOST_AFTER and the joiner that finally
+    // arrives sees the holder as a stale ghost. So every wait, including this early
+    // return, must refresh `last_poll_at`.
+    let (app, storage) =
+        test_router_with_cap_returning_storage(std::time::Duration::from_secs(1)).await;
+    let room_id = open_room_id(&app, "presence").await;
+    let (_, a) = join(&app, &room_id, "mvp-engine", "opus47", "/work/a").await;
+    let a_handle = a["handle"].as_str().expect("a handle").to_string();
+
+    // Backdate the poller's liveness to simulate a long hold while still alone.
+    let stale = OffsetDateTime::now_utc() - Duration::minutes(20);
+    storage
+        .touch_last_poll(&a_handle, stale)
+        .await
+        .expect("backdate last_poll_at");
+
+    // A sole-participant wait short-circuits with awaiting_counterpart...
+    let (status, body) = wait(&app, &room_id, "mvp-engine", "opus47", "/work/a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"].as_str(), Some("awaiting_counterpart"));
+
+    // ...but it must still have refreshed the caller's presence on the way out.
+    let p = storage
+        .get_participant_by_handle(&room_id, &a_handle)
+        .await
+        .expect("query participant")
+        .expect("participant exists");
+    assert!(
+        p.last_poll_at > stale,
+        "awaiting_counterpart wait must refresh last_poll_at; it stayed at {}",
+        p.last_poll_at
+    );
+}
+
+#[tokio::test]
 async fn wait_times_out_with_paused_by_timeout() {
     let app = test_router_with_cap(std::time::Duration::from_millis(80)).await;
     let room_id = open_room_id(&app, "timeout").await;
@@ -1596,9 +1635,9 @@ async fn hard_cap_refuses_sends_once_the_room_is_full() {
     let room_id = open_room_id(&app, "caps").await;
     join(&app, &room_id, "mvp-engine", "opus47", "/work/a").await;
 
-    // The default hard cap is 10 (RoomConfig::default). A room-wide count, so a
+    // The default hard cap is 20 (RoomConfig::default). A room-wide count, so a
     // single sender filling the budget exercises the gate.
-    const HARD_CAP: usize = 10;
+    const HARD_CAP: usize = 20;
     for i in 0..HARD_CAP {
         let (s, _) = send(
             &app,
@@ -1638,7 +1677,7 @@ async fn hard_cap_refuses_sends_once_the_room_is_full() {
     );
 
     // The refused message must NOT be persisted — a fresh joiner sees exactly the
-    // capped 10 in the room log, not 11.
+    // capped 20 in the room log, not 21.
     let (_, joiner) = join(&app, &room_id, "mvp-engine", "sonnet46", "/work/b").await;
     let recent = joiner["recent_messages"]
         .as_array()
@@ -1804,7 +1843,7 @@ async fn hard_cap_holds_under_concurrent_sends() {
     join(&app, &room_id, "mvp-engine", "opus47", "/work/a").await;
 
     const ATTEMPTS: usize = 30;
-    const HARD_CAP: usize = 10;
+    const HARD_CAP: usize = 20;
 
     let mut set = tokio::task::JoinSet::new();
     for i in 0..ATTEMPTS {
@@ -3296,24 +3335,24 @@ async fn close_is_a_proposal_until_the_counterpart_agrees() {
 }
 
 #[tokio::test]
-async fn a_conversational_send_cancels_a_pending_close() {
-    // A proposes close; B replies instead of agreeing. The reply is a
-    // deterministic "no, continue" — it cancels the pending close, A's wait
-    // delivers the reply (not a close), and A's earlier vote is gone.
+async fn a_counterparts_send_does_not_cancel_my_pending_close() {
+    // The consensus-deadlock fix. A landed message clears only the SENDER's own
+    // pending close vote, never the counterpart's. So A's close vote stands while B
+    // keeps talking, and B's own "substance then vote" close then reaches 2/2 — the
+    // room actually closes, instead of the two agents wiping each other's votes
+    // forever (the room-wide-clear deadlock observed live).
     let (app, _storage) =
         test_router_with_cap_returning_storage(std::time::Duration::from_millis(200)).await;
-    let room_id = open_room_id(&app, "cancel room").await;
+    let room_id = open_room_id(&app, "close survives").await;
     join(&app, &room_id, "repo-a", "opus47", "/a").await;
     join(&app, &room_id, "repo-b", "opus47", "/b").await;
 
+    // A proposes close.
     let (_, body) = lifecycle_op(&app, &room_id, "close", "repo-a", "opus47", "/a", None).await;
-    assert_eq!(
-        body["status"].as_str(),
-        Some("close_proposed"),
-        "got {body}"
-    );
+    assert_eq!(body["status"].as_str(), Some("close_proposed"), "got {body}");
 
-    // B keeps talking.
+    // B sends a wrap-up message (substance before its own vote). This must NOT
+    // clear A's pending close vote.
     let (s, _) = send(
         &app,
         &room_id,
@@ -3321,26 +3360,62 @@ async fn a_conversational_send_cancels_a_pending_close() {
         "opus47",
         "/b",
         None,
-        "wait, one more thing",
+        "agreed, wrapping up",
     )
     .await;
     assert_eq!(s, StatusCode::CREATED);
 
-    // A waits → gets B's message, NOT a close.
+    // A drains B's message normally.
     let (_, wbody) = wait(&app, &room_id, "repo-a", "opus47", "/a").await;
     assert_eq!(
         wbody["message"]["body"].as_str(),
-        Some("wait, one more thing"),
-        "a reply cancels the close and is delivered normally, got {wbody}"
+        Some("agreed, wrapping up"),
+        "got {wbody}"
     );
 
-    // Proof the vote was cleared: B voting now is itself only a fresh proposal
-    // (1/2), not a close — A's earlier vote did not linger.
+    // B now votes close. A's vote survived B's send, so quorum is 2/2 → closed.
+    let (_, cbody) = lifecycle_op(&app, &room_id, "close", "repo-b", "opus47", "/b", None).await;
+    assert_eq!(
+        cbody["status"].as_str(),
+        Some("closed"),
+        "A's close vote must survive the counterpart's message so B's vote reaches 2/2, got {cbody}"
+    );
+}
+
+#[tokio::test]
+async fn my_own_send_cancels_my_own_pending_close() {
+    // The retained, scoped half: a sender's OWN later message retracts its OWN
+    // pending close — "I changed my mind, let's keep talking." A proposes close,
+    // then A itself sends a message; A's vote is gone, so B voting close is only a
+    // fresh 1/2 proposal, not a close.
+    let (app, _storage) =
+        test_router_with_cap_returning_storage(std::time::Duration::from_millis(200)).await;
+    let room_id = open_room_id(&app, "close self-cancel").await;
+    join(&app, &room_id, "repo-a", "opus47", "/a").await;
+    join(&app, &room_id, "repo-b", "opus47", "/b").await;
+
+    let (_, body) = lifecycle_op(&app, &room_id, "close", "repo-a", "opus47", "/a", None).await;
+    assert_eq!(body["status"].as_str(), Some("close_proposed"), "got {body}");
+
+    // A retracts by talking again.
+    let (s, _) = send(
+        &app,
+        &room_id,
+        "repo-a",
+        "opus47",
+        "/a",
+        None,
+        "actually, one more thing",
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+
+    // B votes close → only 1/2, because A's own message cleared A's own vote.
     let (_, cbody) = lifecycle_op(&app, &room_id, "close", "repo-b", "opus47", "/b", None).await;
     assert_eq!(
         cbody["status"].as_str(),
         Some("close_proposed"),
-        "the prior vote must have been cleared by the send, got {cbody}"
+        "A's own send must clear A's own vote, so B's vote is a fresh 1/2 proposal, got {cbody}"
     );
 }
 
@@ -3399,7 +3474,7 @@ async fn force_close_overrides_consensus() {
 async fn extend_is_a_proposal_until_the_counterpart_agrees() {
     // With two live agents, one extend vote is a PROPOSAL, not a bump. The cap is
     // unchanged and the counterpart learns of it via an `extend_proposed` wait
-    // status; only the second vote bumps the hard cap by +10.
+    // status; only the second vote bumps the hard cap by +20.
     let app = test_router_with_cap(std::time::Duration::from_millis(200)).await;
     let room_id = open_with_caps(&app, "extend room", Some(10), None).await;
     join(&app, &room_id, "repo-a", "opus47", "/a").await;
@@ -3429,7 +3504,7 @@ async fn extend_is_a_proposal_until_the_counterpart_agrees() {
         "the counterpart must learn of the pending extend, got {wbody}"
     );
 
-    // B agrees → quorum met → cap bumps by +10.
+    // B agrees → quorum met → cap bumps by +20.
     let (_, ebody) = lifecycle_op(&app, &room_id, "extend", "repo-b", "opus47", "/b", None).await;
     assert_eq!(
         ebody["status"].as_str(),
@@ -3438,25 +3513,54 @@ async fn extend_is_a_proposal_until_the_counterpart_agrees() {
     );
     assert_eq!(
         ebody["hard_cap"].as_u64(),
-        Some(20),
-        "a 10 cap extends to 20, got {ebody}"
+        Some(30),
+        "a 10 cap extends to 30 (+20 step), got {ebody}"
     );
 }
 
 #[tokio::test]
-async fn repeated_extends_stack_by_ten_each() {
-    // Extending is repeatable: each consensus round adds another +10 (10 → 20 → 30).
+async fn default_room_cap_is_twenty_and_extend_adds_twenty() {
+    // The cap defaults: a room opened with no override caps at 20 messages, and one
+    // consensus extend raises it to 40 (+20 step). Pins both the default hard cap
+    // and the extend increment in the canonical, no-override path.
+    let app = test_router().await;
+    let room_id = open_room_id(&app, "default cap").await;
+    join(&app, &room_id, "repo-a", "opus47", "/a").await;
+    join(&app, &room_id, "repo-b", "opus47", "/b").await;
+
+    // Default hard cap is 20 (read from the transcript, which exposes the caps).
+    let (_, tx) = get_transcript(&app, &room_id).await;
+    assert_eq!(
+        tx["hard_cap"].as_u64(),
+        Some(20),
+        "a default room caps at 20 messages, got {tx}"
+    );
+
+    // One consensus extend → 40.
+    lifecycle_op(&app, &room_id, "extend", "repo-a", "opus47", "/a", None).await;
+    let (_, ebody) = lifecycle_op(&app, &room_id, "extend", "repo-b", "opus47", "/b", None).await;
+    assert_eq!(ebody["status"].as_str(), Some("extended"), "got {ebody}");
+    assert_eq!(
+        ebody["hard_cap"].as_u64(),
+        Some(40),
+        "the default 20 cap extends to 40, got {ebody}"
+    );
+}
+
+#[tokio::test]
+async fn repeated_extends_stack_by_twenty_each() {
+    // Extending is repeatable: each consensus round adds another +20 (10 → 30 → 50).
     let app = test_router().await;
     let room_id = open_with_caps(&app, "stack room", Some(10), None).await;
     join(&app, &room_id, "repo-a", "opus47", "/a").await;
     join(&app, &room_id, "repo-b", "opus47", "/b").await;
 
-    // Round 1 → 20.
+    // Round 1 → 30.
     lifecycle_op(&app, &room_id, "extend", "repo-a", "opus47", "/a", None).await;
     let (_, r1) = lifecycle_op(&app, &room_id, "extend", "repo-b", "opus47", "/b", None).await;
-    assert_eq!(r1["hard_cap"].as_u64(), Some(20), "round 1 → 20, got {r1}");
+    assert_eq!(r1["hard_cap"].as_u64(), Some(30), "round 1 → 30, got {r1}");
 
-    // Round 2 → 30 (votes cleared after the first bump, so each side votes afresh).
+    // Round 2 → 50 (votes cleared after the first bump, so each side votes afresh).
     let (_, p2) = lifecycle_op(&app, &room_id, "extend", "repo-a", "opus47", "/a", None).await;
     assert_eq!(
         p2["status"].as_str(),
@@ -3464,7 +3568,7 @@ async fn repeated_extends_stack_by_ten_each() {
         "the first round's votes were cleared, so this is a fresh proposal, got {p2}"
     );
     let (_, r2) = lifecycle_op(&app, &room_id, "extend", "repo-b", "opus47", "/b", None).await;
-    assert_eq!(r2["hard_cap"].as_u64(), Some(30), "round 2 → 30, got {r2}");
+    assert_eq!(r2["hard_cap"].as_u64(), Some(50), "round 2 → 50, got {r2}");
 }
 
 #[tokio::test]
@@ -3491,25 +3595,24 @@ async fn a_lone_live_agent_extends_immediately_when_counterpart_is_a_ghost() {
         Some("extended"),
         "a lone live agent extends immediately past a ghost, got {body}"
     );
-    assert_eq!(body["hard_cap"].as_u64(), Some(20), "got {body}");
+    assert_eq!(body["hard_cap"].as_u64(), Some(30), "10 + 20 step, got {body}");
 }
 
 #[tokio::test]
-async fn a_conversational_send_cancels_a_pending_extend() {
-    // Symmetric with close: a landed message clears a pending extend vote — it means
-    // the room had cap room, so the sender did not need the extend (implicit
-    // decline). So after A proposes and B sends a message, A's vote is gone, and B
-    // voting extend is a FRESH 1/2 proposal, not a 2/2 bump. This is what lets a
-    // declined extend settle instead of pinning the counterpart's poll open.
-    let app = test_router().await;
-    let room_id = open_with_caps(&app, "extend cancel", Some(10), None).await;
+async fn a_counterparts_send_does_not_cancel_my_pending_extend() {
+    // Symmetric with close. A landed message clears only the SENDER's own pending
+    // extend vote, never the counterpart's. So A's extend vote stands while B keeps
+    // talking, and B's own vote then reaches 2/2 → the cap bumps, instead of the
+    // agents wiping each other's extend votes into a deadlock at the cap wall.
+    let app = test_router_with_cap(std::time::Duration::from_millis(200)).await;
+    let room_id = open_with_caps(&app, "extend survives", Some(10), None).await;
     join(&app, &room_id, "repo-a", "opus47", "/a").await;
     join(&app, &room_id, "repo-b", "opus47", "/b").await;
 
     let (_, p) = lifecycle_op(&app, &room_id, "extend", "repo-a", "opus47", "/a", None).await;
     assert_eq!(p["status"].as_str(), Some("extend_proposed"), "got {p}");
 
-    // B keeps talking under the cap — this clears A's extend vote.
+    // B sends a message under the cap — this must NOT clear A's extend vote.
     let (s, _) = send(
         &app,
         &room_id,
@@ -3517,17 +3620,54 @@ async fn a_conversational_send_cancels_a_pending_extend() {
         "opus47",
         "/b",
         None,
+        "one more point",
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+
+    // B votes extend → A's vote survived → 2/2 → the cap bumps.
+    let (_, ebody) = lifecycle_op(&app, &room_id, "extend", "repo-b", "opus47", "/b", None).await;
+    assert_eq!(
+        ebody["status"].as_str(),
+        Some("extended"),
+        "A's extend vote must survive the counterpart's message so B's vote reaches 2/2, got {ebody}"
+    );
+    assert_eq!(ebody["hard_cap"].as_u64(), Some(30), "10 + 20 step, got {ebody}");
+}
+
+#[tokio::test]
+async fn my_own_send_cancels_my_own_pending_extend() {
+    // Retained scoped half: a sender's OWN message retracts its OWN extend vote — a
+    // landed message means the room had cap room, so the sender did not need the
+    // extend (implicit self-decline). A proposes extend, A sends, A's vote is gone,
+    // so B voting extend is a fresh 1/2 proposal, not a bump.
+    let app = test_router().await;
+    let room_id = open_with_caps(&app, "extend self-cancel", Some(10), None).await;
+    join(&app, &room_id, "repo-a", "opus47", "/a").await;
+    join(&app, &room_id, "repo-b", "opus47", "/b").await;
+
+    let (_, p) = lifecycle_op(&app, &room_id, "extend", "repo-a", "opus47", "/a", None).await;
+    assert_eq!(p["status"].as_str(), Some("extend_proposed"), "got {p}");
+
+    // A talks again under the cap — clears A's own extend vote.
+    let (s, _) = send(
+        &app,
+        &room_id,
+        "repo-a",
+        "opus47",
+        "/a",
+        None,
         "still going",
     )
     .await;
     assert_eq!(s, StatusCode::CREATED);
 
-    // B votes extend → A's vote was cleared, so this is a fresh 1/2 proposal, not a bump.
+    // B votes extend → A's vote was cleared by A's own send, so this is a fresh 1/2.
     let (_, ebody) = lifecycle_op(&app, &room_id, "extend", "repo-b", "opus47", "/b", None).await;
     assert_eq!(
         ebody["status"].as_str(),
         Some("extend_proposed"),
-        "the message must have cleared A's vote, so B's vote is a fresh proposal, got {ebody}"
+        "A's own send must clear A's own extend vote, so B's vote is a fresh proposal, got {ebody}"
     );
     assert_eq!(ebody["votes"].as_u64(), Some(1), "got {ebody}");
 }
@@ -3536,8 +3676,8 @@ async fn a_conversational_send_cancels_a_pending_extend() {
 async fn concurrent_deciding_votes_bump_the_cap_exactly_once() {
     // Both agents fire the extend vote at the same time. `try_extend` records the
     // vote, counts, and bumps+clears inside ONE transaction, so the two requests
-    // serialize: exactly one sees quorum and bumps (+10 to 20), the other lands as
-    // a proposal or reads the already-cleared votes — never a double-bump to 30.
+    // serialize: exactly one sees quorum and bumps (+20 to 30), the other lands as
+    // a proposal or reads the already-cleared votes — never a double-bump to 50.
     // (The pre-tx per-statement code could interleave at await points and bump
     // twice; this test guards that regression.)
     let app = test_router().await;
@@ -3565,8 +3705,8 @@ async fn concurrent_deciding_votes_bump_the_cap_exactly_once() {
         .collect();
     assert_eq!(
         caps,
-        vec![20],
-        "the cap rises by exactly +10, never double-bumped, got {caps:?}"
+        vec![30],
+        "the cap rises by exactly +20, never double-bumped, got {caps:?}"
     );
 }
 
@@ -3604,7 +3744,7 @@ async fn extend_works_after_hitting_the_hard_cap_wall() {
     lifecycle_op(&app, &room_id, "extend", "repo-a", "opus47", "/a", None).await;
     let (_, ebody) = lifecycle_op(&app, &room_id, "extend", "repo-b", "opus47", "/b", None).await;
     assert_eq!(ebody["status"].as_str(), Some("extended"), "got {ebody}");
-    assert_eq!(ebody["hard_cap"].as_u64(), Some(12), "2 → 12, got {ebody}");
+    assert_eq!(ebody["hard_cap"].as_u64(), Some(22), "2 → 22, got {ebody}");
 
     // The previously-refused send now succeeds.
     let (after, _) = send(&app, &room_id, "repo-a", "opus47", "/a", None, "now ok").await;

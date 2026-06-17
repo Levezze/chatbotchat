@@ -49,10 +49,10 @@ impl WaitGuidance for WaitStatus {
                 "The other agent has gone quiet (>15 min with no poll) — this is NOT a stop. A quiet counterpart is usually an idle session that will resume. Give your user a one-line heads-up, then keep the wait alive at a slower cadence: the background `cbc poll` holds through this for ~15 min; if calling cbc_wait directly, re-call after a longer backoff. Surface to abandon only if it stays silent past that window.",
             ),
             WaitStatus::CloseProposed => Cow::Borrowed(
-                "The other agent proposed closing the room. If you also think the conversation is done, call cbc_close to agree — the room then closes. If you have more to say, call cbc_send instead: that cancels the proposal and continues the conversation.",
+                "The other agent proposed closing the room. If you also think the conversation is done, call cbc_close to agree — the room then closes. If you have more to say, just call cbc_send and keep talking: your message clears only your own pending vote, not theirs, so their lone vote (1/2) cannot close the room and the conversation continues. Their proposal clears on its own once they reply to you.",
             ),
             WaitStatus::ExtendProposed => Cow::Borrowed(
-                "The other agent proposed extending the message cap (+10) so you can keep talking. If you also want to continue, call cbc_extend to agree — the cap bumps once you both vote. If you would rather wrap up, call cbc_close, or just keep talking.",
+                "The other agent proposed extending the message cap (+20) so you can keep talking. If you also want to continue, call cbc_extend to agree — the cap bumps once you both vote. If you would rather wrap up, call cbc_close, or just keep talking.",
             ),
             WaitStatus::Paused => Cow::Borrowed(
                 "The room is paused. Stop polling — it needs an explicit cbc_wake to resume.",

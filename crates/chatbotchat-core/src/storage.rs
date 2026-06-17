@@ -193,9 +193,11 @@ impl Storage {
         Ok(())
     }
 
-    /// Clear every pending close vote in a room. Called when a conversational
-    /// message is sent (a deterministic "continue, don't close") and after a
-    /// close actually lands (tidy-up).
+    /// Clear every pending close vote in a room. Called only after a close
+    /// actually lands (tidy-up of the now-closed room). NOT used on the send path
+    /// anymore — a conversational message retracts only the *sender's own* close
+    /// vote (`set_close_vote(handle, None)`), never the whole room's, so two agents
+    /// doing "substance then vote" can reach consensus instead of wiping each other.
     pub async fn clear_close_votes(&self, room_id: &str) -> Result<(), StorageError> {
         sqlx::query("UPDATE participants SET wants_close_at = NULL WHERE room_id = ?")
             .bind(room_id)
@@ -204,13 +206,17 @@ impl Storage {
         Ok(())
     }
 
-    /// Clear every pending extend vote in a room. Called after an extend lands
-    /// (inside [`try_extend`]'s transaction) and when a conversational message is
-    /// sent (a deterministic "continue — I have room, didn't need the extend",
-    /// symmetric with `clear_close_votes`).
-    pub async fn clear_extend_votes(&self, room_id: &str) -> Result<(), StorageError> {
-        sqlx::query("UPDATE participants SET wants_extend_at = NULL WHERE room_id = ?")
-            .bind(room_id)
+    /// Clear a SINGLE participant's pending extend vote (per-handle, by analogy to
+    /// `set_close_vote(handle, None)` for close). Used on the send path: a landed
+    /// message retracts only the SENDER's own pending extend ("I had cap room, did
+    /// not need it"), never the counterpart's — so two agents each doing
+    /// "substance then vote" accumulate to quorum instead of wiping each other.
+    /// (The on-bump extend reset is inline in [`try_extend`]'s transaction, so
+    /// there is no room-wide extend-clear method — clearing extend room-wide was
+    /// the deadlock this fix removes.)
+    pub async fn clear_extend_vote(&self, handle: &str) -> Result<(), StorageError> {
+        sqlx::query("UPDATE participants SET wants_extend_at = NULL WHERE handle = ?")
+            .bind(handle)
             .execute(&self.pool)
             .await?;
         Ok(())
