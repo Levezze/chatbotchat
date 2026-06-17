@@ -3756,6 +3756,43 @@ async fn extend_works_after_hitting_the_hard_cap_wall() {
 }
 
 #[tokio::test]
+async fn a_send_refused_at_the_cap_wall_does_not_clear_the_senders_extend_vote() {
+    // The sender-scoped extend clear runs ONLY after a message actually lands — a
+    // send refused at the cap wall (409) returns before it, so it must not retract
+    // a vote the agents are mid-negotiating. Proven behaviorally: A votes extend
+    // (1/2), A's next send hits the wall (409); if that 409 had wrongly cleared A's
+    // vote, B's later vote would read as a fresh 1/2 proposal — so asserting B's
+    // vote COMPLETES the extend (2/2) proves A's vote survived the refused send.
+    let app = test_router().await;
+    let room_id = open_with_caps(&app, "wall preserves vote", Some(2), None).await;
+    join(&app, &room_id, "repo-a", "opus47", "/a").await;
+    join(&app, &room_id, "repo-b", "opus47", "/b").await;
+
+    // Fill the cap of 2.
+    for i in 0..2 {
+        let (s, _) = send(&app, &room_id, "repo-a", "opus47", "/a", None, &format!("m{i}")).await;
+        assert_eq!(s, StatusCode::CREATED, "send {i} under the cap of 2");
+    }
+
+    // A proposes extend → 1/2.
+    let (_, p) = lifecycle_op(&app, &room_id, "extend", "repo-a", "opus47", "/a", None).await;
+    assert_eq!(p["status"].as_str(), Some("extend_proposed"), "got {p}");
+
+    // A's next send hits the wall and is refused — this must NOT clear A's extend vote.
+    let (over, _) = send(&app, &room_id, "repo-a", "opus47", "/a", None, "over").await;
+    assert_eq!(over, StatusCode::CONFLICT, "the 3rd send exceeds the cap of 2");
+
+    // B votes extend → completes to 2/2 BECAUSE A's vote survived the wall-refused send.
+    let (_, ebody) = lifecycle_op(&app, &room_id, "extend", "repo-b", "opus47", "/b", None).await;
+    assert_eq!(
+        ebody["status"].as_str(),
+        Some("extended"),
+        "A's vote must survive a cap-wall 409, so B's vote completes the extend; got {ebody}"
+    );
+    assert_eq!(ebody["hard_cap"].as_u64(), Some(22), "2 → 22, got {ebody}");
+}
+
+#[tokio::test]
 async fn a_proposer_is_not_told_extend_proposed_on_its_own_wait() {
     // The proposer already knows it voted; the `extend_proposed` status is for the
     // OTHER agent to act on. A's own wait must not echo its proposal back at it.
