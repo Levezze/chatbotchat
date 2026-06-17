@@ -675,7 +675,7 @@ const POLL_REGROUND_NEXT: &str =
 /// hold can run the full hour. Kept as a sane upper bound for `0` ("max window") and
 /// over-large overrides.
 const SAFE_JOIN_WAIT_CAP_SECS: u64 = 3600; // ~1 hour
-// Compile-time guard: a sane upper bound (never an accidental multi-day window).
+                                           // Compile-time guard: a sane upper bound (never an accidental multi-day window).
 const _: () = assert!(SAFE_JOIN_WAIT_CAP_SECS <= 3600);
 
 /// After this much accumulated quiet (no join / silent counterpart), the poll

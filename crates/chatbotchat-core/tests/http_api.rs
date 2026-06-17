@@ -3349,7 +3349,11 @@ async fn a_counterparts_send_does_not_cancel_my_pending_close() {
 
     // A proposes close.
     let (_, body) = lifecycle_op(&app, &room_id, "close", "repo-a", "opus47", "/a", None).await;
-    assert_eq!(body["status"].as_str(), Some("close_proposed"), "got {body}");
+    assert_eq!(
+        body["status"].as_str(),
+        Some("close_proposed"),
+        "got {body}"
+    );
 
     // B sends a wrap-up message (substance before its own vote). This must NOT
     // clear A's pending close vote.
@@ -3395,7 +3399,11 @@ async fn my_own_send_cancels_my_own_pending_close() {
     join(&app, &room_id, "repo-b", "opus47", "/b").await;
 
     let (_, body) = lifecycle_op(&app, &room_id, "close", "repo-a", "opus47", "/a", None).await;
-    assert_eq!(body["status"].as_str(), Some("close_proposed"), "got {body}");
+    assert_eq!(
+        body["status"].as_str(),
+        Some("close_proposed"),
+        "got {body}"
+    );
 
     // A retracts by talking again.
     let (s, _) = send(
@@ -3595,7 +3603,11 @@ async fn a_lone_live_agent_extends_immediately_when_counterpart_is_a_ghost() {
         Some("extended"),
         "a lone live agent extends immediately past a ghost, got {body}"
     );
-    assert_eq!(body["hard_cap"].as_u64(), Some(30), "10 + 20 step, got {body}");
+    assert_eq!(
+        body["hard_cap"].as_u64(),
+        Some(30),
+        "10 + 20 step, got {body}"
+    );
 }
 
 #[tokio::test]
@@ -3632,7 +3644,11 @@ async fn a_counterparts_send_does_not_cancel_my_pending_extend() {
         Some("extended"),
         "A's extend vote must survive the counterpart's message so B's vote reaches 2/2, got {ebody}"
     );
-    assert_eq!(ebody["hard_cap"].as_u64(), Some(30), "10 + 20 step, got {ebody}");
+    assert_eq!(
+        ebody["hard_cap"].as_u64(),
+        Some(30),
+        "10 + 20 step, got {ebody}"
+    );
 }
 
 #[tokio::test]
@@ -3770,7 +3786,16 @@ async fn a_send_refused_at_the_cap_wall_does_not_clear_the_senders_extend_vote()
 
     // Fill the cap of 2.
     for i in 0..2 {
-        let (s, _) = send(&app, &room_id, "repo-a", "opus47", "/a", None, &format!("m{i}")).await;
+        let (s, _) = send(
+            &app,
+            &room_id,
+            "repo-a",
+            "opus47",
+            "/a",
+            None,
+            &format!("m{i}"),
+        )
+        .await;
         assert_eq!(s, StatusCode::CREATED, "send {i} under the cap of 2");
     }
 
@@ -3780,7 +3805,11 @@ async fn a_send_refused_at_the_cap_wall_does_not_clear_the_senders_extend_vote()
 
     // A's next send hits the wall and is refused — this must NOT clear A's extend vote.
     let (over, _) = send(&app, &room_id, "repo-a", "opus47", "/a", None, "over").await;
-    assert_eq!(over, StatusCode::CONFLICT, "the 3rd send exceeds the cap of 2");
+    assert_eq!(
+        over,
+        StatusCode::CONFLICT,
+        "the 3rd send exceeds the cap of 2"
+    );
 
     // B votes extend → completes to 2/2 BECAUSE A's vote survived the wall-refused send.
     let (_, ebody) = lifecycle_op(&app, &room_id, "extend", "repo-b", "opus47", "/b", None).await;
