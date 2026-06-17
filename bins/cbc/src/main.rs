@@ -8,6 +8,7 @@ mod context;
 mod install;
 mod mcp;
 mod settings;
+mod skill;
 mod wait_status;
 
 use wait_status::WaitGuidance;
@@ -293,6 +294,19 @@ enum Command {
     /// user settings (~/.claude/settings.json), so the bus stops stalling for
     /// per-call approval. Idempotent; backs up the file before editing.
     AllowTools,
+    /// Install the bundled `cbc` skill into ~/.claude/skills/cbc/ so Claude Code
+    /// gets CBC's agent guidance with no external devkit checkout. Idempotent;
+    /// backs up a stale copy. Skips a devkit-managed symlink unless --force.
+    /// Cross-platform (unlike install-daemon).
+    InstallSkill {
+        /// Replace an existing devkit symlink with cbc's bundled copy (the
+        /// symlink's target is left untouched).
+        #[arg(long)]
+        force: bool,
+        /// Skills directory to write into. Defaults to ~/.claude/skills.
+        #[arg(long)]
+        skills_dir: Option<std::path::PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -625,6 +639,15 @@ async fn main() -> anyhow::Result<()> {
                     settings::print_manual_snippet();
                 }
             }
+        }
+        Command::InstallSkill { force, skills_dir } => {
+            let dir = match skills_dir {
+                Some(d) => d,
+                None => skill::skills_dir()?,
+            };
+            let outcome = skill::install(&dir, force)
+                .with_context(|| format!("installing the cbc skill into {}", dir.display()))?;
+            skill::print_outcome(&dir, &outcome);
         }
     }
 

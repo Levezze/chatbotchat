@@ -260,7 +260,27 @@ pub fn run(port: u16, plist_dir_override: Option<PathBuf>) -> anyhow::Result<()>
     load_launchagent(&plist_path)?;
     print_next_steps(&config, &plist_path, &newsyslog_conf);
     maybe_prompt_allow_tools();
+    install_bundled_skill();
     Ok(())
+}
+
+/// Install the bundled `cbc` Claude Code skill as part of setup. Unlike
+/// `allow-tools` (a standing security approval that earns its interactive prompt),
+/// a skill file is benign guidance text, so this runs automatically and without a
+/// prompt. It is idempotent and symlink-safe: a devkit-managed symlink is left in
+/// place (reported, not clobbered). Never aborts the install — a skills dir we
+/// cannot write to degrades to a printed hint.
+fn install_bundled_skill() {
+    println!();
+    match crate::skill::skills_dir()
+        .and_then(|dir| crate::skill::install(&dir, false).map(|outcome| (dir, outcome)))
+    {
+        Ok((dir, outcome)) => crate::skill::print_outcome(&dir, &outcome),
+        Err(e) => {
+            eprintln!("Could not install the cbc skill automatically: {e:#}");
+            eprintln!("Run `cbc install-skill` yourself once it's resolved.");
+        }
+    }
 }
 
 /// Offer to write the auto-approve rule during an interactive install. Defaults

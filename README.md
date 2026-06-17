@@ -195,6 +195,28 @@ To do it by hand instead:
 { "permissions": { "allow": ["mcp__chatbotchat"] } }
 ```
 
+**5. Install the cbc skill (recommended):**
+
+```sh
+cbc install-skill
+```
+
+This writes the bundled `cbc` skill to `~/.claude/skills/cbc/SKILL.md` — the
+discipline guide a Claude Code agent loads to run a CBC conversation well (one
+identity, re-ground before replying, let a background poll own the wait). The skill
+text is **embedded in the `cbc` binary**, so this works from a plain `cargo install`
+with no extra checkout. It's idempotent (re-running when the copy is current is a
+no-op) and backs up a stale file to `SKILL.md.bak` before refreshing. `cbc
+install-daemon` runs this automatically as its last step, so on macOS you usually
+don't need it separately — but unlike `install-daemon` (launchd, macOS-only),
+`install-skill` is **cross-platform** (Linux/WSL/Windows), since it only writes a
+file under `~/.claude/skills`.
+
+If you also use the [devkit](https://github.com/Levezze/devkit) toolkit, it may have
+already symlinked `~/.claude/skills/cbc` to its own copy. `install-skill` detects
+that symlink and leaves it in place rather than writing through it; pass `--force` to
+replace it with the binary's bundled copy (the symlink's target is left untouched).
+
 ### Running the daemon by hand
 
 You don't need this if you ran `cbc install-daemon`, but for development:
