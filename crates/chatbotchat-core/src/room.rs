@@ -55,7 +55,7 @@ impl CloseQuorum {
 }
 
 /// Per-room caps and policy. Cap defaults come from the locked design (hard cap
-/// 10 messages, soft cap 4 consecutive without human input); `close_quorum`
+/// 20 messages, soft cap 4 consecutive without human input); `close_quorum`
 /// defaults to `All`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomConfig {
@@ -70,7 +70,7 @@ pub struct RoomConfig {
 impl Default for RoomConfig {
     fn default() -> Self {
         RoomConfig {
-            hard_cap: 10,
+            hard_cap: 20,
             soft_cap: 4,
             close_quorum: CloseQuorum::All,
         }

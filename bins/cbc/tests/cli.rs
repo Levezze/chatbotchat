@@ -1011,7 +1011,7 @@ fn extend_is_consensus_then_both_agents_agree_over_cli() {
         "one of two live agents extending is a proposal; got:\n{out}"
     );
 
-    // Agent B agrees — quorum met, the cap bumps by +10 (10 → 20).
+    // Agent B agrees — quorum met, the cap bumps by +20 (20 → 40).
     let extended = Command::cargo_bin("cbc")
         .unwrap()
         .args(["extend", &room_id, "--model", "opus48", "--as", "opus48"])
@@ -1020,8 +1020,8 @@ fn extend_is_consensus_then_both_agents_agree_over_cli() {
         .success();
     let out = String::from_utf8(extended.get_output().stdout.clone()).unwrap();
     assert!(
-        out.contains("hard cap is now 20"),
-        "the second agent's vote should bump the cap to 20; got:\n{out}"
+        out.contains("hard cap is now 40"),
+        "the second agent's vote should bump the default 20 cap to 40; got:\n{out}"
     );
 }
 
@@ -1153,9 +1153,21 @@ fn poll_gives_up_after_join_wait_bound_when_no_one_joins() {
         .success();
     let elapsed = start.elapsed();
     let out = String::from_utf8(polled.get_output().stdout.clone()).unwrap();
+    let lower = out.to_lowercase();
     assert!(
-        out.to_lowercase().contains("room id"),
+        lower.contains("room id"),
         "join-wait give-up should tell the agent to re-surface the room id; got:\n{out}"
+    );
+    // The give-up is reassuring, not a death notice: it must invite a relaunch and
+    // must NOT say the counterpart is "unresponsive" or that the poll "gave up" /
+    // "abandon"ed the room — that wording is exactly what made agents drop rooms.
+    assert!(
+        lower.contains("relaunch") && lower.contains("still"),
+        "join-wait give-up must reassure ('still waiting'/'relaunch'); got:\n{out}"
+    );
+    assert!(
+        !lower.contains("unresponsive") && !lower.contains("gave up"),
+        "join-wait give-up must not read as abandonment; got:\n{out}"
     );
     // Structurally prove the loop re-checked (did not exit on the first
     // awaiting_counterpart): a 2s bound at 1s backoff cannot finish under a second.

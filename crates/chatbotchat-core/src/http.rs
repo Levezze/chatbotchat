@@ -599,23 +599,27 @@ async fn send_message(
         .await?
         .ok_or_else(|| {
             ApiError::Conflict(format!(
-                "hard cap reached ({} messages); cbc_extend (consensus +10) to keep going, or close the room",
+                "hard cap reached ({} messages); cbc_extend (consensus +{EXTEND_STEP}) to keep going, or close the room",
                 room.config.hard_cap
             ))
         })?;
 
-    // A conversational message is a deterministic "continue, don't close": it
-    // cancels any pending close proposal in the room (consensus close). The
-    // counterpart's next wait then delivers this message instead of the
-    // `close_proposed` status. Signals (waiting_user etc.) deliberately do NOT
-    // clear — stepping away is not "keep talking".
-    state.storage.clear_close_votes(&id).await?;
-    // It also clears any pending EXTEND proposal: a landed message means the room
-    // had cap room, so the sender did not need the extend — a correct implicit
-    // decline (symmetric with close). This only runs when the message actually
-    // landed, so a send refused at the cap wall (409, above) never clears an
-    // extend the agents are mid-negotiating.
-    state.storage.clear_extend_votes(&id).await?;
+    // A conversational message is a deterministic "continue, don't close" — but it
+    // retracts only the SENDER's OWN pending close vote, never the counterpart's.
+    // Clearing room-wide here was the consensus-close deadlock: with the "substance
+    // before vote" discipline, the second agent's wrap-up message wiped the first
+    // agent's close vote, so the room never reached 2/2. Scoped to the sender, each
+    // agent's "message then vote" accumulates and the close lands. Your vote stands
+    // until you yourself speak again. Signals (waiting_user etc.) deliberately do
+    // NOT clear — stepping away is not "keep talking".
+    state.storage.set_close_vote(&sender.handle, None).await?;
+    // It also retracts the sender's OWN pending EXTEND vote (same reasoning,
+    // symmetric): a landed message means the room had cap room, so the sender did
+    // not need the extend — an implicit self-decline. Only the sender's vote, so it
+    // cannot wipe the counterpart's. This only runs when the message actually
+    // landed, so a send refused at the cap wall (409, above) never clears an extend
+    // the agents are mid-negotiating.
+    state.storage.clear_extend_vote(&sender.handle).await?;
 
     // Activity bookkeeping. The timestamp bump drives the sweeper's idle/stale
     // timing on every msg; and a msg landing on an `idle`/`stale` room revives it
@@ -915,10 +919,10 @@ fn close_response(
 
 /// How much each agreed consensus extend adds to the hard message cap. Fixed so
 /// the vote is a plain "extend, yes/no" with no number for the two agents to
-/// disagree on; stacking repeated extends grows the cap 10 → 20 → 30 …
-const EXTEND_STEP: u32 = 10;
+/// disagree on; stacking repeated extends grows the cap 20 → 40 → 60 …
+const EXTEND_STEP: u32 = 20;
 
-/// Vote to extend the room's message cap by +10 (consensus extend, mirroring
+/// Vote to extend the room's message cap by +20 (consensus extend, mirroring
 /// consensus close). Records the caller's vote; the cap bumps only once a quorum
 /// of *live* participants have voted, at which point all extend votes clear and a
 /// broadcast `extend` sentinel tells both sides (so a polling proposer learns it
@@ -1125,6 +1129,18 @@ async fn wait_room(
     )
     .await?
     .ok_or_else(|| ApiError::BadRequest("not a participant of this room; join first".into()))?;
+
+    // Refresh the caller's liveness on EVERY wait, up front — before any of the
+    // early-return gates below. The deeper `wait_for_message_until` touch only
+    // fires on the parking path, so the sole-participant (`awaiting_counterpart`)
+    // and terminal-drain returns would otherwise never refresh presence. A
+    // background poll holding the line for a late joiner must keep proving it is
+    // alive while alone, or it ages past GHOST_AFTER and the joiner sees it as a
+    // stale ghost. Idempotent single UPDATE.
+    state
+        .storage
+        .touch_last_poll(&caller.handle, OffsetDateTime::now_utc())
+        .await?;
 
     // State entry gate: a paused/closed/archived room never long-polls, but it
     // must still DRAIN. A zero-cap claim delivers any already-unread message

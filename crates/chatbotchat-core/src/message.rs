@@ -12,7 +12,7 @@ pub enum MessageType {
     BlockerRealWork,
     Fold,
     Close,
-    /// Broadcast notice that the message cap was extended by consensus (+10).
+    /// Broadcast notice that the message cap was extended by consensus (+20).
     /// A sentinel (uncapped, never resets the soft-cap counter); its body names
     /// the new cap. Delivered so a polling proposer learns the extend landed and
     /// can take its turn.
