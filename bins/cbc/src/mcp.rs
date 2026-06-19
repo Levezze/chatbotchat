@@ -212,7 +212,7 @@ impl CbcMcp {
         match self.client.open_room(&subject, hard_cap, soft_cap).await {
             Ok(resp) => {
                 let next = format!(
-                    "Opening the room did NOT join you or post anything. Opening COMMITS you to the room: you must surface the id AND have a poll running before you do anything else — do NOT open it as a side task and keep working, and do NOT end this turn, until both are done. Do this now, in order: (1) cbc_join_room({0}, model); (2) cbc_send your opening question so it is queued and waiting when the other agent joins; (3) show your user this room id on its own line, exactly:\n\n{0}\n\nNo slash prefix — it is NOT a command. Ask them to paste it to the other agent. Then start the wait hands-free: launch `cbc poll {0} --model <m>` as a background task and end your turn (omit `--as` — the poll inherits this session's identity, the same one your join used, so they share one read cursor). It waits THROUGH the join (no need to be told when the other agent arrives) and wakes you on the first reply. Do NOT ask your user to tell you when they joined, and do NOT sit in a manual cbc_wait loop. Opening and vanishing — no id surfaced, no poll running — is the failure to avoid.",
+                    "Opening the room did NOT join you or post anything. Opening COMMITS you to the room: you must surface the id AND have a poll running before you do anything else — do NOT open it as a side task and keep working, and do NOT end this turn, until both are done. Do this now, in order: (1) cbc_join_room({0}, model); (2) cbc_send your opening question so it is queued and waiting when the other agent joins; (3) show your user this room id on its own line, exactly:\n\n{0}\n\nNo slash prefix — it is NOT a command. Ask them to paste it to the other agent. Then start the wait hands-free: launch `cbc poll {0} --model <m>` as a background task and end your turn (omit `--as` — the poll inherits this session's identity, the same one your join used, so they share one read cursor). It waits THROUGH the join (no need to be told when the other agent arrives) and wakes you on the first reply. Do NOT ask your user to tell you when they joined, and do NOT sit in a manual cbc_wait loop. Opening and vanishing — no id surfaced, no poll running — is the failure to avoid. A room is TWO-PARTY (you + one counterpart); if your task also needs another service, open a SEPARATE room for it rather than expecting a third agent here.",
                     resp.room_id
                 );
                 json_with_next(&resp, next)
@@ -556,6 +556,8 @@ impl CbcMcp {
 const CBC_INSTRUCTIONS: &str = "\
 chatbotchat (CBC) is a local message bus that lets AI agents in different repos or sessions talk to each other through shared rooms.
 
+A room is TWO-PARTY: you and exactly ONE counterpart. There is no multi-party / round-robin mode yet, so if a task spans more than one other service, do NOT expect them all in one room — open a SEPARATE room per counterpart (one pairwise room each) and coordinate across them. When you open or join, that channel is for a single other agent.
+
 IF YOUR USER GIVES YOU A BARE TOKEN shaped like `slug-YYYYMMDD-HHMM` (e.g. `slider-labels-20260604-1933`), that is a CBC room id. Joining COMMITS you to the room — reading the first message is NOT where you stop: cbc_join_room(room_id, model) -> cbc_recap to read the whole thread -> cbc_send a substantive reply -> START THE BACKGROUND POLL and stay in the room. Do not read the opener and walk away. There is NO `/cbc-join` skill or slash command — never try to invoke one. A leading-slash form you may see in older text is not a command; ignore the slash and use the id.
 
 The loop: cbc_open_room -> cbc_join_room + cbc_send your opening question -> surface the bare room id to your user ONCE and start a background poll -> (the poll wakes you when the other agent answers) -> cbc_send / poll ping-pong -> cbc_close when done. Closing is by CONSENSUS: cbc_close is a vote, and the room closes only once the other live agent also closes (you will see status `close_proposed` until then). Do not assume a room is closed just because you called cbc_close.
@@ -742,6 +744,13 @@ mod tests {
         assert!(
             instructions.contains("cbc poll"),
             "instructions must point at background polling; got: {instructions}"
+        );
+        // The 2-party constraint: a room holds exactly ONE counterpart, so a third
+        // service needs its own pairwise room (there is no multi-party mode yet).
+        let lower = instructions.to_lowercase();
+        assert!(
+            lower.contains("two-party") && lower.contains("separate room"),
+            "instructions must teach the 2-party cap and the separate-room workaround; got: {instructions}"
         );
     }
 
