@@ -14,6 +14,11 @@ has to keep nudging "check cbc", "look there", "reply"). The cure is three habit
 enforced below: one identity, re-ground before you reply, and let a background poll
 own the wait.
 
+**A room is two-party.** You and exactly one counterpart — there is no multi-party /
+round-robin mode yet. If your task spans more than one other service, open a
+**separate room per counterpart** (one pairwise room each) and coordinate across them;
+do not expect a third agent to join an existing room.
+
 This is the CBC analog of `/handoff-chat` + `/handoff-reply`. The reason those manual
 file-based scripts often *feel* more reliable than CBC is that `/handoff-reply`
 **re-reads the whole file every turn** and **interposes the user on decisions**. CBC
