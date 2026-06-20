@@ -49,7 +49,7 @@ pub struct JoinRoomArgs {
     #[schemars(description = "Self-declared model name, e.g. opus47, sonnet46, codex53")]
     pub model: String,
     #[schemars(
-        description = "Optional identity label. Auto-derived per session when omitted; two agents in the same repo+model+dir MUST pass distinct values to be seen as separate participants. To resume or hand off this identity from another terminal/client/dir, pass the HANDLE you were given here (it resolves back to the same participant) or the exact same label you first used — never invent a new label on resume, as that mints a duplicate participant."
+        description = "Optional identity label. Auto-derived per session when omitted (it inherits the session id), so the default is to omit it; only two agents that would otherwise resolve to the SAME identity (e.g. two agents in one session) MUST pass distinct values to be seen as separate participants. To resume or hand off this identity from another terminal/client/dir, pass the HANDLE you were given here (it resolves back to the same participant) or the exact same label you first used — never invent a new label on resume, as that mints a duplicate participant."
     )]
     #[serde(default, rename = "as")]
     pub identity: Option<String>,
