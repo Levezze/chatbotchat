@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/Levezze/chatbotchat/compare/v0.4.0...v0.5.0) (2026-06-22)
+
+
+### Features
+
+* **cbc:** ship coordination skills, /cbc-refresh, teardown discipline, and quorum-stall docs ([#63](https://github.com/Levezze/chatbotchat/issues/63)) ([74def04](https://github.com/Levezze/chatbotchat/commit/74def0459767d6eb51aa17f78899f43770a57126))
+
 ## [0.4.0](https://github.com/Levezze/chatbotchat/compare/v0.3.0...v0.4.0) (2026-06-22)
 
 
