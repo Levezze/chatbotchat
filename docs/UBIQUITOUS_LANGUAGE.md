@@ -23,6 +23,7 @@ share one word-family; keep them apart.
 | **Identity** / **instance** | The opaque token that distinguishes one participant from another within a room. Resolved from `--as` → `CBC_INSTANCE` → `CLAUDE_CODE_SESSION_ID` → `pid-N` (`bins/cbc/src/context.rs`). Two agents in the same `(repo, model, cwd)` are separate participants only if their **instance** differs. | "session" (the session id is just one *source* of an instance), bare "identity" with no instance behind it |
 | **Handle** | The stable, routable display id minted on first join: `<repo>-<model>-<sess4hex>` (`identity.rs`). Appears as a message's `sender` and as a `--to` recipient. | treating `sender`/`to`/`recipient` as *different* things — they are all a handle in a particular role |
 | **Nickname** | An optional, cosmetic label shown next to the handle in `cbc status`/`cbc show`. Never affects identity, routing, or `sender`. Set with `--nick` / `nickname` (`participant.rs`). | "display name" used as if it carried identity |
+| **Identity churn** *(new)* | The event of an agent re-joining under a **different instance** than its prior session — due to a `/clear`, fork, fresh session, or `cwd` change — so the server mints a new participant row instead of resuming the old one. The old row retains a recent `last_poll_at` for up to `GHOST_AFTER` (15 min) and can block close/extend **quorum** until it ages out or is pruned. | "re-join" (too neutral — identity churn specifically means a *new identity*, not a reconnect on the same instance), "session restart" |
 
 **Why instance, not the tuple:** identity is keyed on `instance` alone so a chat
 **resumed** in another terminal or **handed off** to another client continues as
@@ -157,7 +158,9 @@ always two-party; coordination is built by composing pairwise rooms. The skills
   Participants — or immediately on a **force close**.
 - A **Poll** wraps many **Waits**; a Wait returns one **wait status**.
 
-## Example dialogue
+## Example dialogues
+
+### Closing and quorum
 
 > **Dev:** When agent A calls `cbc_close`, is the room closed?
 >
@@ -178,8 +181,53 @@ always two-party; coordination is built by composing pairwise rooms. The skills
 > doesn't touch the caps) tells A's **poll** to back off by `retry_after`, and
 > B's wait stays **live**, so no `counterpart_stale`.
 
+### Quorum stall and identity churn
+
+> **Dev:** Both A and B called `cbc_close`, but the room is still in
+> `close_proposed`. What happened?
+>
+> **Domain expert:** **Quorum stall** — the **quorum** denominator is probably 3,
+> not 2. A earlier cleared its context and re-joined, which caused **identity
+> churn**: the server minted a new participant row instead of resuming the old
+> one. The old row still has a recent `last_poll_at`, so it counts as **live**
+> but never votes. Two votes against a needed-3 quorum.
+>
+> **Dev:** So what's the fix?
+>
+> **Domain expert:** `cbc prune <room>` drops rows past `GHOST_AFTER` (15 min).
+> If A's old row has aged out, prune removes it and reduces the quorum denominator
+> back to 2; then a re-vote closes the room. If the row is still fresh, wait 15
+> min or force-close (human-only escape hatch).
+>
+> **Dev:** Is the churn-created old row the same thing as a **ghost**?
+>
+> **Domain expert:** A **ghost** is any participant past `GHOST_AFTER`. A
+> **duplicate participant** is the specific ghost that **identity churn** creates —
+> the abandoned old row of an agent that rejoined under a new instance. All
+> duplicates eventually become ghosts; not all ghosts are duplicates (a participant
+> that simply stopped polling is a ghost too).
+
+### Refresh
+
+> **Dev:** Agent A wants to move a long-running peer room to a fresh slate. Can
+> it just open a new room and tell B to join?
+>
+> **Domain expert:** Almost — but A must send the new room id **through the old
+> room**. The old room is the only **relay** channel to B; if A closes it first,
+> B has no way to get the new id. That is the **refresh** protocol: open new room,
+> post a **carry-over summary** as the opener, send the new id over the old room,
+> wait for B to join, *then* consensus-close the old room.
+>
+> **Dev:** Does A's close vote on the old room also stop B's poll shell?
+>
+> **Domain expert:** No. **Wait teardown** is bilateral — A stops its own old
+> poll shell (`TaskStop` + end any `/loop`), and B must stop its own. The
+> initiator cannot reach into B's terminal. If B skips teardown, B's shell keeps
+> firing `cbc poll` on a dead room indefinitely.
+
 ## Flagged ambiguities
 
+- **"ghost participant" vs "ghost" (liveness term).** The **Liveness** section defines **ghost** as any participant past `GHOST_AFTER`. The **Room refresh and teardown** section uses **ghost participant** and **duplicate participant** for the specific ghost created by **identity churn**. These are related but not identical: a ghost from churn is always a ghost, but a ghost from simple inactivity is not a duplicate. When the distinction matters (e.g. quorum-stall diagnosis), prefer **duplicate participant** for the churn case and reserve **ghost** for the general liveness concept.
 - **"stale" is overloaded three ways.** `stale` is a *room state* (7d). A
   **ghost** is a *participant* past `GHOST_AFTER` (15 min). `counterpart_stale`
   is a *wait status* meaning all other participants are ghosts. They are related
