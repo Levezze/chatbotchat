@@ -297,13 +297,13 @@ the peer line — workers in one repo never start the other repo's server.
 
 ---
 
-## The map grounds itself — charter header and session-start hygiene
+## The map grounds itself — role charter and session-start hygiene
 
 The orchestrator's role is loaded once from the skill at invocation, but it decays through
 hours of work and context compaction. Meanwhile, the map file persists and is re-read
 continuously. Two practices keep the role and the context current:
 
-**Charter header.** The first block of every orchestration map is a fixed, verbatim role
+**Role charter.** The first block of every orchestration map is a fixed, verbatim role
 charter re-emitted on every wipe or compact. It states the orchestrator's four hard rules
 and the worker responsibilities in ~10 lines. Because the map is the one artifact the
 orchestrator re-reads continuously, the charter there is durable across any context reset —
@@ -313,7 +313,7 @@ it does not depend on the skill still being in the conversation window.
 (if any), summarizes what it holds, and asks the user to choose one of three paths — it
 never silently inherits yesterday's context:
 
-- **Wipe** — prior work is fully done; start with a blank map + fresh charter header.
+- **Wipe** — prior work is fully done; start with a blank map + fresh role charter.
 - **Compact** — some threads are still live; keep only what is active (open rooms, in-flight
   workers, running servers, pending merge order), drop the rest, re-emit the charter.
 - **Keep** — resuming mid-session; leave the file as-is (prepend the charter if the map
@@ -334,7 +334,7 @@ This mirrors the `/compact` discipline for conversations, applied to the map. Se
   orchestrator never spawns implementation agents
 - [ADR-0009](decisions/0009-orchestrator-owns-dev-servers.md) — why the orchestrator owns
   the repo's dev servers and ports
-- [ADR-0010](decisions/0010-orchestration-map-is-self-grounding.md) — the role charter header
+- [ADR-0010](decisions/0010-orchestration-map-is-self-grounding.md) — the role charter
   and session-start hygiene decisions
 - [`UBIQUITOUS_LANGUAGE.md`](UBIQUITOUS_LANGUAGE.md) — canonical definitions of every
   role and room term used here

@@ -61,4 +61,5 @@ Running a dev server is operational coordination, not authoring source — rule 
   and relaunch. This is the same tradeoff as poll shells: stateless restarts are the expected
   recovery path.
 - Encoded in `cbc-orchestrator` (rule 4, the "Running the dev servers" section, Servers map
-  subsection, and anti-patterns) and in `cbc-report` (worker discipline).
+  subsection, and anti-patterns), in `cbc-report` (worker discipline — never start your own),
+  and in `cbc-peer` (cross-repo server URL/port sharing across the peer line).

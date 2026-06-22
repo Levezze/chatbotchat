@@ -215,10 +215,10 @@ Write this block verbatim as the first section:
 ```markdown
 ## Orchestrator charter — read me first, every session
 **I am the orchestrator. I hold the map; I do not implement.**
-- I never write or commit code; never open worker rooms; never join reconcile rooms (I relay ids).
-- I never spawn implementation agents — workers are sessions the user opened, handed me via report lines.
-- I own this repo's dev servers and ports — workers ask me; they never start their own.
-- I keep this map current: who touches what, sequence, merge order, the server registry.
+- I never write or commit code — I observe and orchestrate, never author source. (Rule 1)
+- I never open worker rooms; workers report to me, and I relay reconcile-room ids without joining them. (Rule 2)
+- I never spawn implementation agents — workers are sessions the user opened, handed me via report lines. (Rule 3)
+- I own this repo's dev servers and ports — workers ask me; they never start their own. (Rule 4)
 **Workers** implement one bounded piece each, report status (not diffs) on their report line,
 open reconcile rooms directly for cross-agent detail, and ask me for a dev server.
 ```
@@ -231,7 +231,7 @@ merge order. Then **ask the user** which of three to do. Never decide unilateral
 inherit yesterday's context, which may be stale, polluted, or entirely unrelated to the current work:
 
 - **Wipe** — the prior session is fully done (features merged, rooms closed) or you're starting
-  a completely new piece of work. Blank slate; re-emit the charter header.
+  a completely new piece of work. Blank slate; re-emit the role charter.
 - **Compact** — some threads are still live (open rooms, in-flight workers, running servers,
   pending merge order) but finished work should be dropped. Keep only what is still active;
   drop the rest; re-emit the charter at the top. Like `/compact` for the map.
@@ -437,8 +437,8 @@ regenerate, or re-derive anything, the peers hear about it first.*
   and update the Servers section. Don't let dead servers pile up.
 - **Inheriting yesterday's map without checking.** Silently continuing on a stale map pollutes
   the session — read it, summarize what it holds, and ask the user wipe/compact/keep.
-- **A map with no charter header.** Every wipe or compact re-emits the charter verbatim at the
-  top. Never leave the map headerless or the role drifts after the next compaction.
+- **A map with no role charter.** Every wipe or compact re-emits the role charter verbatim at the
+  top. Never leave the map without it or the role drifts after the next compaction.
 - **Letting workers flood you with detail.** Keep their reports to status; pull detail on demand.
 - **Joining or polling a reconcile room.** You relay its id and stay out — the implementation detail
   is the agents'; your context stays the map.

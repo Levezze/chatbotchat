@@ -110,7 +110,7 @@ In a multi-worktree setup, agents independently launching dev servers fight for 
 and kill each other's running instances. The orchestrator holds the full port picture and is the
 single authority on what is running.
 
-When you need the app running (to test, to hit an endpoint, to verify your changes):
+When you need a dev server running (to test, to hit an endpoint, to verify your changes):
 
 1. **Ask over your report line** — *"need a dev server for `<feature>` — which port do I hit, or
    can you start one?"* The orchestrator either points you at a server already running, or starts
