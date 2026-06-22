@@ -94,9 +94,9 @@ to the peer line is the cross-repo *outcome* — "the contract is now X, regener
 ## Teardown
 
 When the cross-repo coordination episode is done, close by **consensus** (`cbc_close`; never
-`--force`) and **stop the peer room's background-poll shell** — same discipline as a finished
-worker room. Peer rooms count toward the one-poll-per-room load, so don't leave a settled one
-running.
+`--force`) and **stop the peer room's background-poll shell** (`TaskStop` the background poll task
+and end any `/loop` driving it; see `/cbc` Closing). Peer rooms count toward the one-poll-per-room
+load, so don't leave a settled one running.
 
 ## Anti-patterns
 

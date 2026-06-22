@@ -467,6 +467,11 @@ mod tests {
                 expected.escape_debug()
             );
             assert!(
+                skill.body.contains("\ndescription:"),
+                "{} must have a description: field in its frontmatter",
+                skill.name
+            );
+            assert!(
                 skill.body.len() > 500,
                 "{} skill body must be non-trivial",
                 skill.name
