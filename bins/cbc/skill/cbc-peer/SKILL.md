@@ -58,6 +58,10 @@ decision. Concretely, raise it in the peer room(s):
 - **Shared schema / migrations** — order and compatibility of DB changes across repos.
 - **Cross-repo merge order** — which repo lands first so the other isn't briefly broken.
 - **Heads-up** — "my repo's agents are about to change X that your repo consumes/derives from."
+- **A dev server URL/port another repo consumes** — when agents in your repo need to hit the peer
+  repo's running dev server (e.g. client workers hitting api's local dev URL), that is a cross-repo
+  dependency. Each orchestrator owns its **own** repo's dev servers; share the consumable URL/port
+  across the peer line rather than having workers in one repo start the other's server.
 
 **Refer to agents by their `<repo>-<feature>` name across the peer line** — `engine-recompute`,
 `api-recompute`, `client-labels` — never by an opaque instance hash. That's what lets both sides

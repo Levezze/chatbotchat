@@ -57,8 +57,8 @@ obvious. So:
 
 | Role | Who | Holds | Never |
 |------|-----|-------|-------|
-| **Orchestrator** | one per repo | the map (who touches what, sequence, merge order) | writes implementation code; opens worker rooms; joins reconcile rooms; spawns implementation subagents |
-| **Worker** | each implementation agent | one bounded piece of the work | solves shared concerns alone; deviates from sequencing silently |
+| **Orchestrator** | one per repo | the map (who touches what, sequence, merge order); the dev servers (which port runs what) | writes implementation code; opens worker rooms; joins reconcile rooms; spawns implementation subagents; lets workers start their own dev servers |
+| **Worker** | each implementation agent | one bounded piece of the work | solves shared concerns alone; deviates from sequencing silently; starts its own dev server or clobbers another agent's |
 | **Peer orchestrator** | the orchestrator of another repo | the cross-repo contract surface | pipes same-repo worker detail across the peer line |
 
 And two room kinds beyond the base chat:
@@ -263,12 +263,79 @@ analysis and the deferred core fix.
 
 ---
 
+## Dev servers — the orchestrator owns the ports
+
+When multiple agents work in separate worktrees, every agent independently starting
+`npm run dev` (or the repo's equivalent) produces port collisions: two processes fight
+for the same port, one clobbers the other's running instance, and no one has a source of
+truth for what is actually up. The fix mirrors the topology CBC already enforces: the
+**orchestrator holds the cross-agent picture, so the orchestrator owns the dev servers.**
+
+**The rule:** workers never start their own dev server. When a worker needs the app
+running, it asks its orchestrator over its report line. The orchestrator either points it
+at a server already running (reuse-by-default) or starts a new one on a free port when
+the feature needs isolation (a breaking API change, divergent env/config, a disruptive
+migration). The orchestrator decides.
+
+**Running it:** the orchestrator launches the dev command as a labeled background task
+in its own session and records `port | server/command | agent/feature | status` in the
+**Servers** section of its map. It verifies the port is free before binding (`lsof -i :PORT`
+— the user or another process may already hold it).
+
+**Lifecycle:** servers live in the orchestrator's session. If the orchestrator goes down,
+servers stop. On reconnect it re-verifies which ports are actually up before trusting the
+registry (same discipline as the poll-crash section: a dead task hides truth), then
+relaunches any server the map says should be running.
+
+**Teardown:** when a feature is done and its isolated server is no longer needed,
+`TaskStop` the background task and remove it from the Servers section. Don't let orphaned
+servers pile up — this is the same cleanup discipline as finished-room poll shells.
+
+**Cross-repo:** each orchestrator owns its own repo's servers. When agents in one repo
+need to hit a server running in another repo, the consumable URL/port is shared across
+the peer line — workers in one repo never start the other repo's server.
+
+---
+
+## The map grounds itself — role charter and session-start hygiene
+
+The orchestrator's role is loaded once from the skill at invocation, but it decays through
+hours of work and context compaction. Meanwhile, the map file persists and is re-read
+continuously. Two practices keep the role and the context current:
+
+**Role charter.** The first block of every orchestration map is a fixed, verbatim role
+charter re-emitted on every wipe or compact. It states the orchestrator's four hard rules
+and the worker responsibilities in ~10 lines. Because the map is the one artifact the
+orchestrator re-reads continuously, the charter there is durable across any context reset —
+it does not depend on the skill still being in the conversation window.
+
+**Session-start hygiene.** When a fresh orchestrator launches, it reads the existing map
+(if any), summarizes what it holds, and asks the user to choose one of three paths — it
+never silently inherits yesterday's context:
+
+- **Wipe** — prior work is fully done; start with a blank map + fresh role charter.
+- **Compact** — some threads are still live; keep only what is active (open rooms, in-flight
+  workers, running servers, pending merge order), drop the rest, re-emit the charter.
+- **Keep** — resuming mid-session; leave the file as-is (prepend the charter if the map
+  predates this convention).
+
+This mirrors the `/compact` discipline for conversations, applied to the map. See
+[ADR-0010](decisions/0010-orchestration-map-is-self-grounding.md) for the decision record.
+
+---
+
 ## See also
 
 - [ADR-0006](decisions/0006-coordination-modes-direct-and-orchestrated.md) — the
   decision record for the two modes and the orchestrator boundary
 - [ADR-0007](decisions/0007-room-refresh-and-close-teardown.md) — room refresh protocol,
   close-teardown discipline, and the quorum-stall failure mode
+- [ADR-0008](decisions/0008-orchestrator-never-spawns-implementation-agents.md) — why the
+  orchestrator never spawns implementation agents
+- [ADR-0009](decisions/0009-orchestrator-owns-dev-servers.md) — why the orchestrator owns
+  the repo's dev servers and ports
+- [ADR-0010](decisions/0010-orchestration-map-is-self-grounding.md) — the role charter
+  and session-start hygiene decisions
 - [`UBIQUITOUS_LANGUAGE.md`](UBIQUITOUS_LANGUAGE.md) — canonical definitions of every
   role and room term used here
 - The skills themselves: `cbc-orchestrator`, `cbc-report`, `cbc-peer`, `cbc-recap`,

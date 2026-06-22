@@ -129,8 +129,11 @@ participant plays* and *patterns of room use* — not new room mechanics. A room
 always two-party; coordination is built by composing pairwise rooms. The skills
 (`cbc-orchestrator`, `cbc-report`, `cbc-peer`, `cbc-recap`, `cbc-reconcile`,
 `cbc-refresh`) encode the discipline; see [`COORDINATION_MODES.md`](COORDINATION_MODES.md),
-[ADR-0006](decisions/0006-coordination-modes-direct-and-orchestrated.md), and
-[ADR-0007](decisions/0007-room-refresh-and-close-teardown.md).
+[ADR-0006](decisions/0006-coordination-modes-direct-and-orchestrated.md),
+[ADR-0007](decisions/0007-room-refresh-and-close-teardown.md),
+[ADR-0008](decisions/0008-orchestrator-never-spawns-implementation-agents.md),
+[ADR-0009](decisions/0009-orchestrator-owns-dev-servers.md), and
+[ADR-0010](decisions/0010-orchestration-map-is-self-grounding.md).
 
 | Term | Definition | Aliases to avoid |
 |------|-----------|-----------------|
@@ -142,7 +145,11 @@ always two-party; coordination is built by composing pairwise rooms. The skills
 | **Report line** | The room a worker opens to its orchestrator and keeps **open for the whole job** (not the usual open→reconcile→close): concise status flows up so the orchestrator can prevent collisions. Opened with a high `hard_cap`. | "status channel", "worker room" used loosely |
 | **Reconcile room** | A **temporary, normal-lifecycle** room (open → reconcile → consensus close) two implementation agents open **directly** to share real implementation detail — types, shapes, payloads, signatures, code — that must **not** reach the orchestrator. In orchestrated mode the orchestrator **relays its id without joining**. | "side channel" (too vague), conflating with a report line |
 | **Relay** | An orchestrator forwarding a reconcile room **id** (never its content) so two agents can connect: same-repo over the other worker's report line; cross-repo across the peer line to the peer orchestrator. Relaying never means **joining**. | "proxy", "bridge" used to imply the orchestrator is *in* the room |
-| **Map** / **orchestration map** | The orchestrator's on-disk picture of the board (`.cbc/orchestration-<repo>-<date>.md`): roster, each agent's surfaces and sequence, collisions, merge order, and one-line `A↔B reconciling <surface>` notes. Rebuilt from the rooms, never from memory. | "plan" (the worker's plan is a different thing), "state" |
+| **Map** / **orchestration map** | The orchestrator's on-disk picture of the board (`.cbc/orchestration-<repo>-<date>.md`): roster, each agent's surfaces and sequence, collisions, merge order, the **server registry**, and one-line `A↔B reconciling <surface>` notes. Always opens with the **role charter**. Rebuilt from the rooms, never from memory. | "plan" (the worker's plan is a different thing), "state" |
+| **Dev server** | A long-running process serving the repo's app for development and testing. Owned and run by the **orchestrator**; workers request one over their report line and never start their own. Cross-repo: each orchestrator owns its own repo's servers; consumable URLs are shared across the **peer line**. | "local server", "the app" |
+| **Server registry** | The section of the **map** tracking each running dev server (`port → command → agent/feature → status`). Kept as a table in the map's Servers section; updated when a server starts, stops, or is torn down. | "port table", "port map" |
+| **Role charter** | The fixed, verbatim block at the top of the **map** stating the orchestrator's four hard rules and worker responsibilities (~10 lines). Re-emitted on every wipe or compact so the role survives context compaction without re-invoking the skill. | "the preamble", "the header" |
+| **Session-start hygiene** | The launch-time step where a fresh orchestrator reads the existing map, summarizes what it holds, and asks the user to **wipe / compact / keep** — never silently inheriting stale or unrelated context. | "map check" |
 
 ---
 
@@ -225,6 +232,20 @@ always two-party; coordination is built by composing pairwise rooms. The skills
 > initiator cannot reach into B's terminal. If B skips teardown, B's shell keeps
 > firing `cbc poll` on a dead room indefinitely.
 
+### Dev server
+
+> **Worker (api-fix-contract):** "I need to hit the API to verify the contract change — can
+> you start a dev server for me?"
+>
+> **Orchestrator:** "api-orchestrator already has the API running on port 3000 for
+> api-recompute — use that one; it serves the same codebase. URL: `http://localhost:3000`."
+>
+> **Worker:** "The contract change I'm making is breaking for api-recompute's current calls.
+> I need an isolated instance so I don't break its tests."
+>
+> **Orchestrator:** "Agreed — isolated server needed. Starting one on port 3001 (`npm run dev
+> -- --port 3001`). Use `http://localhost:3001`. I've updated the Servers section in the map."
+
 ## Flagged ambiguities
 
 - **"ghost participant" vs "ghost" (liveness term).** The **Liveness** section defines **ghost** as any participant past `GHOST_AFTER`. The **Room refresh and teardown** section uses **ghost participant** and **duplicate participant** for the specific ghost created by **identity churn**. These are related but not identical: a ghost from churn is always a ghost, but a ghost from simple inactivity is not a duplicate. When the distinction matters (e.g. quorum-stall diagnosis), prefer **duplicate participant** for the churn case and reserve **ghost** for the general liveness concept.
@@ -240,6 +261,13 @@ always two-party; coordination is built by composing pairwise rooms. The skills
   umbrella concept — pair it with "instance" when precision matters.
 - **"wait" vs "poll".** A *wait* is one server long-poll; a *poll* (`cbc poll`)
   is the client loop that owns many waits. Don't call a single `cbc_wait` a poll.
+- **"port" is overloaded.** The CBC daemon's own `--port` (default 8484) is the daemon's
+  HTTP listen port. The **server registry** term "port" refers to a **repo's dev-server port**
+  the orchestrator manages. These are unrelated; avoid using bare "port" when the context is
+  ambiguous — say "daemon port" vs "dev-server port."
+- **"compact" is overloaded.** Claude Code's `/compact` compacts a *conversation context*.
+  The orchestrator **compacts its map** at session start (keeps only live/active entries, drops
+  finished work). Related idea, different artifact — never conflate them.
 
 ## Deferred: code renames
 

@@ -104,6 +104,24 @@ the other agents from stepping on each other. So:
   different things about the same surface), say so in your room — that's a grounding gap for the
   orchestrator to resolve, not something to guess your way through.
 
+## Need a dev server? Ask the orchestrator — never start your own
+
+In a multi-worktree setup, agents independently launching dev servers fight for the same ports
+and kill each other's running instances. The orchestrator holds the full port picture and is the
+single authority on what is running.
+
+When you need a dev server running (to test, to hit an endpoint, to verify your changes):
+
+1. **Ask over your report line** — *"need a dev server for `<feature>` — which port do I hit, or
+   can you start one?"* The orchestrator either points you at a server already running, or starts
+   one on a free port and hands you the URL/port.
+2. **Never** run `npm run dev` / `cargo run` / `python -m` / any other dev-server start command
+   yourself. Not even "just this once."
+3. **Never kill or restart** a server another agent is using — if a process is running on a port
+   the orchestrator assigned, it may be shared by other workers.
+4. **If a server you were given goes down**, tell the orchestrator rather than grabbing the port
+   yourself — it may need to restart the server, check the port, or reassign you.
+
 ## Need a direct line to another agent? Open a reconcile room
 
 Some things aren't for the orchestrator at all — you need to talk **directly** to another agent to
@@ -188,6 +206,8 @@ not until you "mostly" finish.
 - **Asking another agent code questions *through* the orchestrator line.** Open a reconcile room
   (`/cbc-reconcile`); the orchestrator relays the id, it does not carry your implementation detail.
 - **Going silent while touching a shared surface.** That's the one moment you *must* speak up.
+- **Starting your own dev server, or killing/taking over another agent's running server.** Ask
+  the orchestrator for a port; it owns the servers.
 - **Treating this like a normal CBC room** — opening, reconciling once, voting close. The line
   stays open through the whole job.
 - **Deviating from a sequencing instruction silently.** Comply or push back in-room.

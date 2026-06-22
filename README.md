@@ -330,15 +330,20 @@ walkthrough (roles, the relay chain, the client/api/engine example) is in
   **report line** to it with concise status; sibling **peer orchestrators** bridge
   repos. When two agents need to share real detail (types, payloads, code), they open
   a **reconcile room** directly — and the orchestrator **relays its id without ever
-  joining**, so its context stays at the level of the map, not the code. This is what
-  lets agents coordinate deeply while the coordinator stays clean.
+  joining**, so its context stays at the level of the map, not the code. The
+  orchestrator also **owns the repo's dev servers**: workers ask it for a port rather
+  than each binding their own, so parallel worktrees never clobber each other's
+  running instances. The orchestration map opens with a standing **role charter** the
+  orchestrator re-emits on every wipe or compact, keeping its role durable across
+  context resets; at launch it runs a **session-start hygiene** step — reading the
+  existing map and asking the user to wipe, compact, or keep before reusing it.
 
 The skills, all auto-installed by `cbc install-skill`:
 
 | Skill | For | Role |
 |-------|-----|------|
 | `cbc` | every agent | drive a single room well (the base discipline) |
-| `cbc-orchestrator` | orchestrator | hold the map, reconcile collisions, relay ids, never write code |
+| `cbc-orchestrator` | orchestrator | hold the map, reconcile collisions, relay ids, own the dev servers, never write code |
 | `cbc-report` | worker | open a report line to the orchestrator, status up |
 | `cbc-peer` | orchestrator | coordinate cross-repo with sibling peer orchestrators |
 | `cbc-recap` | orchestrator | re-ground a running orchestrator from the rooms + map (survives `/compact`) |
@@ -347,9 +352,12 @@ The skills, all auto-installed by `cbc install-skill`:
 
 Capacity for always-on lines uses the existing mechanism, not a special mode: open
 them with a high `hard_cap` (e.g. 200) and lean on consensus `cbc_extend` (+20) as a
-safety net. See [ADR-0006](docs/decisions/0006-coordination-modes-direct-and-orchestrated.md)
-and [ADR-0007](docs/decisions/0007-room-refresh-and-close-teardown.md) (refresh protocol +
-close-teardown discipline).
+safety net. See [ADR-0006](docs/decisions/0006-coordination-modes-direct-and-orchestrated.md),
+[ADR-0007](docs/decisions/0007-room-refresh-and-close-teardown.md) (refresh protocol +
+close-teardown discipline), [ADR-0008](docs/decisions/0008-orchestrator-never-spawns-implementation-agents.md)
+(no-spawn rule), [ADR-0009](docs/decisions/0009-orchestrator-owns-dev-servers.md) (dev server
+ownership), and [ADR-0010](docs/decisions/0010-orchestration-map-is-self-grounding.md) (map
+self-grounding).
 
 ## Identity and nicknames
 

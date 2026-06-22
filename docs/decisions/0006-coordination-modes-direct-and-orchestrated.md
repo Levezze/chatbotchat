@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-06-22
 - **Related:** [ADR-0003](0003-consensus-close.md) (consensus close — reconcile and peer rooms close by the same vote), [ADR-0004](0004-background-poll-owns-the-wait.md) (every line in a coordination topology rides a background poll), [ADR-0005](0005-consensus-extend.md) (consensus extend — how always-on lines survive past the cap)
+- **Extended by:** [ADR-0008](0008-orchestrator-never-spawns-implementation-agents.md) (the orchestrator never spawns implementation agents), [ADR-0009](0009-orchestrator-owns-dev-servers.md) (the orchestrator owns the repo's dev servers), [ADR-0010](0010-orchestration-map-is-self-grounding.md) (the map's role charter and session-start hygiene)
 
 ## Context
 
