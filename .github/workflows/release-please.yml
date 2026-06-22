@@ -13,5 +13,48 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: googleapis/release-please-action@v4
+        id: release
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # A PAT (not the default GITHUB_TOKEN) is load-bearing here. Pushes made
+          # with GITHUB_TOKEN do not trigger further workflow runs, so a release
+          # PR auto-merged with GITHUB_TOKEN would never re-run this workflow and
+          # the git tag + GitHub Release would never be cut. A PAT-merged push
+          # DOES re-trigger, so release-please cuts the tag on the follow-up run.
+          # Secret RELEASE_PLEASE_TOKEN = fine-grained PAT with Contents:RW +
+          # Pull requests:RW on this repo.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+
+      # Auto-merge the open release PR so a release lands without a manual click.
+      # release-please keeps a single open "chore(main): release X.Y.Z" PR.
+      #
+      # We deliberately do NOT gate on the action's prs_created / pr / prs outputs.
+      # Those reflect whether THIS run created or updated the PR, not whether one is
+      # standing open. Gating on them misses two cases: (a) a release PR that was
+      # opened before this auto-merge step existed (it will never set prs_created
+      # again until a new releasable commit touches it), and (b) the brief window
+      # right after creation where the PR's mergeable state is UNKNOWN. Instead,
+      # every run we look up the open release PR by its well-known head-branch
+      # prefix and squash-merge it if present — resilient to both cases and not
+      # dependent on this-run output flags.
+      #
+      # The PAT is load-bearing: this merge is a push to main, and a PAT-merged
+      # push re-triggers this workflow, on which release-please cuts the git tag +
+      # GitHub Release. A GITHUB_TOKEN-merged push would NOT re-trigger, so the tag
+      # would never be cut. After the tag run there is no open release PR, so this
+      # step is a no-op and the loop terminates.
+      #
+      # Majors stay deliberate via commit discipline (no feat! / BREAKING CHANGE
+      # footer until a major is intended) — not gated here.
+      - name: Auto-merge open release PR
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        run: |
+          pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open \
+            --json number,headRefName \
+            --jq 'map(select(.headRefName | startswith("release-please--branches--main"))) | .[0].number // empty')
+          if [ -n "$pr" ]; then
+            echo "Merging open release PR #$pr"
+            gh pr merge "$pr" --squash --repo "$GITHUB_REPOSITORY"
+          else
+            echo "No open release PR to merge."
+          fi
