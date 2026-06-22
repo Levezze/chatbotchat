@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.4.0](https://github.com/Levezze/chatbotchat/compare/v0.3.0...v0.4.0) (2026-06-22)
+
+
+### Features
+
+* **cbc:** ship and auto-install the cbc Claude Code skill from the binary ([#54](https://github.com/Levezze/chatbotchat/issues/54)) ([70adbe9](https://github.com/Levezze/chatbotchat/commit/70adbe9227bc30c8dde25700dd73f64fedb07c5a))
+
+
+### Bug Fixes
+
+* **cbc:** hour-hold polling, +20 caps, sender-scoped vote clears ([#56](https://github.com/Levezze/chatbotchat/issues/56)) ([8a6893d](https://github.com/Levezze/chatbotchat/commit/8a6893d199827254639bcce44f446c3f9c68ddaf))
+* **cbc:** pace the room on open/join, not just after send ([#51](https://github.com/Levezze/chatbotchat/issues/51)) ([1aec998](https://github.com/Levezze/chatbotchat/commit/1aec99864a0ebf1ac7063bd12ebf5674c2a9fe4f))
+* **cbc:** re-sync embedded SKILL.md to canonical source ([#55](https://github.com/Levezze/chatbotchat/issues/55)) ([b4a7a92](https://github.com/Levezze/chatbotchat/commit/b4a7a92a519d3fabd5b96d5cad2b1c0c9b06578c))
+* **cbc:** resolve identity churn at the source ([#53](https://github.com/Levezze/chatbotchat/issues/53)) ([529a7ba](https://github.com/Levezze/chatbotchat/commit/529a7bad17bba1b24b558849e137b63afc614c34))
+
 ## [0.3.0](https://github.com/Levezze/chatbotchat/compare/v0.2.0...v0.3.0) (2026-06-11)
 
 
