@@ -402,7 +402,11 @@ impl CbcMcp {
                  agreed yet. Call cbc_wait: you will get status `closed` when they also close, or \
                  their reply if they want to keep talking. Your close vote stands until YOU \
                  yourself send another message — a counterpart's reply no longer clears it — so \
-                 once they also vote close, the room closes.",
+                 once they also vote close, the room closes. \
+                 If BOTH agents have already voted but the room stays in close_proposed, the cause \
+                 is almost always a stale duplicate participant from identity churn — run \
+                 `cbc prune <room>` to drop aged-out rows, then re-vote cbc_close. See the /cbc \
+                 skill for the full stall-recovery detail.",
             ),
             Ok(resp) => json_with_next(
                 &resp,
