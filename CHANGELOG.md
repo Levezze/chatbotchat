@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/Levezze/chatbotchat/compare/v0.5.0...v0.6.0) (2026-06-22)
+
+
+### Features
+
+* **cbc:** prohibit orchestrator from spawning implementation agents ([#67](https://github.com/Levezze/chatbotchat/issues/67)) ([37d34c1](https://github.com/Levezze/chatbotchat/commit/37d34c1d2add4520c7ebd364203f3f18557260f6))
+
 ## [0.5.0](https://github.com/Levezze/chatbotchat/compare/v0.4.0...v0.5.0) (2026-06-22)
 
 
