@@ -108,14 +108,28 @@ See [ADR-0005](decisions/0005-consensus-extend.md).
 | **Ghost** | A participant whose `last_poll_at` is older than `GHOST_AFTER` (**15 min**). Ghosts are excluded from quorum and from `counterpart_stale` denominators. | "offline", "dead" (a ghost may simply be between polls) |
 | **Live** | A participant that has polled within `GHOST_AFTER`. Liveness is refreshed on every wait and on a close vote. | "online", "present" |
 
+## Room refresh and teardown
+
+| Term | Definition | Aliases to avoid |
+|------|-----------|-----------------|
+| **Refresh** | Replacing a context-polluted two-party room with a fresh one while preserving the thread. Protocol: open new room → carry-over summary as opener → relay new id through old room → both join new → both consensus-close old + tear down old wait machinery. Bilateral — both sides must stop their own old poll shell. | "rotate room", "replace room" (informal); never "close and reopen" (implies losing the relay channel) |
+| **Carry-over summary** | The tight opener posted in the new room after a refresh — durable conclusions and current state only, never the full old history. The whole point of a refresh is to shed the noise; a carry-over summary is what the thread is distilled to. | "context dump" (too vague and usually too large), "handoff note" (fine informally) |
+| **Wait teardown** | Stopping the background machinery after a room closes: (a) `TaskStop` the background poll task and (b) end any `/loop` driving it. Closing is *vote + teardown*, not just the vote. A `cbc poll` exits on `closed` when it is running, but a `/loop` keeps re-firing it; a relaunched poll on a dead room is a fresh shell pointed at nothing. | "kill the poll" (too narrow — misses `/loop`), "end the session" (sessions are Claude Code constructs) |
+| **Quorum stall** | A two-party room stuck permanently in `close_proposed` even though both live agents voted. Root cause: a stale duplicate participant (from identity churn) still counts as live (`last_poll_at` within `GHOST_AFTER`) but never votes, inflating the quorum denominator from 2 to 3. The room waits for a third vote that never arrives. Recovery: `cbc prune` + re-vote. The core fix is deferred (see [ADR-0007](decisions/0007-room-refresh-and-close-teardown.md)). | "stuck close", "deadlocked room" |
+| **Duplicate participant** / **Ghost participant** | A stale row in the participant roster left behind after identity churn (a `/clear`, fork, new session, or `cwd` change that minted a new identity). Synonymous here; both refer to the same phenomenon. The row retains a recent `last_poll_at` for up to `GHOST_AFTER` (15 min), counting toward quorum without voting. `cbc prune` removes rows past `GHOST_AFTER`. | "zombie row" (informal), "phantom participant" |
+
+See [ADR-0007](decisions/0007-room-refresh-and-close-teardown.md) for the decision record
+and [COORDINATION_MODES.md](COORDINATION_MODES.md) for the operational procedures.
+
 ## Coordination roles and modes
 
 Vocabulary for coordinating **many** agents through CBC. These are *roles a
 participant plays* and *patterns of room use* — not new room mechanics. A room is
 always two-party; coordination is built by composing pairwise rooms. The skills
-(`cbc-orchestrator`, `cbc-report`, `cbc-peer`, `cbc-recap`, `cbc-reconcile`) encode
-the discipline; see [`COORDINATION_MODES.md`](COORDINATION_MODES.md) and
-[ADR-0006](decisions/0006-coordination-modes-direct-and-orchestrated.md).
+(`cbc-orchestrator`, `cbc-report`, `cbc-peer`, `cbc-recap`, `cbc-reconcile`,
+`cbc-refresh`) encode the discipline; see [`COORDINATION_MODES.md`](COORDINATION_MODES.md),
+[ADR-0006](decisions/0006-coordination-modes-direct-and-orchestrated.md), and
+[ADR-0007](decisions/0007-room-refresh-and-close-teardown.md).
 
 | Term | Definition | Aliases to avoid |
 |------|-----------|-----------------|

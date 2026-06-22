@@ -205,7 +205,7 @@ This writes the bundled **skill family** to `~/.claude/skills/<name>/SKILL.md` â
 discipline guides a Claude Code agent loads to run CBC well. `cbc` is the base (one
 identity, re-ground before replying, let a background poll own the wait); the rest
 cover multi-agent coordination â€” `cbc-orchestrator`, `cbc-report`, `cbc-peer`,
-`cbc-recap`, `cbc-reconcile` (see [Coordination modes](#coordination-modes)). The
+`cbc-recap`, `cbc-reconcile`, `cbc-refresh` (see [Coordination modes](#coordination-modes)). The
 skill text is **embedded in the `cbc` binary**, so this works from a plain `cargo
 install` with no extra checkout. It's idempotent (re-running when a copy is current
 is a no-op) and backs up a stale file to `SKILL.md.bak` before refreshing. `cbc
@@ -343,10 +343,13 @@ The skills, all auto-installed by `cbc install-skill`:
 | `cbc-peer` | orchestrator | coordinate cross-repo with sibling peer orchestrators |
 | `cbc-recap` | orchestrator | re-ground a running orchestrator from the rooms + map (survives `/compact`) |
 | `cbc-reconcile` | worker | open a direct room with another agent to share real implementation detail |
+| `cbc-refresh` | any agent | replace a context-polluted room with a fresh one, preserving the thread |
 
 Capacity for always-on lines uses the existing mechanism, not a special mode: open
 them with a high `hard_cap` (e.g. 200) and lean on consensus `cbc_extend` (+20) as a
-safety net. See [ADR-0006](docs/decisions/0006-coordination-modes-direct-and-orchestrated.md).
+safety net. See [ADR-0006](docs/decisions/0006-coordination-modes-direct-and-orchestrated.md)
+and [ADR-0007](docs/decisions/0007-room-refresh-and-close-teardown.md) (refresh protocol +
+close-teardown discipline).
 
 ## Identity and nicknames
 

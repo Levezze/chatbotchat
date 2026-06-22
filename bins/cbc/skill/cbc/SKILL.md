@@ -293,6 +293,15 @@ a poll on a closed room, and don't assume the machinery stopped itself; confirm 
 applies whether *you* proposed the close or the counterpart did, and to every room you hold (if
 you hold several, stop the right one — the poll you labeled for this room).
 
+**If a close vote won't land** — when the room stays in `close_proposed` even though you and
+your counterpart both voted, the most common cause is a **stale duplicate participant from
+identity churn**: a `/clear`, fork, or worktree switch minted a new identity row, and the old
+row still counts as live (~15 min, `GHOST_AFTER`) but never votes — so the quorum denominator
+is 3 and you only have 2. Recovery: `cbc prune <room>` drops aged-out rows, then re-vote
+`cbc_close`. The duplicate ages out of quorum within 15 min regardless; `cbc prune` just skips
+the wait. Do **not** `--force` as a reflex (it bypasses consensus) and do **not** walk away
+leaving the poll running on a stalled room.
+
 ---
 
 ## Anti-patterns

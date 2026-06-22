@@ -198,11 +198,78 @@ map.
 
 ---
 
+---
+
+## Refreshing a polluted room
+
+A long-lived room accumulates context. When that context no longer serves the work — a
+feature merged, a new phase starts — the right move is a **refresh**: open a clean room,
+carry only the durable conclusions over, and swap in the new room without losing the thread.
+
+**This is a bilateral protocol.** Both sides run the choreography from their own perspective;
+if only one side tears down its old poll shell, the other side leaks exactly the lingering
+shell a refresh is meant to eliminate.
+
+Choreography:
+
+1. Open a new room with the same counterpart (same `hard_cap`). Join it and post a tight
+   **carry-over summary** as the opener — conclusions and current state only, not the history.
+2. Send the new room id **through the old room**: *"refreshing → join me in `<new-id>`."* The
+   old room is the only relay channel; closing it before the counterpart is in the new room
+   severs the handoff.
+3. Wait for the counterpart to join the new room. **Never touch the old room until they are
+   in.** Confirm via the new room's status or poll.
+4. Optionally `cbc prune <old-room>` before the close vote (long-lived rooms may carry a
+   churn duplicate that would stall consensus — see below). Then consensus-`cbc_close` the
+   old room and **tear down your wait machinery** (`TaskStop` the old poll shell, end any
+   `/loop`).
+5. The responding side does the same: join new, confirm, co-vote close old, stop own poll.
+
+Use `/cbc-refresh` for the step-by-step discipline.
+
+**Refresh vs recap:** `/cbc-recap` re-reads truth *within the same room* to re-ground. Use
+recap when the context is stale but the room is still useful; use refresh when the room itself
+is polluted and you need a clean slate.
+
+---
+
+## Tearing down a closed room
+
+Closing a room is **vote + teardown**, not just the vote. A single `cbc poll` exits when it
+observes `closed`, but the machinery you set up — a `/loop` heartbeat or the shell around a
+background task — does not stop itself:
+
+- A `/loop` keeps re-firing `cbc poll` every tick on the dead room, burning tokens forever
+  until you stop it.
+- A poll shell relaunched on the way out (a new background `cbc poll` started after the vote)
+  is a fresh shell on a closed room.
+
+So once the room is `closed`: `TaskStop` the background poll task you launched for this room
+**and** end any `/loop` driving it. Both steps, every time. See `/cbc` Closing.
+
+**If the close vote won't land** (room stuck in `close_proposed` after both agents voted):
+
+The cause is almost always a **quorum stall** from a stale duplicate participant. A `/clear`,
+fork, fresh session, or worktree `cwd` change mints a new identity row; the old row retains a
+recent `last_poll_at` and counts toward quorum for up to 15 min, but never votes. A two-party
+room then has 3 live participants: the two real agents supply only 2 votes, `needed = 3`, and
+the room stays stuck in `close_proposed`.
+
+Recovery: `cbc prune <room>` drops aged-out rows (those past `GHOST_AFTER` = 15 min), then
+re-vote `cbc_close`. Running prune before the close vote in long-lived rooms avoids the stall.
+Do not use `--force` as a reflex — it bypasses consensus and is human-only. See
+[ADR-0007](decisions/0007-room-refresh-and-close-teardown.md) for the full failure-mode
+analysis and the deferred core fix.
+
+---
+
 ## See also
 
 - [ADR-0006](decisions/0006-coordination-modes-direct-and-orchestrated.md) — the
   decision record for the two modes and the orchestrator boundary
+- [ADR-0007](decisions/0007-room-refresh-and-close-teardown.md) — room refresh protocol,
+  close-teardown discipline, and the quorum-stall failure mode
 - [`UBIQUITOUS_LANGUAGE.md`](UBIQUITOUS_LANGUAGE.md) — canonical definitions of every
   role and room term used here
 - The skills themselves: `cbc-orchestrator`, `cbc-report`, `cbc-peer`, `cbc-recap`,
-  `cbc-reconcile` (installed by `cbc install-skill`)
+  `cbc-reconcile`, `cbc-refresh` (installed by `cbc install-skill`)

@@ -264,8 +264,8 @@ must not use. So when a worker's job is **fully merged and done**:
    closes only once you both vote (`/cbc` covers this).
 2. A closed room is terminal, so its poll exits on its own — but **also stop that room's
    background-poll shell yourself** (TaskStop / kill the labeled background task you started for
-   it). You hold one poll per room; left alone, finished-room shells pile up and load the
-   machine. This is exactly why you tracked the poll's label in the map.
+   it, and end any `/loop` driving it). You hold one poll per room; left alone, finished-room
+   shells pile up and load the machine. This is exactly why you tracked the poll's label in the map.
 
 **Honest limit — say it to the user when it bites:** this cleanup only addresses *finished*
 rooms. While work is live you hold **one background poll per active room** (every worker, every
