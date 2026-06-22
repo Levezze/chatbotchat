@@ -57,7 +57,7 @@ obvious. So:
 
 | Role | Who | Holds | Never |
 |------|-----|-------|-------|
-| **Orchestrator** | one per repo | the map (who touches what, sequence, merge order) | writes implementation code; opens worker rooms; joins reconcile rooms |
+| **Orchestrator** | one per repo | the map (who touches what, sequence, merge order) | writes implementation code; opens worker rooms; joins reconcile rooms; spawns implementation subagents |
 | **Worker** | each implementation agent | one bounded piece of the work | solves shared concerns alone; deviates from sequencing silently |
 | **Peer orchestrator** | the orchestrator of another repo | the cross-repo contract surface | pipes same-repo worker detail across the peer line |
 

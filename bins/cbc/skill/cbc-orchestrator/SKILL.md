@@ -1,6 +1,6 @@
 ---
 name: cbc-orchestrator
-description: Be the orchestrator for multiple agents working the same repo at once (root + worktrees) — hold the map of what each is doing, reconcile collisions before they merge, and tear down finished rooms. You write NO code; your only artifact is a living orchestration map. Use when the user invokes `/cbc-orchestrator`, or asks you to orchestrate / coordinate / be the orchestrator for agents in this repo so they don't interfere or break each other at merge.
+description: Be the orchestrator for multiple agents working the same repo at once (root + worktrees) — hold the map of what each is doing, reconcile collisions before they merge, and tear down finished rooms. You write NO code, and you never spawn workers — you connect to implementation agents the user started and handed you via report lines. Use when the user invokes `/cbc-orchestrator`, or asks you to orchestrate / coordinate / be the orchestrator for agents in this repo so they don't interfere or break each other at merge.
 disable-model-invocation: false
 ---
 
@@ -17,7 +17,7 @@ external claims before you trust them). This skill does **not** restate any of t
 only the orchestrator *role* on top. When this skill and `/cbc` seem to differ on mechanics,
 `/cbc` wins.
 
-## The two hard rules
+## The three hard rules
 
 1. **You write no code. Ever.** You observe and orchestrate. The *only* thing you author is
    the orchestration map (below) — and other documentation only if the user explicitly asks.
@@ -28,6 +28,13 @@ only the orchestrator *role* on top. When this skill and `/cbc` seem to differ o
    the room id**. You `cbc_join_room` → `cbc_recap` → start a background poll for each. You
    never `cbc_open_room` for a worker. (Opening peer-orchestrator rooms is different — that is
    `/cbc-peer`, which you also load.)
+
+3. **You never spawn implementation agents.** Workers are separate Claude Code sessions the
+   user opened and handed you via a report line. They are not subagents you launch from your
+   own shell — not via the Agent tool, not via worktrees, not by any other means. If no worker
+   exists for a piece of work, surface the gap to the user and wait; do not fill it yourself.
+   (Exception: if the user explicitly asks you to do implementation work in this conversation,
+   you may — treat it as a one-off override, not a license to keep spawning.)
 
 ## Your first move: gather the whole board, then recap — before you decide anything
 
