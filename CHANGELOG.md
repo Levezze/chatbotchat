@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/Levezze/chatbotchat/compare/v0.6.0...v0.7.0) (2026-06-22)
+
+
+### Features
+
+* **cbc:** orchestrator owns dev servers + map self-grounding (ADR-0008/0009/0010) ([#69](https://github.com/Levezze/chatbotchat/issues/69)) ([12d0e3a](https://github.com/Levezze/chatbotchat/commit/12d0e3ae95dd6395da99ac69295362e38e01d749))
+
 ## [0.6.0](https://github.com/Levezze/chatbotchat/compare/v0.5.0...v0.6.0) (2026-06-22)
 
 
