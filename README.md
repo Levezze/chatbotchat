@@ -195,22 +195,24 @@ To do it by hand instead:
 { "permissions": { "allow": ["mcp__chatbotchat"] } }
 ```
 
-**5. Install the cbc skill (recommended):**
+**5. Install the cbc skills (recommended):**
 
 ```sh
 cbc install-skill
 ```
 
-This writes the bundled `cbc` skill to `~/.claude/skills/cbc/SKILL.md` — the
-discipline guide a Claude Code agent loads to run a CBC conversation well (one
-identity, re-ground before replying, let a background poll own the wait). The skill
-text is **embedded in the `cbc` binary**, so this works from a plain `cargo install`
-with no extra checkout. It's idempotent (re-running when the copy is current is a
-no-op) and backs up a stale file to `SKILL.md.bak` before refreshing. `cbc
+This writes the bundled **skill family** to `~/.claude/skills/<name>/SKILL.md` — the
+discipline guides a Claude Code agent loads to run CBC well. `cbc` is the base (one
+identity, re-ground before replying, let a background poll own the wait); the rest
+cover multi-agent coordination — `cbc-orchestrator`, `cbc-report`, `cbc-peer`,
+`cbc-recap`, `cbc-reconcile`, `cbc-refresh` (see [Coordination modes](#coordination-modes)). The
+skill text is **embedded in the `cbc` binary**, so this works from a plain `cargo
+install` with no extra checkout. It's idempotent (re-running when a copy is current
+is a no-op) and backs up a stale file to `SKILL.md.bak` before refreshing. `cbc
 install-daemon` runs this automatically as its last step, so on macOS you usually
 don't need it separately — but unlike `install-daemon` (launchd, macOS-only),
-`install-skill` is **cross-platform** (Linux/WSL/Windows), since it only writes a
-file under `~/.claude/skills`.
+`install-skill` is **cross-platform** (Linux/WSL/Windows), since it only writes
+files under `~/.claude/skills`.
 
 If you also use the [devkit](https://github.com/Levezze/devkit) toolkit, it may have
 already symlinked `~/.claude/skills/cbc` to its own copy. `install-skill` detects
@@ -292,8 +294,8 @@ CBC_SERVER=http://127.0.0.1:8485 cbc open "test"
 ### The MCP tools
 
 The registered server exposes `cbc_open_room`, `cbc_join_room`, `cbc_send`,
-`cbc_wait`, `cbc_recap`, `cbc_signal`, `cbc_status`, `cbc_close`, `cbc_pause`,
-and `cbc_wake`. The write tools auto-detect `repo` and `cwd` from the MCP
+`cbc_wait`, `cbc_recap`, `cbc_signal`, `cbc_status`, `cbc_close`, `cbc_extend`,
+`cbc_pause`, and `cbc_wake`. The write tools auto-detect `repo` and `cwd` from the MCP
 server's working directory; you supply the `model`, and an optional `as` label
 sets your identity.
 
@@ -310,6 +312,44 @@ conventions at connect time. Two tools are worth calling out:
   cap (default 50s, override with `-e CBC_MCP_WAIT_CAP=<secs>`) — *not* the end of
   the conversation. Rather than loop it manually, an agent runs `cbc poll` in a
   background task and lets it collapse the wait into a single wake.
+
+## Coordination modes
+
+A room is two-party, but real work spans many agents — several in one repo, and
+several repos at once. CBC scales to that by composing **pairwise rooms** into a
+topology, in one of two modes. The skill family encodes the discipline; the full
+walkthrough (roles, the relay chain, the client/api/engine example) is in
+[`docs/COORDINATION_MODES.md`](docs/COORDINATION_MODES.md).
+
+- **Direct mode** — a handful of implementation agents open reconcile rooms
+  directly with each other and self-coordinate; **you relay** the room ids, exactly
+  as in the two-agent flow above. Best when the agent count is small enough to relay
+  by hand.
+- **Orchestrated mode** — each repo runs **one orchestrator** that holds the *map*
+  (who touches what, merge order) and **writes no code**. Workers keep an open
+  **report line** to it with concise status; sibling **peer orchestrators** bridge
+  repos. When two agents need to share real detail (types, payloads, code), they open
+  a **reconcile room** directly — and the orchestrator **relays its id without ever
+  joining**, so its context stays at the level of the map, not the code. This is what
+  lets agents coordinate deeply while the coordinator stays clean.
+
+The skills, all auto-installed by `cbc install-skill`:
+
+| Skill | For | Role |
+|-------|-----|------|
+| `cbc` | every agent | drive a single room well (the base discipline) |
+| `cbc-orchestrator` | orchestrator | hold the map, reconcile collisions, relay ids, never write code |
+| `cbc-report` | worker | open a report line to the orchestrator, status up |
+| `cbc-peer` | orchestrator | coordinate cross-repo with sibling peer orchestrators |
+| `cbc-recap` | orchestrator | re-ground a running orchestrator from the rooms + map (survives `/compact`) |
+| `cbc-reconcile` | worker | open a direct room with another agent to share real implementation detail |
+| `cbc-refresh` | any agent | replace a context-polluted room with a fresh one, preserving the thread |
+
+Capacity for always-on lines uses the existing mechanism, not a special mode: open
+them with a high `hard_cap` (e.g. 200) and lean on consensus `cbc_extend` (+20) as a
+safety net. See [ADR-0006](docs/decisions/0006-coordination-modes-direct-and-orchestrated.md)
+and [ADR-0007](docs/decisions/0007-room-refresh-and-close-teardown.md) (refresh protocol +
+close-teardown discipline).
 
 ## Identity and nicknames
 
@@ -351,7 +391,9 @@ the handle in `cbc status` / `cbc show`. It never affects identity or routing.
 
 ## Caps, signals, and the human in the loop
 
-- **Hard cap** (default 10 messages) bounds a room; further sends are refused.
+- **Hard cap** (default 20 messages) bounds a room; further sends are refused.
+  Settable per room at open (`cbc_open_room`'s `hard_cap`) — always-on coordination
+  lines open it high (e.g. 200) — and raised in place by consensus `cbc_extend`.
 - **Soft cap** (default 4 consecutive autonomous turns) trips `surface_to_user`
   one turn early — on the (soft_cap − 1)th consecutive autonomous turn (the 3rd,
   by default) — so the receiving agent consults its user *before* the cap is
@@ -418,13 +460,16 @@ slice at a time.
 
 ## Documentation
 
+- [`docs/COORDINATION_MODES.md`](docs/COORDINATION_MODES.md) — coordinating many agents: Direct vs Orchestrated, roles, the relay chain
 - [`docs/UBIQUITOUS_LANGUAGE.md`](docs/UBIQUITOUS_LANGUAGE.md) — the project glossary (canonical terms)
 - [`docs/v1-design-locked.md`](docs/v1-design-locked.md) — full v1 design (source of truth)
 - [`docs/v2-ideas.md`](docs/v2-ideas.md) — deferred ideas (web UI, multi-agent rooms, vector search)
 - **Decisions** — [ADR-0001](docs/decisions/0001-rescope-to-usable-alpha.md) (alpha scope) ·
   [ADR-0002](docs/decisions/0002-participant-identity-is-an-instance-token.md) (instance identity) ·
   [ADR-0003](docs/decisions/0003-consensus-close.md) (consensus close) ·
-  [ADR-0004](docs/decisions/0004-background-poll-owns-the-wait.md) (background poll owns the wait)
+  [ADR-0004](docs/decisions/0004-background-poll-owns-the-wait.md) (background poll owns the wait) ·
+  [ADR-0005](docs/decisions/0005-consensus-extend.md) (consensus extend) ·
+  [ADR-0006](docs/decisions/0006-coordination-modes-direct-and-orchestrated.md) (coordination modes)
 
 ## License
 

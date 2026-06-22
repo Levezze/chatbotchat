@@ -23,6 +23,7 @@ share one word-family; keep them apart.
 | **Identity** / **instance** | The opaque token that distinguishes one participant from another within a room. Resolved from `--as` → `CBC_INSTANCE` → `CLAUDE_CODE_SESSION_ID` → `pid-N` (`bins/cbc/src/context.rs`). Two agents in the same `(repo, model, cwd)` are separate participants only if their **instance** differs. | "session" (the session id is just one *source* of an instance), bare "identity" with no instance behind it |
 | **Handle** | The stable, routable display id minted on first join: `<repo>-<model>-<sess4hex>` (`identity.rs`). Appears as a message's `sender` and as a `--to` recipient. | treating `sender`/`to`/`recipient` as *different* things — they are all a handle in a particular role |
 | **Nickname** | An optional, cosmetic label shown next to the handle in `cbc status`/`cbc show`. Never affects identity, routing, or `sender`. Set with `--nick` / `nickname` (`participant.rs`). | "display name" used as if it carried identity |
+| **Identity churn** *(new)* | The event of an agent re-joining under a **different instance** than its prior session — due to a `/clear`, fork, fresh session, or `cwd` change — so the server mints a new participant row instead of resuming the old one. The old row retains a recent `last_poll_at` for up to `GHOST_AFTER` (15 min) and can block close/extend **quorum** until it ages out or is pruned. | "re-join" (too neutral — identity churn specifically means a *new identity*, not a reconnect on the same instance), "session restart" |
 
 **Why instance, not the tuple:** identity is keyed on `instance` alone so a chat
 **resumed** in another terminal or **handed off** to another client continues as
@@ -56,7 +57,7 @@ the same participant even when model/cwd/session drift. See
 
 | Term | Definition | Aliases to avoid |
 |------|-----------|-----------------|
-| **Hard cap** | Maximum conversation messages in a room (default **10**, `RoomConfig`). Exceeding it returns HTTP 409. **Extendable** by consensus (`cbc_extend`, +10 per round). | "message limit" (ambiguous with soft cap) |
+| **Hard cap** | Maximum conversation messages in a room (default **20**, `RoomConfig`; settable per room at `cbc_open_room` via `hard_cap` — coordination lines open it high, e.g. `200`). Exceeding it returns HTTP 409. **Extendable** by consensus (`cbc_extend`, +20 per round). | "message limit" (ambiguous with soft cap) |
 | **Soft cap** | Threshold of *consecutive autonomous* turns (default **4**); `surface_to_user` is set one turn early — on the (soft_cap − 1)th such turn (see **surface_to_user** below). | "rate limit" |
 | **surface_to_user** | The flag, set on the (soft_cap − 1)th consecutive autonomous turn, that tells the receiving agent to pull its human in before replying. The primary **human-in-the-loop** trigger. | "escalate", "alert" |
 
@@ -75,7 +76,7 @@ the same participant even when model/cwd/session drift. See
 | **paused_by_timeout** | The long-poll cap elapsed with nothing for you. Keep waiting. | a terminal state |
 | **awaiting_counterpart** | You are the only participant; no one has joined yet. Not terminal and not a hand-back — the background `cbc poll` waits *through* the join; surface the room id once and stay hands-free. | `counterpart_stale` |
 | **close_proposed** | A live participant voted to close and you have not. Agree (vote) or keep talking (a message clears votes). | `closed` |
-| **extend_proposed** | A live participant voted to extend the cap and you have not. Agree (`cbc_extend`) to bump it +10, or decline by ignoring it. Not terminal. | `close_proposed` |
+| **extend_proposed** | A live participant voted to extend the cap and you have not. Agree (`cbc_extend`) to bump it +20, or decline by ignoring it. Not terminal. | `close_proposed` |
 | **counterpart_stale** | Every *other* participant is a **ghost** (quiet >15 min). Not a stop — usually an idle session that will resume; the poll **holds** at a slower cadence ~15 min before surfacing to abandon. | `stale` (room state) |
 | **closed / paused / archived** | Terminal/parked room state reached. Stop polling (a `paused` room needs `cbc_wake`). | — |
 
@@ -94,7 +95,7 @@ See [ADR-0003](decisions/0003-consensus-close.md).
 
 | Term | Definition | Aliases to avoid |
 |------|-----------|-----------------|
-| **Consensus extend** | The way the hard cap grows: extending is a **vote** (`cbc_extend`), and the cap rises **+10** only when a **quorum** of **live** participants have voted. Repeatable (10 → 20 → 30 …). | "raise cap" used to mean "instantly bigger" |
+| **Consensus extend** | The way the hard cap grows: extending is a **vote** (`cbc_extend`), and the cap rises **+20** only when a **quorum** of **live** participants have voted. Repeatable (20 → 40 → 60 …). | "raise cap" used to mean "instantly bigger" |
 | **Extend vote** | A participant's recorded intent to extend (`wants_extend_at`). Like a close **Vote**, a conversation message clears it (a landed message means there was cap room → implicit decline); it also clears when an extend lands. | conflating with close **Vote** |
 | **extend_proposed** | The wait status a non-voter sees while an extend is pending (parallel to `close_proposed`). | `close_proposed` |
 | **Extend notice** | The uncapped broadcast sentinel (`MessageType::Extend`) posted when the cap bumps, so a polling proposer learns the extend landed and can continue. | a conversation turn (it does not count toward the cap) |
@@ -107,6 +108,41 @@ See [ADR-0005](decisions/0005-consensus-extend.md).
 |------|-----------|-----------------|
 | **Ghost** | A participant whose `last_poll_at` is older than `GHOST_AFTER` (**15 min**). Ghosts are excluded from quorum and from `counterpart_stale` denominators. | "offline", "dead" (a ghost may simply be between polls) |
 | **Live** | A participant that has polled within `GHOST_AFTER`. Liveness is refreshed on every wait and on a close vote. | "online", "present" |
+
+## Room refresh and teardown
+
+| Term | Definition | Aliases to avoid |
+|------|-----------|-----------------|
+| **Refresh** | Replacing a context-polluted two-party room with a fresh one while preserving the thread. Protocol: open new room → carry-over summary as opener → relay new id through old room → both join new → both consensus-close old + tear down old wait machinery. Bilateral — both sides must stop their own old poll shell. | "rotate room", "replace room" (informal); never "close and reopen" (implies losing the relay channel) |
+| **Carry-over summary** | The tight opener posted in the new room after a refresh — durable conclusions and current state only, never the full old history. The whole point of a refresh is to shed the noise; a carry-over summary is what the thread is distilled to. | "context dump" (too vague and usually too large), "handoff note" (fine informally) |
+| **Wait teardown** | Stopping the background machinery after a room closes: (a) `TaskStop` the background poll task and (b) end any `/loop` driving it. Closing is *vote + teardown*, not just the vote. A `cbc poll` exits on `closed` when it is running, but a `/loop` keeps re-firing it; a relaunched poll on a dead room is a fresh shell pointed at nothing. | "kill the poll" (too narrow — misses `/loop`), "end the session" (sessions are Claude Code constructs) |
+| **Quorum stall** | A two-party room stuck permanently in `close_proposed` even though both live agents voted. Root cause: a stale duplicate participant (from identity churn) still counts as live (`last_poll_at` within `GHOST_AFTER`) but never votes, inflating the quorum denominator from 2 to 3. The room waits for a third vote that never arrives. Recovery: `cbc prune` + re-vote. The core fix is deferred (see [ADR-0007](decisions/0007-room-refresh-and-close-teardown.md)). | "stuck close", "deadlocked room" |
+| **Duplicate participant** / **Ghost participant** | A stale row in the participant roster left behind after identity churn (a `/clear`, fork, new session, or `cwd` change that minted a new identity). Synonymous here; both refer to the same phenomenon. The row retains a recent `last_poll_at` for up to `GHOST_AFTER` (15 min), counting toward quorum without voting. `cbc prune` removes rows past `GHOST_AFTER`. | "zombie row" (informal), "phantom participant" |
+
+See [ADR-0007](decisions/0007-room-refresh-and-close-teardown.md) for the decision record
+and [COORDINATION_MODES.md](COORDINATION_MODES.md) for the operational procedures.
+
+## Coordination roles and modes
+
+Vocabulary for coordinating **many** agents through CBC. These are *roles a
+participant plays* and *patterns of room use* — not new room mechanics. A room is
+always two-party; coordination is built by composing pairwise rooms. The skills
+(`cbc-orchestrator`, `cbc-report`, `cbc-peer`, `cbc-recap`, `cbc-reconcile`,
+`cbc-refresh`) encode the discipline; see [`COORDINATION_MODES.md`](COORDINATION_MODES.md),
+[ADR-0006](decisions/0006-coordination-modes-direct-and-orchestrated.md), and
+[ADR-0007](decisions/0007-room-refresh-and-close-teardown.md).
+
+| Term | Definition | Aliases to avoid |
+|------|-----------|-----------------|
+| **Direct mode** | Coordination with **no orchestrator**: implementation agents open pairwise rooms directly with each other and self-coordinate; the **user relays** room ids between them. The original two-agent CBC flow, generalized to a handful of agents. | "peer-to-peer mode" (overloads *peer orchestrator*), "manual mode" |
+| **Orchestrated mode** | Coordination with a per-repo **orchestrator**: workers report up, the orchestrator holds the map and resolves collisions, and sibling **peer orchestrators** bridge repos. Scales past what a user can relay by hand. | "managed mode", "hub mode" |
+| **Orchestrator** | One agent per repo that coordinates that repo's workers — it holds the **map** (who touches what, merge order), reconciles collisions, and is the escalation funnel to the user. It **writes no implementation code** and **never opens worker rooms or joins reconcile rooms**; it relays ids. | "lead", "manager", "controller" |
+| **Worker** | An implementation agent the user started and planned with. It owns **one bounded piece**, opens a **report line** to its orchestrator, and implements. Authority for everyday calls is its plan and the codebase; it leans on the orchestrator for cross-agent coordination, not permission. | "agent" (unqualified — every participant is an agent), "subordinate" |
+| **Peer orchestrator** | The orchestrator of *another* repo, treated as a **symmetric sibling** (neither is the other's worker). Orchestrators coordinate cross-repo contract/schema/merge-order through one pairwise **peer room** per peer. | "parent", "remote lead" |
+| **Report line** | The room a worker opens to its orchestrator and keeps **open for the whole job** (not the usual open→reconcile→close): concise status flows up so the orchestrator can prevent collisions. Opened with a high `hard_cap`. | "status channel", "worker room" used loosely |
+| **Reconcile room** | A **temporary, normal-lifecycle** room (open → reconcile → consensus close) two implementation agents open **directly** to share real implementation detail — types, shapes, payloads, signatures, code — that must **not** reach the orchestrator. In orchestrated mode the orchestrator **relays its id without joining**. | "side channel" (too vague), conflating with a report line |
+| **Relay** | An orchestrator forwarding a reconcile room **id** (never its content) so two agents can connect: same-repo over the other worker's report line; cross-repo across the peer line to the peer orchestrator. Relaying never means **joining**. | "proxy", "bridge" used to imply the orchestrator is *in* the room |
+| **Map** / **orchestration map** | The orchestrator's on-disk picture of the board (`.cbc/orchestration-<repo>-<date>.md`): roster, each agent's surfaces and sequence, collisions, merge order, and one-line `A↔B reconciling <surface>` notes. Rebuilt from the rooms, never from memory. | "plan" (the worker's plan is a different thing), "state" |
 
 ---
 
@@ -122,7 +158,9 @@ See [ADR-0005](decisions/0005-consensus-extend.md).
   Participants — or immediately on a **force close**.
 - A **Poll** wraps many **Waits**; a Wait returns one **wait status**.
 
-## Example dialogue
+## Example dialogues
+
+### Closing and quorum
 
 > **Dev:** When agent A calls `cbc_close`, is the room closed?
 >
@@ -143,8 +181,53 @@ See [ADR-0005](decisions/0005-consensus-extend.md).
 > doesn't touch the caps) tells A's **poll** to back off by `retry_after`, and
 > B's wait stays **live**, so no `counterpart_stale`.
 
+### Quorum stall and identity churn
+
+> **Dev:** Both A and B called `cbc_close`, but the room is still in
+> `close_proposed`. What happened?
+>
+> **Domain expert:** **Quorum stall** — the **quorum** denominator is probably 3,
+> not 2. A earlier cleared its context and re-joined, which caused **identity
+> churn**: the server minted a new participant row instead of resuming the old
+> one. The old row still has a recent `last_poll_at`, so it counts as **live**
+> but never votes. Two votes against a needed-3 quorum.
+>
+> **Dev:** So what's the fix?
+>
+> **Domain expert:** `cbc prune <room>` drops rows past `GHOST_AFTER` (15 min).
+> If A's old row has aged out, prune removes it and reduces the quorum denominator
+> back to 2; then a re-vote closes the room. If the row is still fresh, wait 15
+> min or force-close (human-only escape hatch).
+>
+> **Dev:** Is the churn-created old row the same thing as a **ghost**?
+>
+> **Domain expert:** A **ghost** is any participant past `GHOST_AFTER`. A
+> **duplicate participant** is the specific ghost that **identity churn** creates —
+> the abandoned old row of an agent that rejoined under a new instance. All
+> duplicates eventually become ghosts; not all ghosts are duplicates (a participant
+> that simply stopped polling is a ghost too).
+
+### Refresh
+
+> **Dev:** Agent A wants to move a long-running peer room to a fresh slate. Can
+> it just open a new room and tell B to join?
+>
+> **Domain expert:** Almost — but A must send the new room id **through the old
+> room**. The old room is the only **relay** channel to B; if A closes it first,
+> B has no way to get the new id. That is the **refresh** protocol: open new room,
+> post a **carry-over summary** as the opener, send the new id over the old room,
+> wait for B to join, *then* consensus-close the old room.
+>
+> **Dev:** Does A's close vote on the old room also stop B's poll shell?
+>
+> **Domain expert:** No. **Wait teardown** is bilateral — A stops its own old
+> poll shell (`TaskStop` + end any `/loop`), and B must stop its own. The
+> initiator cannot reach into B's terminal. If B skips teardown, B's shell keeps
+> firing `cbc poll` on a dead room indefinitely.
+
 ## Flagged ambiguities
 
+- **"ghost participant" vs "ghost" (liveness term).** The **Liveness** section defines **ghost** as any participant past `GHOST_AFTER`. The **Room refresh and teardown** section uses **ghost participant** and **duplicate participant** for the specific ghost created by **identity churn**. These are related but not identical: a ghost from churn is always a ghost, but a ghost from simple inactivity is not a duplicate. When the distinction matters (e.g. quorum-stall diagnosis), prefer **duplicate participant** for the churn case and reserve **ghost** for the general liveness concept.
 - **"stale" is overloaded three ways.** `stale` is a *room state* (7d). A
   **ghost** is a *participant* past `GHOST_AFTER` (15 min). `counterpart_stale`
   is a *wait status* meaning all other participants are ghosts. They are related

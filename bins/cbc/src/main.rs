@@ -298,10 +298,11 @@ enum Command {
     /// user settings (~/.claude/settings.json), so the bus stops stalling for
     /// per-call approval. Idempotent; backs up the file before editing.
     AllowTools,
-    /// Install the bundled `cbc` skill into ~/.claude/skills/cbc/ so Claude Code
-    /// gets CBC's agent guidance with no external devkit checkout. Idempotent;
-    /// backs up a stale copy. Skips a devkit-managed symlink unless --force.
-    /// Cross-platform (unlike install-daemon).
+    /// Install the bundled CBC skills (`cbc`, `cbc-orchestrator`, `cbc-report`,
+    /// `cbc-peer`, `cbc-recap`, `cbc-reconcile`, `cbc-refresh`) into ~/.claude/skills/<name>/ so
+    /// Claude Code gets CBC's agent guidance with no external devkit checkout. Idempotent; backs
+    /// up a stale copy. Skips a devkit-managed symlink unless --force. Cross-platform
+    /// (unlike install-daemon).
     InstallSkill {
         /// Replace an existing devkit symlink with cbc's bundled copy (the
         /// symlink's target is left untouched).
@@ -649,9 +650,11 @@ async fn main() -> anyhow::Result<()> {
                 Some(d) => d,
                 None => skill::skills_dir()?,
             };
-            let outcome = skill::install(&dir, force)
-                .with_context(|| format!("installing the cbc skill into {}", dir.display()))?;
-            skill::print_outcome(&dir, &outcome);
+            let outcomes = skill::install_all(&dir, force)
+                .with_context(|| format!("installing the cbc skills into {}", dir.display()))?;
+            for (name, outcome) in &outcomes {
+                skill::print_outcome(&dir, name, outcome);
+            }
         }
     }
 
