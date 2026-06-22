@@ -52,14 +52,15 @@ full picture before you do anything else:
 
    ```text
    Board (N rooms):
-     <agent/handle> — <subject / what they're doing>
-     <agent/handle> — <subject>
-     <peer: repoX orchestrator> — <subject>
+     engine-recompute — reworking the recompute pipeline
+     engine-kb-definitions — kb definition schema
+     api-fix-contract — results contract fix
+     peer: api-orchestrator — cross-repo results contract
    Is this everyone, or are there more to add?
    ```
 
-   Only proceed once the user confirms. (If a name/subject isn't clear yet, say so on that line
-   — don't invent it.)
+   Name each agent `<repo>-<feature>` (see below), not by its instance hash. Only proceed once
+   the user confirms. (If a name/subject isn't clear yet, say so on that line — don't invent it.)
 4. **Recap across all of them, then PRINT the recap.** `cbc_recap` every room and read it whole,
    then give the user a **clear "stop to breathe" recap** of where things stand — this is the
    whole point of starting, not an afterthought. Scale it to reality:
@@ -76,6 +77,24 @@ full picture before you do anything else:
 Re-run this hold → gather → confirm-roster → print-recap loop **every time a new room is added**
 (another agent or peer joins): freeze the newcomer, reconcile it against the whole board, reprint
 the updated picture, before you release it.
+
+## Name every agent `<repo>-<feature>` — never the instance hash
+
+CBC mints an opaque instance/handle (e.g. `b9kws7pe5`) to route a participant; that id means
+nothing to the user scanning your board. **In your roster, your recaps, and your map, refer to
+every agent by a human name shaped `<repo>-<feature>`** — the repo it works in, then what it's
+doing: `engine-recompute`, `engine-kb-definitions`, `api-fix-contract`, `client-labels`. "recompute
+b9kws7pe5 — holding" is noise; "engine-recompute — holding" is legible at a glance.
+
+- **Derive the name from the worker's opener.** `/cbc-report` has each worker announce its
+  `<repo>-<feature>` name and set it as its room nickname; its report subject (`report:
+  <repo>/<task>`) also carries it. Use that — don't invent one. If a worker hasn't given a clear
+  name, ask for it rather than falling back to the hash.
+- **Use the same name everywhere** — roster line, recap, the map's agent column, and when you
+  relay a reconcile-room id ("relay to `api-recompute`"). One name per agent, consistently.
+- **Share names across the peer boundary.** When you coordinate with a peer orchestrator
+  (`/cbc-peer`), refer to agents by these names so both sides can cross-reference the relevant
+  agents across repos — `engine-recompute ↔ api-recompute` is meaningful; two opaque hashes are not.
 
 ## Running one poll per room — yes, many at once
 
@@ -119,11 +138,26 @@ gone deaf, or that the server is down. So when a poll fails:
 - **Only a *successful* poll reporting a terminal state** (`closed` / `archived`) means stop
   watching that room. An **error exit** means relaunch.
 
+## Keep your lines from filling — open big, extend by consensus
+
+Your report and peer lines stay **open for the whole job**, so they accumulate far more than the
+default 20-message hard cap. Don't let a coordination line hit the wall mid-flight:
+
+- **Peer rooms you open** (`/cbc-peer`): open them with a high `hard_cap` — e.g. `hard_cap: 200`
+  (`cbc_open_room` / `cbc open --hard-cap` takes the cap up front) — so a long cross-repo
+  coordination doesn't 409 partway through.
+- **Report rooms are opened by your workers**, so *they* set the cap — `/cbc-report` tells them to
+  open the line big for the same reason. If one still fills, `cbc_extend` is a consensus vote
+  (+20); co-vote it so the line keeps flowing.
+- There is no "unlimited" — a high `hard_cap` at open plus `cbc_extend` as a safety net is the
+  whole mechanism. Reach for it *before* a wall stalls coordination, not after.
+
 ## Hold the map, not the implementation
 
 Your context is the **shape** of each agent's work, not its detail. Per agent, track:
 
-- handle / what they're building (one line of intent)
+- **`<repo>-<feature>` name** / what they're building (one line of intent) — the human name, not
+  the instance hash
 - branch or worktree
 - **surfaces touched** — files, public contracts/interfaces, DB migrations, shared config
 - dependencies (needs X done first) and **merge order**
@@ -194,6 +228,26 @@ genuinely hard call (scope, contract, cross-cutting design) goes up, and you bri
 **batched and with a recommendation, once**, rather than letting each agent interrupt them
 independently. Shield the user from the routine; surface the few things that are truly theirs.
 
+## Relay reconcile rooms — pass the id, never join
+
+Sometimes two agents need to talk **directly** — share types and shapes, reconcile two halves of a
+contract, ask each other pointed code questions. That detail must not run through you: you hold the
+map, not the implementation. So they open a **reconcile room** (`/cbc-reconcile`) directly with each
+other, and your only job is to **relay the id without joining:**
+
+- A worker posts on its report line: *"opening reconcile room `<id>` with `<agent>` to align
+  `<topic>` — please relay."* Forward that id to the other agent — **same-repo**, send it over that
+  agent's report line; **cross-repo**, hand it to the peer orchestrator (via `/cbc-peer`), who
+  forwards it to their worker.
+- **You do not join, read, or poll the reconcile room.** No `cbc_join_room`, no detail. That room
+  exists precisely to keep the implementation depth *off* your context.
+- **Track only a one-line map entry** — `agentA ↔ agentB reconciling <surface>` — because what they
+  align can shift merge order or a shared contract. The *outcome* that matters (a changed contract,
+  a new dependency) comes back to you as **status** on their report lines; the code never does.
+
+A reconcile room is the agents' own working session; it consensus-closes when they're done. You
+neither tear it down nor wait on it.
+
 ## Verify before you trust (this is `/cbc` discipline, applied)
 
 When a worker reports "merged" / "deployed" / "the contract is now X", check it against live
@@ -237,9 +291,16 @@ regenerate, or re-derive anything, the peers hear about it first.*
 
 ## Anti-patterns
 
+- **Labeling agents by their instance hash** instead of `<repo>-<feature>`. "recompute b9kws7pe5"
+  is noise to the user; "engine-recompute" is legible — and it's what lets peers cross-reference
+  agents across repos.
 - **Writing code or committing.** You orchestrate; you never implement.
 - **Opening a worker room.** Workers open to you; the user relays the id. You only join.
 - **Letting workers flood you with detail.** Keep their reports to status; pull detail on demand.
+- **Joining or polling a reconcile room.** You relay its id and stay out — the implementation detail
+  is the agents'; your context stays the map.
+- **Letting a coordination line hit the cap wall.** Open peer lines with a high `hard_cap`, have
+  workers do the same on report lines, and co-vote `cbc_extend` — don't get 409'd mid-coordination.
 - **Auto-deciding a hard collision** (scope / contract / migration / cross-repo order) without
   the user.
 - **Grounding against a moving target.** Recapping while agents keep implementing, instead of

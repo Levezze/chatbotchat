@@ -30,8 +30,10 @@ loop from scratch.
    **not** the rooms (your polls re-attach by session identity) and **not** the map on disk.
    *Tell the user this is a safe moment to compact* if their context is heavy.
 4. **Rebuild from scratch — from the rooms, never from memory.** Once the fresh statuses are in
-   (and after any compaction), `cbc_recap` every room and re-read the orchestration map, then
-   reconstruct the picture from those alone. Do **not** trust any pre-compact recollection.
+   (and after any compaction), `cbc_recap` every room **you hold** — your report and peer lines —
+   and re-read the orchestration map, then reconstruct the picture from those alone. (Reconcile
+   rooms your agents opened among themselves you never joined, so they aren't yours to re-ground;
+   their outcome reaches you as status on the report lines.) Do **not** trust any pre-compact recollection.
    Verify external claims (merged / deployed / contract is now X) against `git`/`gh` as always.
    Overwrite the map with current truth (create one if there isn't yet).
 5. **Reprint the deterministic recap, then release.** Print the same clean "stop to breathe"

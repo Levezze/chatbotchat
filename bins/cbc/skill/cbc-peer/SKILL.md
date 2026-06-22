@@ -18,7 +18,9 @@ The "never open a room" rule in `/cbc-orchestrator` is about **worker** rooms. P
 different: there is no worker to do the opening, so **either orchestrator may open** the peer
 room.
 
-- `cbc_open_room` with a subject like `peer: <repoA> <-> <repoB>`.
+- `cbc_open_room` with a subject like `peer: <repoA> <-> <repoB>`, opened with a **high `hard_cap`**
+  (e.g. `hard_cap: 200`) — peer coordination stays open across the cross-repo work and will outrun
+  the default 20-message cap; `cbc_extend` (+20, consensus) if it still fills.
 - Surface the bare room id to the **user**, who relays it to the other repo's orchestrator.
 - One **pairwise** room per peer — a CBC room is two-party. With three repos you hold up to two
   peer rooms (e.g. engine↔api and engine↔client are **separate** rooms); there is no
@@ -57,12 +59,27 @@ decision. Concretely, raise it in the peer room(s):
 - **Cross-repo merge order** — which repo lands first so the other isn't briefly broken.
 - **Heads-up** — "my repo's agents are about to change X that your repo consumes/derives from."
 
+**Refer to agents by their `<repo>-<feature>` name across the peer line** — `engine-recompute`,
+`api-recompute`, `client-labels` — never by an opaque instance hash. That's what lets both sides
+cross-reference the relevant agents across repos: when you say "engine-recompute changed the result
+contract", the peer knows exactly which of its agents (`api-recompute`) that lands on. Trade names,
+not hashes.
+
 The rule of thumb: **if a change in your repo forces another repo to adapt, regenerate, or
 re-derive anything, announce it across the peers first.** A contract changed on one side while
 the other side is blind is precisely the cross-repo salad this system prevents.
 
 Do **not** pipe same-repo worker detail across a peer room. The peer doesn't need your internal
 agent map; it needs the cross-repo contract surface.
+
+## Relay cross-repo reconcile rooms — don't join them
+
+When a worker in your repo needs to reconcile implementation detail *directly* with an agent in a
+peer repo — types, shapes, a shared contract — it opens a **reconcile room** (`/cbc-reconcile`) and
+hands you the id to relay. Pass it **across the peer line** to the other repo's orchestrator, who
+forwards it to their worker. **Neither orchestrator joins** the reconcile room: the two agents
+reconcile the detail directly, and you only bridge the id across the repo boundary. What comes back
+to the peer line is the cross-repo *outcome* — "the contract is now X, regenerate" — not their code.
 
 ## Same map, same escalation
 
@@ -84,6 +101,8 @@ running.
 ## Anti-patterns
 
 - **Piping same-repo worker detail across a peer room.** Cross-repo contract surface only.
+- **Joining a cross-repo reconcile room.** You relay its id across the peer line and stay out; the
+  two agents reconcile the detail directly, and only the cross-repo outcome returns to the peer line.
 - **Expecting one room for all orchestrators.** Rooms are two-party — one pairwise room per peer.
 - **Auto-deciding a cross-repo contract or merge-order question** without the user.
 - **Trusting a peer's "merged/changed" claim** without checking that repo's reality.

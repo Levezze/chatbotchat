@@ -25,7 +25,10 @@ merged**. The orchestrator needs to know what's happening throughout, not just a
 
 ## Open the line
 
-1. `cbc_open_room` with a subject like `report: <repo>/<short task> -> orchestrator`.
+1. `cbc_open_room` with a subject like `report: <repo>/<short task> -> orchestrator`, and open it
+   with a **high `hard_cap`** (e.g. `hard_cap: 200`). This line stays open until your work is merged,
+   so it will blow far past the default 20-message cap; if it still fills, `cbc_extend` (consensus
+   +20) and the orchestrator co-votes.
 2. `cbc_join_room`, then `cbc_send` an **opening status** (see discipline below).
 3. Output the bare room id on its own line so the **user can paste it to the orchestrator** —
    you do not know the orchestrator's identity, and you do not address it; the user relays.
@@ -47,8 +50,13 @@ reconciles the full picture before acting, rather than reacting to you alone. Yo
   hold.** Don't keep implementing through a hold: that's how parallel agents diverge into a merge
   salad while the orchestrator is still grounding. Resume only when it hands you your single
   responsibility and clears you to go.
-- **Open with a grounding status, not a terse ping.** Your first message must let the
-  orchestrator place you on the board: what you're building, **where you are in your sequence**
+- **Lead with your `<repo>-<feature>` name.** Identify yourself by what you do and the repo you're
+  in — `engine-recompute`, `api-fix-contract`, `client-labels` — not by a bare task word. Set it as
+  your room **nickname** too (`--nick <repo>-<feature>` / the `nickname` field) so it shows in
+  `cbc status`. This is the name the orchestrator will use for you on its board, in its map, and when
+  it relays a reconcile-room id to you; without it you're an opaque instance hash on its roster.
+- **Open with a grounding status, not a terse ping.** After your name, your first message must let
+  the orchestrator place you on the board: what you're building, **where you are in your sequence**
   (designing / implementing / testing / ready to merge), the surfaces you're touching, and
   anything already decided or in flight on your side. Keep it status-level, not a code dump.
 - **Don't expect immediate direction** — expect reconciliation. Answer the orchestrator's
@@ -95,6 +103,24 @@ the other agents from stepping on each other. So:
 - If you're getting **conflicting direction** (the orchestrator and another agent telling you
   different things about the same surface), say so in your room — that's a grounding gap for the
   orchestrator to resolve, not something to guess your way through.
+
+## Need a direct line to another agent? Open a reconcile room
+
+Some things aren't for the orchestrator at all — you need to talk **directly** to another agent to
+share types and shapes, reconcile a contract, or ask a pointed code question. Don't route that
+through your orchestrator line: it holds the map, not the code, and threading implementation detail
+through it pollutes exactly the context the orchestrator works to keep clean. Instead open a
+**reconcile room** with `/cbc-reconcile`:
+
+- Open it directly with the other agent, then post the bare room id on **this** report line and ask
+  the orchestrator to **relay** it — it forwards the id to the other agent (same-repo over their
+  report line; cross-repo via its peer) **without joining.** (No orchestrator coordinating you? The
+  user relays, as in the plain two-agent flow.)
+- Keep the implementation detail **in the reconcile room.** Your orchestrator hears only status —
+  *"reconciled the payload shape with api; ready to implement."* If the reconciliation changes a
+  shared surface, contract, or merge order, report *that* one-line fact up; never the code.
+- The reconcile room is a separate, normal-lifecycle room you consensus-close when you're done — not
+  a second report line. Your report line stays open and live throughout.
 
 ## Stay autonomous — don't funnel every question to the user
 
@@ -143,8 +169,10 @@ and it is **never** a signal that the room closed or the orchestrator left. If y
 ## Closing the line
 
 When your work is **fully merged and done**, propose `cbc_close`. The orchestrator co-votes and
-tears the room down (it also stops its own poll for you). Then stop your own poll. Don't close
-early — the line is meant to stay open until merge, not until you "mostly" finish.
+tears the room down (it also stops its own poll for you). Then **stop your own background poll
+shell** — `TaskStop` the task you launched for this line; a closed room's poll left looping burns
+CPU and tokens (`/cbc` Closing). Don't close early — the line is meant to stay open until merge,
+not until you "mostly" finish.
 
 ## Anti-patterns
 
@@ -157,6 +185,8 @@ early — the line is meant to stay open until merge, not until you "mostly" fin
   your terminal.
 - **Dumping plans / diffs / full implementation detail** unprompted. Status only; detail on
   request or for a shared-surface heads-up.
+- **Asking another agent code questions *through* the orchestrator line.** Open a reconcile room
+  (`/cbc-reconcile`); the orchestrator relays the id, it does not carry your implementation detail.
 - **Going silent while touching a shared surface.** That's the one moment you *must* speak up.
 - **Treating this like a normal CBC room** — opening, reconciling once, voting close. The line
   stays open through the whole job.

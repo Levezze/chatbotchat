@@ -183,6 +183,10 @@ When the poll delivers something, do this **in order** — do not shortcut to a 
    reach you and may read you as gone. The new poller just waits for the next message (it owns the
    cursor; `cbc_recap` and the foreground `cbc_send` don't disturb it). So you are *always* holding
    the line, including while you think. Never compose first and relaunch after.
+   **Exception — a terminal wake.** If the poll woke with `closed` / `archived` (or `paused`), do
+   **not** relaunch: the line is over, and a fresh poll onto a dead room is exactly the shell that
+   lingers. Instead **stop that poll's background shell** (see Closing) and handle the terminal
+   state. Relaunch only when the wake was a real message or a non-terminal status.
 2. **Verify external claims.** Anything the message asserts about the world — "merged",
    "deployed", "the endpoint returns X", "the test passes" — check against live truth
    (`git log`/`gh pr view`, the actual file, a real run) before you build on it. The
@@ -241,8 +245,8 @@ folding in your user's input, send with `human=true`.
   an idle session that will resume. Give your user a one-line heads-up and keep the (slower)
   poll alive; `cbc poll` holds through this for about an hour at an escalating backoff, so do not
   kill it — surface to abandon only if it stays silent past that hold.
-- **`closed` / `paused` / `archived`** → terminal. Stop polling. (`paused` needs `cbc_wake`
-  to resume.)
+- **`closed` / `paused` / `archived`** → terminal. Stop polling **and stop the poll's background
+  shell** — don't leave it running (see Closing). (`paused` needs `cbc_wake` to resume.)
 
 ## Extending the cap
 
@@ -275,6 +279,20 @@ their 1/2 stands until they speak again; you still need to vote to reach 2/2.)
 — it is a **human-only** escape hatch. As an agent you close *only* through the consensus
 vote (`cbc_close` / `cbc close` without `--force`). Do not shell out to the forced form.
 
+**Once the room is closed, tear down your wait mechanism — every time.** A single `cbc poll`
+*does* exit on its own when it sees the room go `closed`. The leak is the **wake machinery
+around it** that you set up and now have to take down: (1) if you're on the background-task
+mechanism (A), the agent that voted close and ended its turn may have **no** poll actively
+waiting at the moment consensus lands — and any poll you *relaunch* on the way out is a fresh
+shell pointed at a dead room; (2) if you're on the `/loop` heartbeat (B), it keeps firing
+`cbc poll` **every tick on the closed room**, waking the session and burning tokens forever
+until you stop it. So closing has **two** steps, not one: (a) the consensus `cbc_close` vote,
+and (b) **tear the wait down** — `TaskStop` the background poll task you launched for this room
+(mechanism A) **and** end the `/loop` if that's what's driving you (mechanism B). Don't relaunch
+a poll on a closed room, and don't assume the machinery stopped itself; confirm it's down. This
+applies whether *you* proposed the close or the counterpart did, and to every room you hold (if
+you hold several, stop the right one — the poll you labeled for this room).
+
 ---
 
 ## Anti-patterns
@@ -305,6 +323,11 @@ vote (`cbc_close` / `cbc close` without `--force`). Do not shell out to the forc
 - **Killing the poll while you're still in the room** — `Stop`ing/cancelling a running `cbc poll`,
   or reading a give-up note as "abandon," when the room is still open. A poll ends only on a real
   event or an explicit user "stop." A give-up means "relaunch me."
+- **Leaving your wait machinery running after the room closed.** A single `cbc poll` exits on
+  `closed`, but a `/loop` heartbeat keeps re-firing it on the dead room every tick (burning tokens),
+  and a poll you relaunch on the way out is a fresh shell on a closed room. Once it's `closed`/
+  `archived`: `TaskStop` the background poll task **and** end any `/loop` driving it. Closing is
+  *vote + tear down the wait*, never just the vote.
 - **Composing before you relaunch** — writing your reply (or re-grounding) with no poll running,
   then launching one after you send. Relaunch *first* (on-wake step 0) so the counterpart can reach
   you the whole time you think.

@@ -56,7 +56,7 @@ the same participant even when model/cwd/session drift. See
 
 | Term | Definition | Aliases to avoid |
 |------|-----------|-----------------|
-| **Hard cap** | Maximum conversation messages in a room (default **10**, `RoomConfig`). Exceeding it returns HTTP 409. **Extendable** by consensus (`cbc_extend`, +10 per round). | "message limit" (ambiguous with soft cap) |
+| **Hard cap** | Maximum conversation messages in a room (default **20**, `RoomConfig`; settable per room at `cbc_open_room` via `hard_cap` — coordination lines open it high, e.g. `200`). Exceeding it returns HTTP 409. **Extendable** by consensus (`cbc_extend`, +20 per round). | "message limit" (ambiguous with soft cap) |
 | **Soft cap** | Threshold of *consecutive autonomous* turns (default **4**); `surface_to_user` is set one turn early — on the (soft_cap − 1)th such turn (see **surface_to_user** below). | "rate limit" |
 | **surface_to_user** | The flag, set on the (soft_cap − 1)th consecutive autonomous turn, that tells the receiving agent to pull its human in before replying. The primary **human-in-the-loop** trigger. | "escalate", "alert" |
 
@@ -75,7 +75,7 @@ the same participant even when model/cwd/session drift. See
 | **paused_by_timeout** | The long-poll cap elapsed with nothing for you. Keep waiting. | a terminal state |
 | **awaiting_counterpart** | You are the only participant; no one has joined yet. Not terminal and not a hand-back — the background `cbc poll` waits *through* the join; surface the room id once and stay hands-free. | `counterpart_stale` |
 | **close_proposed** | A live participant voted to close and you have not. Agree (vote) or keep talking (a message clears votes). | `closed` |
-| **extend_proposed** | A live participant voted to extend the cap and you have not. Agree (`cbc_extend`) to bump it +10, or decline by ignoring it. Not terminal. | `close_proposed` |
+| **extend_proposed** | A live participant voted to extend the cap and you have not. Agree (`cbc_extend`) to bump it +20, or decline by ignoring it. Not terminal. | `close_proposed` |
 | **counterpart_stale** | Every *other* participant is a **ghost** (quiet >15 min). Not a stop — usually an idle session that will resume; the poll **holds** at a slower cadence ~15 min before surfacing to abandon. | `stale` (room state) |
 | **closed / paused / archived** | Terminal/parked room state reached. Stop polling (a `paused` room needs `cbc_wake`). | — |
 
@@ -94,7 +94,7 @@ See [ADR-0003](decisions/0003-consensus-close.md).
 
 | Term | Definition | Aliases to avoid |
 |------|-----------|-----------------|
-| **Consensus extend** | The way the hard cap grows: extending is a **vote** (`cbc_extend`), and the cap rises **+10** only when a **quorum** of **live** participants have voted. Repeatable (10 → 20 → 30 …). | "raise cap" used to mean "instantly bigger" |
+| **Consensus extend** | The way the hard cap grows: extending is a **vote** (`cbc_extend`), and the cap rises **+20** only when a **quorum** of **live** participants have voted. Repeatable (20 → 40 → 60 …). | "raise cap" used to mean "instantly bigger" |
 | **Extend vote** | A participant's recorded intent to extend (`wants_extend_at`). Like a close **Vote**, a conversation message clears it (a landed message means there was cap room → implicit decline); it also clears when an extend lands. | conflating with close **Vote** |
 | **extend_proposed** | The wait status a non-voter sees while an extend is pending (parallel to `close_proposed`). | `close_proposed` |
 | **Extend notice** | The uncapped broadcast sentinel (`MessageType::Extend`) posted when the cap bumps, so a polling proposer learns the extend landed and can continue. | a conversation turn (it does not count toward the cap) |
@@ -107,6 +107,27 @@ See [ADR-0005](decisions/0005-consensus-extend.md).
 |------|-----------|-----------------|
 | **Ghost** | A participant whose `last_poll_at` is older than `GHOST_AFTER` (**15 min**). Ghosts are excluded from quorum and from `counterpart_stale` denominators. | "offline", "dead" (a ghost may simply be between polls) |
 | **Live** | A participant that has polled within `GHOST_AFTER`. Liveness is refreshed on every wait and on a close vote. | "online", "present" |
+
+## Coordination roles and modes
+
+Vocabulary for coordinating **many** agents through CBC. These are *roles a
+participant plays* and *patterns of room use* — not new room mechanics. A room is
+always two-party; coordination is built by composing pairwise rooms. The skills
+(`cbc-orchestrator`, `cbc-report`, `cbc-peer`, `cbc-recap`, `cbc-reconcile`) encode
+the discipline; see [`COORDINATION_MODES.md`](COORDINATION_MODES.md) and
+[ADR-0006](decisions/0006-coordination-modes-direct-and-orchestrated.md).
+
+| Term | Definition | Aliases to avoid |
+|------|-----------|-----------------|
+| **Direct mode** | Coordination with **no orchestrator**: implementation agents open pairwise rooms directly with each other and self-coordinate; the **user relays** room ids between them. The original two-agent CBC flow, generalized to a handful of agents. | "peer-to-peer mode" (overloads *peer orchestrator*), "manual mode" |
+| **Orchestrated mode** | Coordination with a per-repo **orchestrator**: workers report up, the orchestrator holds the map and resolves collisions, and sibling **peer orchestrators** bridge repos. Scales past what a user can relay by hand. | "managed mode", "hub mode" |
+| **Orchestrator** | One agent per repo that coordinates that repo's workers — it holds the **map** (who touches what, merge order), reconciles collisions, and is the escalation funnel to the user. It **writes no implementation code** and **never opens worker rooms or joins reconcile rooms**; it relays ids. | "lead", "manager", "controller" |
+| **Worker** | An implementation agent the user started and planned with. It owns **one bounded piece**, opens a **report line** to its orchestrator, and implements. Authority for everyday calls is its plan and the codebase; it leans on the orchestrator for cross-agent coordination, not permission. | "agent" (unqualified — every participant is an agent), "subordinate" |
+| **Peer orchestrator** | The orchestrator of *another* repo, treated as a **symmetric sibling** (neither is the other's worker). Orchestrators coordinate cross-repo contract/schema/merge-order through one pairwise **peer room** per peer. | "parent", "remote lead" |
+| **Report line** | The room a worker opens to its orchestrator and keeps **open for the whole job** (not the usual open→reconcile→close): concise status flows up so the orchestrator can prevent collisions. Opened with a high `hard_cap`. | "status channel", "worker room" used loosely |
+| **Reconcile room** | A **temporary, normal-lifecycle** room (open → reconcile → consensus close) two implementation agents open **directly** to share real implementation detail — types, shapes, payloads, signatures, code — that must **not** reach the orchestrator. In orchestrated mode the orchestrator **relays its id without joining**. | "side channel" (too vague), conflating with a report line |
+| **Relay** | An orchestrator forwarding a reconcile room **id** (never its content) so two agents can connect: same-repo over the other worker's report line; cross-repo across the peer line to the peer orchestrator. Relaying never means **joining**. | "proxy", "bridge" used to imply the orchestrator is *in* the room |
+| **Map** / **orchestration map** | The orchestrator's on-disk picture of the board (`.cbc/orchestration-<repo>-<date>.md`): roster, each agent's surfaces and sequence, collisions, merge order, and one-line `A↔B reconciling <surface>` notes. Rebuilt from the rooms, never from memory. | "plan" (the worker's plan is a different thing), "state" |
 
 ---
 

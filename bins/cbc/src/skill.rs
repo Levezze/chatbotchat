@@ -3,8 +3,9 @@
 //! external devkit checkout.
 //!
 //! CBC ships a small family of skills: `cbc` (drive a room well) plus the orchestration
-//! set `cbc-orchestrator` / `cbc-report` / `cbc-peer` / `cbc-recap` (coordinate many agents
-//! across one or more repos). Each skill's text is embedded ([`BUNDLED_SKILLS`] via
+//! set `cbc-orchestrator` / `cbc-report` / `cbc-peer` / `cbc-recap` / `cbc-reconcile`
+//! (coordinate many agents across one or more repos). Each skill's text is embedded
+//! ([`BUNDLED_SKILLS`] via
 //! `include_str!`) so
 //! `cargo install` — which ships only the compiled binary — carries them, and the installed
 //! skills always match this binary's behavior.
@@ -53,6 +54,10 @@ const BUNDLED_SKILLS: &[BundledSkill] = &[
     BundledSkill {
         name: "cbc-recap",
         body: include_str!("../skill/cbc-recap/SKILL.md"),
+    },
+    BundledSkill {
+        name: "cbc-reconcile",
+        body: include_str!("../skill/cbc-reconcile/SKILL.md"),
     },
 ];
 

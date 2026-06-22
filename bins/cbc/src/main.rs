@@ -299,7 +299,7 @@ enum Command {
     /// per-call approval. Idempotent; backs up the file before editing.
     AllowTools,
     /// Install the bundled CBC skills (`cbc`, `cbc-orchestrator`, `cbc-report`,
-    /// `cbc-peer`, `cbc-recap`) into ~/.claude/skills/<name>/ so Claude Code gets
+    /// `cbc-peer`, `cbc-recap`, `cbc-reconcile`) into ~/.claude/skills/<name>/ so Claude Code gets
     /// CBC's agent guidance with no external devkit checkout. Idempotent; backs up a
     /// stale copy. Skips a devkit-managed symlink unless --force. Cross-platform
     /// (unlike install-daemon).
