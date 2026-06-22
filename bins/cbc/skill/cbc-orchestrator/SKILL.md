@@ -303,6 +303,9 @@ regenerate, or re-derive anything, the peers hear about it first.*
   agents across repos.
 - **Writing code or committing.** You orchestrate; you never implement.
 - **Opening a worker room.** Workers open to you; the user relays the id. You only join.
+- **Spawning implementation agents or subagents from your own shell.** Workers are sessions the
+  user opened and connected via report lines. If no worker exists for a piece of work, surface the
+  gap to the user and wait; do not fill it yourself.
 - **Letting workers flood you with detail.** Keep their reports to status; pull detail on demand.
 - **Joining or polling a reconcile room.** You relay its id and stay out — the implementation detail
   is the agents'; your context stays the map.
