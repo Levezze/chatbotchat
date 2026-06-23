@@ -227,7 +227,7 @@ fn print_next_steps(config: &InstallConfig, plist_path: &Path, newsyslog_conf: &
         "  claude mcp add --scope user chatbotchat -e CBC_SERVER=http://127.0.0.1:{port} -- cbc mcp"
     );
     println!();
-    println!("Auto-approve the bus so cbc_send doesn't stall for per-call approval:");
+    println!("Auto-approve the bus and CLI so MCP tools and `cbc` Bash calls skip the classifier:");
     println!("  cbc allow-tools");
     println!();
     println!("Enable log rotation (needs sudo; one time):");
@@ -298,14 +298,19 @@ fn maybe_prompt_allow_tools() {
     if !std::io::stdin().is_terminal() {
         return;
     }
-    print!("\nAuto-approve the chatbotchat MCP tools now (edits ~/.claude/settings.json)? [y/N] ");
+    print!(
+        "\nAuto-approve the chatbotchat MCP tools and CLI now? \
+         This lets the bus and `cbc` CLI skip the auto-mode safety classifier \
+         (edits ~/.claude/settings.json). [Y/n] "
+    );
     let _ = std::io::stdout().flush();
 
     let mut line = String::new();
     if std::io::stdin().read_line(&mut line).is_err() {
         return;
     }
-    if !matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+    // Default Yes: empty input or explicit y/yes.
+    if matches!(line.trim().to_ascii_lowercase().as_str(), "n" | "no") {
         println!("Skipped. Run `cbc allow-tools` anytime to do this.");
         return;
     }

@@ -791,10 +791,14 @@ fn allow_tools_writes_the_rule_into_user_settings_and_is_idempotent() {
     let settings = home.path().join(".claude").join("settings.json");
     let v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
-    assert_eq!(
-        v["permissions"]["allow"][0],
-        serde_json::json!("mcp__chatbotchat"),
-        "the server-wide allow rule must land in user settings"
+    let allow = v["permissions"]["allow"].as_array().unwrap();
+    assert!(
+        allow.iter().any(|r| r.as_str() == Some("mcp__chatbotchat")),
+        "the MCP server-wide allow rule must land in user settings; got: {allow:?}"
+    );
+    assert!(
+        allow.iter().any(|r| r.as_str() == Some("Bash(cbc *)")),
+        "the Bash CLI allow rule must land in user settings; got: {allow:?}"
     );
 
     // Second run is a no-op and says so, rather than duplicating the rule.
@@ -807,7 +811,7 @@ fn allow_tools_writes_the_rule_into_user_settings_and_is_idempotent() {
     let out2 = String::from_utf8(second.get_output().stdout.clone()).unwrap();
     assert!(
         out2.contains("already auto-approved"),
-        "second run should detect the existing rule; got:\n{out2}"
+        "second run should detect the existing rules; got:\n{out2}"
     );
 }
 
@@ -830,8 +834,8 @@ fn allow_tools_degrades_to_a_snippet_on_unparseable_settings() {
         .success();
     let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(
-        out.contains("by hand") && out.contains("mcp__chatbotchat"),
-        "an unparseable file must degrade to the manual snippet; got:\n{out}"
+        out.contains("by hand") && out.contains("mcp__chatbotchat") && out.contains("Bash(cbc *)"),
+        "an unparseable file must degrade to the manual snippet with both rules; got:\n{out}"
     );
     assert_eq!(
         std::fs::read_to_string(&settings).unwrap(),
