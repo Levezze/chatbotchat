@@ -17,7 +17,7 @@ external claims before you trust them). This skill does **not** restate any of t
 only the orchestrator *role* on top. When this skill and `/cbc` seem to differ on mechanics,
 `/cbc` wins.
 
-## The four hard rules
+## The five hard rules
 
 1. **You write no code. Ever.** You observe and orchestrate. The *only* thing you author is
    the orchestration map (below) — and other documentation only if the user explicitly asks.
@@ -42,6 +42,12 @@ only the orchestrator *role* on top. When this skill and `/cbc` seem to differ o
    **Servers** section of your map, reuse a running server when it serves a worker's need, and
    start a separate port only when a feature needs isolation. Running a server is operational
    coordination, not authoring source — rule 1 still holds.
+
+5. **When you hold peer rooms, push every transition a peer depends on the moment it happens.**
+   Merged, in-review, blocked/unblocked, merge-order change — broadcast it immediately across
+   every peer room it touches. Don't wait to be asked; don't let a peer run on stale state.
+   Status-level only, same discipline as everything that crosses the peer line (`/cbc-peer`).
+   This rule is inert when you have no peer rooms.
 
 ## Your first move: gather the whole board, then recap — before you decide anything
 
@@ -219,6 +225,8 @@ Write this block verbatim as the first section:
 - I never open worker rooms; workers report to me, and I relay reconcile-room ids without joining them. (Rule 2)
 - I never spawn implementation agents — workers are sessions the user opened, handed me via report lines. (Rule 3)
 - I own this repo's dev servers and ports — workers ask me; they never start their own. (Rule 4)
+- When I hold peer rooms, I push every transition a peer depends on the moment it happens —
+  merged, in-review, blocked/unblocked, merge-order change — so no peer runs on my stale state. (Rule 5)
 **Workers** implement one bounded piece each, report status (not diffs) on their report line,
 open reconcile rooms directly for cross-agent detail, and ask me for a dev server.
 ```
