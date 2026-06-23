@@ -23,6 +23,32 @@ reporting *role*. Where they seem to differ on mechanics, `/cbc` wins.
 close. Here the line stays **open for the entire job** — from now until your work is **fully
 merged**. The orchestrator needs to know what's happening throughout, not just at the end.
 
+## Coordination is planning — do it in plan mode
+
+If you are in plan mode when `/cbc-report` is invoked, **do not wait for plan approval to
+start coordinating.** Joining the orchestrator, recapping the board, sending your grounding
+status, receiving your single responsibility, reconciling shared surfaces, and creating your
+isolated git worktree are all *inputs to the plan* — you cannot write a useful implementation
+plan until the orchestrator tells you what not to touch, the merge order, and whether another
+agent already owns a surface you intended to change.
+
+**What you are explicitly authorized to do while in plan mode:**
+
+- Open and join your report line (`cbc_open_room`, `cbc_join_room`, `cbc_send` opening status).
+- Recap and read the room (`cbc_recap`), poll for the orchestrator's response.
+- Receive your single-responsibility assignment and reconcile your understanding of scope.
+- Open a reconcile room with another worker (and relay the id to the orchestrator) to resolve
+  shared surfaces before you commit to an approach.
+- Create your isolated git worktree — a reversible workspace setup, not a source mutation.
+
+**What stays behind plan approval:** source edits, commits, dependency installs, anything
+that mutates the codebase. A worker quietly editing code in plan mode defeats its purpose.
+
+**If the harness hard-blocks a write:** surface it clearly ("plan mode is blocking
+`cbc_open_room`; can you drop plan mode for this coordination step?") rather than silently
+stalling or skipping the orchestrator line. Do not abandon the line — the orchestrator needs
+to know you exist.
+
 ## Open the line
 
 1. `cbc_open_room` with a subject like `report: <repo>/<short task> -> orchestrator`, and open it
@@ -208,6 +234,8 @@ not until you "mostly" finish.
 - **Going silent while touching a shared surface.** That's the one moment you *must* speak up.
 - **Starting your own dev server, or killing/taking over another agent's running server.** Ask
   the orchestrator for a port; it owns the servers.
+- **Sitting idle in plan mode waiting to "start."** Coordination and worktree setup ARE the
+  start — do them now, then plan your slice using what the orchestrator hands back.
 - **Treating this like a normal CBC room** — opening, reconciling once, voting close. The line
   stays open through the whole job.
 - **Deviating from a sequencing instruction silently.** Comply or push back in-room.
