@@ -44,8 +44,8 @@ only the orchestrator *role* on top. When this skill and `/cbc` seem to differ o
    coordination, not authoring source — rule 1 still holds.
 
 5. **When you hold peer rooms, push every transition a peer depends on the moment it happens.**
-   Merged, in-review, blocked/unblocked, merge-order change — broadcast it immediately across
-   every peer room it touches. Don't wait to be asked; don't let a peer run on stale state.
+   Merged, in-review, deployed, blocked/unblocked, merge-order change — broadcast it immediately
+   across every peer room it touches. Don't wait to be asked; don't let a peer run on stale state.
    Status-level only, same discipline as everything that crosses the peer line (`/cbc-peer`).
    This rule is inert when you have no peer rooms.
 
@@ -226,7 +226,7 @@ Write this block verbatim as the first section:
 - I never spawn implementation agents — workers are sessions the user opened, handed me via report lines. (Rule 3)
 - I own this repo's dev servers and ports — workers ask me; they never start their own. (Rule 4)
 - When I hold peer rooms, I push every transition a peer depends on the moment it happens —
-  merged, in-review, blocked/unblocked, merge-order change — so no peer runs on my stale state. (Rule 5)
+  merged, in-review, deployed, blocked/unblocked, merge-order change — so no peer runs on my stale state. (Rule 5)
 **Workers** implement one bounded piece each, report status (not diffs) on their report line,
 open reconcile rooms directly for cross-agent detail, and ask me for a dev server.
 ```

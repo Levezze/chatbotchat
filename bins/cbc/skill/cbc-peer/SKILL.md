@@ -82,6 +82,11 @@ being a unilateral decision.
 - **Merge order between features** — which branch lands first to avoid the other briefly broken.
 - **Heads-up on shared contracts or migrations** — even within one repo, one feature changing a
   public interface another feature's workers consume must be coordinated.
+- **Dev server / port coordination** — Rule 4 gives each orchestrator ownership of "this repo's
+  dev servers," but in a same-repo two-orchestrator setup both cannot own the same ports. Agree
+  at peer-room open time which orchestrator manages dev servers for this session; the designated
+  one runs servers and hands URLs to the other's workers on request, exactly as in the
+  cross-repo case.
 
 **Refer to agents by their `<repo>-<feature>` or `<feature>` name across the peer line** —
 `engine-recompute`, `api-recompute`, `client-labels` — never by an opaque instance hash. That's
@@ -151,8 +156,8 @@ don't leave a settled one running.
 
 - **Piping your internal worker detail across a peer room.** Share the surface where your work
   meets the peer's, not your full agent map.
-- **Sitting on a transition a peer depends on.** Merged, in-review, blocked, merge-order change
-  — push it the moment it happens; don't let the peer run on stale state.
+- **Sitting on a transition a peer depends on.** Merged, in-review, deployed, blocked/unblocked,
+  merge-order change — push it the moment it happens; don't let the peer run on stale state.
 - **Joining a cross-boundary reconcile room.** You relay its id across the peer line and stay
   out; the two agents reconcile the detail directly, and only the outcome returns to the peer
   line.

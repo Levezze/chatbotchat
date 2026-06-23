@@ -154,7 +154,7 @@ they differ only in how the finished poll wakes you.**
   ```
   /loop  Run `cbc poll <room> --model <m> --max-polls 1 --poll-cap-secs 50`;
          if it reports a terminal status (closed/archived/paused), STOP — end this /loop and
-         stop the shell, the line is over;
+         stop the shell (paused may be resumable via cbc_wake; closed/archived are not);
          else if it delivered a message, follow the on-wake discipline and reply;
          else do nothing.
   ```
