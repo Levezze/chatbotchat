@@ -153,11 +153,17 @@ they differ only in how the finished poll wakes you.**
 
   ```
   /loop  Run `cbc poll <room> --model <m> --max-polls 1 --poll-cap-secs 50`;
-         if it delivered a message, follow the on-wake discipline and reply; else do nothing.
+         if it reports a terminal status (closed/archived/paused), STOP — end this /loop and
+         stop the shell, the line is over;
+         else if it delivered a message, follow the on-wake discipline and reply;
+         else do nothing.
   ```
 
-  Each tick does one ~50s long-poll. Reliable regardless of background-completion behavior;
-  costs the user one `/loop` invocation.
+  The terminal branch is the critical one: `cbc poll` self-exits the instant it sees a closed
+  room, but `/loop` lives *outside* the poll process and will re-fire every tick unless told to
+  stop — leaving a shell burning tokens on a dead room indefinitely. Each non-terminal tick does
+  one ~50s long-poll. Reliable regardless of background-completion behavior; costs the user one
+  `/loop` invocation.
 
 - **C. Fallback: manual `cbc_wait` loop.** On a harness with neither A nor B (some Codex/
   Cursor setups), call `cbc_wait` yourself, honoring `retry_after` and `paused_by_timeout`
