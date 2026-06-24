@@ -230,7 +230,7 @@ status, survives a `/compact`, and rebuilds the picture from the rooms and this 
   echo '.cbc/' >> $(git rev-parse --git-path info/exclude)
   ```
   Check it isn't already there. Do **not** edit the tracked `.gitignore`. Use `git rev-parse --git-path info/exclude` — a literal `.git/info/exclude` path silently fails in git worktrees where `.git` is a file, not a dir.
-- If the repo dir is read-only, fall back to `/tmp/cbc-orchestration-<repo>-<YYYYMMDD>.md`.
+- **Create `.cbc/` before your first write** — it does not exist yet in a fresh session: `mkdir -p .cbc/`. A missing dir is NOT a fallback reason — create it. Use `/tmp/cbc-orchestration-<repo>-<YYYYMMDD>.md` ONLY if a write to `.cbc/` actually fails (read-only filesystem).
 
 Keep it scannable — a table of agents × (surface / branch / deps / merge order / room), a
 **Servers** section (see below), and a short "open collisions" section. This is the map, not

@@ -31,7 +31,8 @@ at the end.
 **I am a worker. I implement one bounded piece; the orchestrator holds the map.**
 - I never propose or suggest closing my report room — the orchestrator owns closure. (Rule 1)
 - I push a status update to the orchestrator on every transition — stale orchestrator
-  state is the main source of coordination failure. (Rule 2)
+  state is the main source of coordination failure. `phase ≠ last-synced-to-orchestrator`
+  in my state file = I owe a push right now, before anything else. (Rule 2)
 - My piece merging ≠ the feature being done. The feature may span many repos
   (engine → API → client); the line stays open until the orchestrator says otherwise. (Rule 3)
 - I co-vote cbc_close only when the orchestrator proposes it — never on my own initiative. (Rule 4)
@@ -55,7 +56,13 @@ echo '.cbc/' >> $(git rev-parse --git-path info/exclude)
 
 `git rev-parse --git-path info/exclude` resolves correctly in both normal repos (`.git/info/exclude`) and git worktrees (`.git` is a file there, not a dir — a literal `.git/info/exclude` path silently fails). Check the file isn't already excluded before appending.
 
-Read-only fallback when `.cbc/` isn't writable: `/tmp/cbc-worker-<repo>-<feature>-<YYYYMMDD>.md`.
+**Create `.cbc/` before your first write** — it does not exist yet in a fresh worktree:
+
+```bash
+mkdir -p .cbc/
+```
+
+A missing `.cbc/` dir is NOT a reason to fall back — create it. Use `/tmp/cbc-worker-<repo>-<feature>-<YYYYMMDD>.md` ONLY if a write to `.cbc/` actually fails (read-only filesystem). Self-check: if your `state-file-path` is under `/tmp`, you erred — migrate the file to `.cbc/`.
 
 **File structure** (in order):
 
