@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/Levezze/chatbotchat/compare/v0.8.0...v0.9.0) (2026-06-24)
+
+
+### Features
+
+* **cbc:** resumable skills — status/next-action fields, Resuming? preambles, fix git-path exclude ([#77](https://github.com/Levezze/chatbotchat/issues/77)) ([9a9148b](https://github.com/Levezze/chatbotchat/commit/9a9148bdbb63f628953fabebbb91265771e2868b))
+
 ## [0.8.0](https://github.com/Levezze/chatbotchat/compare/v0.7.1...v0.8.0) (2026-06-24)
 
 
