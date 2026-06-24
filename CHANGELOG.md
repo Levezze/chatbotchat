@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/Levezze/chatbotchat/compare/v0.7.1...v0.8.0) (2026-06-24)
+
+
+### Features
+
+* **cbc:** worker owns one piece, orchestrator owns closure; rename /cbc-report → /cbc-worker ([#75](https://github.com/Levezze/chatbotchat/issues/75)) ([e5f8730](https://github.com/Levezze/chatbotchat/commit/e5f873011f4431a809dffae59f44cc83ba2f4564))
+
 ## [0.7.1](https://github.com/Levezze/chatbotchat/compare/v0.7.0...v0.7.1) (2026-06-24)
 
 
