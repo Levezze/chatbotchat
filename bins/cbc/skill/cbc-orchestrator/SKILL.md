@@ -75,8 +75,6 @@ Read any file found. Run the **liveness guard** (matches CLAUDE.md's convention)
 
 **If the guard fails** (branch gone, `status: DONE`, or no map found): write `status: DONE` into the file (if one was found), then proceed fresh from "Your first move."
 
-If `status: DONE`, or no map is found: proceed fresh from "Your first move."
-
 ## Your first move: gather the whole board, then recap — before you decide anything
 
 When you're brought in there are already many moving parts: agents mid-implementation,
