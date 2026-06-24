@@ -17,7 +17,7 @@ on mechanics, `/cbc` wins.
 
 ## This is a normal CBC room — open, reconcile, close
 
-Unlike a `/cbc-report` line (which stays open until your whole job is merged), a reconcile room is
+Unlike a `/cbc-worker` line (which stays open until your whole job is merged), a reconcile room is
 **short-lived and normal-shaped**: you open it, the two of you reconcile the thing, and you
 **consensus-close it** when it's settled. It is a working session, not a standing channel.
 

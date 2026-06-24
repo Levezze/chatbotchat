@@ -273,6 +273,9 @@ both close (you'll see `close_proposed` until then). Don't assume a room is clos
 because you called close. When the conversation is genuinely done and both sides agree,
 close it so the room doesn't linger.
 
+In an **orchestrated** setup close-ownership is asymmetric — the orchestrator proposes,
+the worker co-votes; see `/cbc-worker` and `/cbc-orchestrator`.
+
 **Before you vote close, two preconditions:** (1) `cbc_recap` and re-ground — make sure
 you're not closing on a stale picture; (2) **send everything substantive first.** Voting
 close while you still have an unsent reply or an unverified correction can finalize the

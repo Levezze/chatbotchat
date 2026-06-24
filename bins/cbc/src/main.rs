@@ -298,7 +298,7 @@ enum Command {
     /// user settings (~/.claude/settings.json), so the bus stops stalling for
     /// per-call approval. Idempotent; backs up the file before editing.
     AllowTools,
-    /// Install the bundled CBC skills (`cbc`, `cbc-orchestrator`, `cbc-report`,
+    /// Install the bundled CBC skills (`cbc`, `cbc-orchestrator`, `cbc-worker`,
     /// `cbc-peer`, `cbc-recap`, `cbc-reconcile`, `cbc-refresh`) into ~/.claude/skills/<name>/ so
     /// Claude Code gets CBC's agent guidance with no external devkit checkout. Idempotent; backs
     /// up a stale copy. Skips a devkit-managed symlink unless --force. Cross-platform
