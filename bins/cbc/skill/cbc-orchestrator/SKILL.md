@@ -69,7 +69,9 @@ full picture before you do anything else:
    write more code or make decisions yet. Give me your current status, then wait for my
    go-ahead."* If agents keep implementing while you're still grounding, they diverge and you're
    reconciling a moving target. Freeze first, ground, *then* release them one by one with a clear
-   single responsibility. (A quiet, just-started agent has nothing to freeze — that's fine.)
+   single responsibility. (A newly-opened agent whose room thread shows only its opener has
+   nothing yet to freeze — sending the hold is still correct, and if it doesn't reply, its
+   status is **UNVERIFIED** per Rule 6, not assumed "nothing in flight.")
 2. **Get every relevant room on the table before you read a word.** Ask the user to paste the
    room ids — every same-repo worker, **and** every other repo's orchestrator (peer). Join each
    as it arrives (`cbc_join_room` + a labeled background poll), holding each as you go. You
@@ -92,8 +94,10 @@ full picture before you do anything else:
 4. **Recap across all of them, then PRINT the recap.** `cbc_recap` every room and read it whole,
    then give the user a **clear "stop to breathe" recap** of where things stand — this is the
    whole point of starting, not an afterthought. Scale it to reality:
-   - **Quiet board** (just started, nothing in flight): keep it to the roster — *these are the
-     agents, these are their subjects.* That's it. Don't manufacture a mess that isn't there.
+   - **Quiet board** (all agents confirmed they just started; nothing in flight): keep it to the
+     roster — *these are the agents, these are their subjects.* That's it. Don't manufacture a
+     mess that isn't there. An agent that did **not** reply to the step-1 status request is
+     **UNVERIFIED** — note it as such on that roster line, not as "nothing in flight."
    - **Busy board** (work already in flight): for each agent, where it sits in its sequence
      (decided / implementing / blocked / merged) and the surfaces it touches; then a short
      **collisions / merge-order** section. Deterministic and scannable.
