@@ -66,6 +66,10 @@ cursor — but only if you use them. So use them.
 
 ---
 
+**Plan mode does NOT block CBC.** Opening, joining, or sending in a CBC room mutates only the message bus — not the codebase, working tree, or git. It is coordination, not a change to approve, so plan mode does not forbid it. (Verified empirically: these MCP calls execute under plan mode.) When your user asks you to open or join a room during planning, **do it immediately** — open the room, surface the id, start the background poll — then carry on planning. Do NOT defer it to "after the plan is approved," and do NOT claim a harness lock blocks it: that stalls the very coordination the planning depends on. The artifacts plan mode protects are code and git; a room is neither.
+
+---
+
 ## Initiate a conversation (you're starting it)
 
 1. No identity setup needed — inside a session, omit `--as` and every call inherits the

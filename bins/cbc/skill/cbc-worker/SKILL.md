@@ -31,7 +31,8 @@ at the end.
 **I am a worker. I implement one bounded piece; the orchestrator holds the map.**
 - I never propose or suggest closing my report room — the orchestrator owns closure. (Rule 1)
 - I push a status update to the orchestrator on every transition — stale orchestrator
-  state is the main source of coordination failure. (Rule 2)
+  state is the main source of coordination failure. `phase ≠ last-synced-to-orchestrator`
+  in my state file = I owe a push right now, before anything else. (Rule 2)
 - My piece merging ≠ the feature being done. The feature may span many repos
   (engine → API → client); the line stays open until the orchestrator says otherwise. (Rule 3)
 - I co-vote cbc_close only when the orchestrator proposes it — never on my own initiative. (Rule 4)
@@ -47,8 +48,21 @@ rewrite it, so it survives compaction and agent handoff.
 Maintain a living state file at `.cbc/worker-<repo>-<feature>-<YYYYMMDD>.md` in **your own
 worktree's** `.cbc/` directory (e.g. `~/worktrees/my-feature/.cbc/worker-engine-recompute-20260624.md`).
 
-Exclude it from git: add `.cbc/` to `.git/info/exclude` in your worktree (not `.gitignore`).
-Read-only fallback when `.cbc/` isn't writable: `/tmp/cbc-worker-<repo>-<feature>-<YYYYMMDD>.md`.
+Exclude it from git — append `.cbc/` to the worktree's git-exclude file (not `.gitignore`, which is tracked):
+
+```bash
+echo '.cbc/' >> $(git rev-parse --git-path info/exclude)
+```
+
+`git rev-parse --git-path info/exclude` resolves correctly in both normal repos (`.git/info/exclude`) and git worktrees (`.git` is a file there, not a dir — a literal `.git/info/exclude` path silently fails). Check the file isn't already excluded before appending.
+
+**Create `.cbc/` before your first write** — it does not exist yet in a fresh worktree:
+
+```bash
+mkdir -p .cbc/
+```
+
+A missing `.cbc/` dir is NOT a reason to fall back — create it. Use `/tmp/cbc-worker-<repo>-<feature>-<YYYYMMDD>.md` ONLY if a write to `.cbc/` actually fails (read-only filesystem). Self-check: if your `state-file-path` is under `/tmp`, you erred — migrate the file to `.cbc/`.
 
 **File structure** (in order):
 
@@ -57,6 +71,8 @@ Read-only fallback when `.cbc/` isn't writable: `/tmp/cbc-worker-<repo>-<feature
 [paste charter block verbatim here]
 
 ## Status
+status: ACTIVE | DONE
+next-action: <terse one-liner — what a resumed agent should do first>
 phase: <planning|implementing|PR-open|in-review|applying-fixes|merging|piece-merged|blocked|waiting-on-orchestrator|waiting-on-user>
 last-synced-to-orchestrator: <same phase labels — the phase the orchestrator was last told>
 task: <one-line description>
@@ -77,8 +93,29 @@ state-file-path: <absolute path to this file — report this in your opening sta
 a push. Pushing updates `last-synced`. A freshly-compacted worker checks this field first to
 detect drift and re-sync.
 
+**`status: ACTIVE|DONE` + `next-action` are the resume fields.** Set `status: ACTIVE` when you open the file; set `status: DONE` only when the room closes and the poll is stopped. Update `next-action` after every transition — it is what a fresh agent reads to re-enter without re-running setup. See "Resuming?" below.
+
 **Report your state-file path in your opening status** so the orchestrator can record it in its
 map — that's how `/cbc-recap` later finds your file via `git worktree list`.
+
+## Resuming? — check before doing anything
+
+On every start (fresh invocation or post-`/compact` resume), find your state file:
+
+```bash
+ls .cbc/worker-*.md 2>/dev/null || ls /tmp/cbc-worker-*.md 2>/dev/null
+```
+
+Read any file found. Run the **liveness guard** (matches CLAUDE.md's two-condition check):
+1. Read `worktree:` (if present). Run `git -C <worktree-path> branch --show-current` (or bare `git branch --show-current` if no `worktree:`) — does it match `branch:` in the file?
+2. `cbc_status <room-id>` returns anything other than `closed`/`archived`?
+
+**If both pass AND `status: ACTIVE`:** you are resuming a live session. Do NOT re-run "Open the line." Do NOT re-present status to the user. In order:
+1. **Relaunch the background poll** using the label from your state file's `poll-label` field — the poll shell died during compaction and must come back before you can receive anything.
+2. **`cbc_recap` your room** to catch up on messages that arrived while the poll was dead — especially any holds or sequencing changes from the orchestrator. Do not act on in-flight state before you've read what you missed.
+3. **Then check `phase ≠ last-synced-to-orchestrator`** — if they differ, push the missed update now. This step is last, not first: pushing before you've read a hold violates the "Implementing through a hold" anti-pattern.
+
+**If the guard fails** (branch gone, room closed, `status: DONE`, or no file found): write `status: DONE` into the file (if one was found), then proceed fresh from "Open the line."
 
 ## Open the line
 

@@ -57,6 +57,24 @@ only the orchestrator *role* on top. When this skill and `/cbc` seem to differ o
    chat directly), never guess. Don't re-probe an agent already confirmed *this same pass*.
    See "Silence is not status" below.
 
+## Resuming? — check before doing anything
+
+On every start (fresh invocation or post-`/compact` resume), find the orchestration map:
+
+```bash
+ls .cbc/orchestration-*.md 2>/dev/null || ls /tmp/cbc-orchestration-*.md 2>/dev/null
+```
+
+Read any file found. Run the **liveness guard** (matches CLAUDE.md's convention):
+1. Read `worktree:` (if present). Run `git -C <worktree-path> branch --show-current` (or bare `git branch --show-current`) — does it match `branch:` in the file? (The orchestrator manages many rooms, so CLAUDE.md's room-liveness step is not applicable here — branch match is the practical guard.)
+
+**If the guard passes AND `status: ACTIVE`:** you are resuming a live session. Do NOT re-run "Your first move" from scratch — your rooms are already open. In order:
+1. **Relaunch all polls unconditionally** — you cannot tell which shells survived the compaction, and `cbc poll` is idempotent (same cursor, brief dual-listener overlap is fine).
+2. **`cbc_recap` each room** to catch up on messages that arrived while polls were dead before you act on anything.
+3. **Then continue from `next-action`.**
+
+**If the guard fails** (branch gone, `status: DONE`, or no map found): write `status: DONE` into the file (if one was found), then proceed fresh from "Your first move."
+
 ## Your first move: gather the whole board, then recap — before you decide anything
 
 When you're brought in there are already many moving parts: agents mid-implementation,
@@ -211,10 +229,12 @@ back into a mess mid-session, or your own context grows polluted and you stop tr
 in-head picture, run **`/cbc-recap`** — the mid-flight reset that stops the board, pulls fresh
 status, survives a `/compact`, and rebuilds the picture from the rooms and this map.
 
-- Before first write, ensure `.cbc/` is git-excluded **locally and untracked** — append a
-  `.cbc/` line to `.git/info/exclude` (check it isn't already there; do **not** edit the
-  tracked `.gitignore`, which would be a committed change other agents would see).
-- If the repo dir is read-only, fall back to `/tmp/cbc-orchestration-<repo>-<YYYYMMDD>.md`.
+- Before first write, ensure `.cbc/` is git-excluded **locally and untracked** — append `.cbc/` to the worktree's git-exclude file:
+  ```bash
+  echo '.cbc/' >> $(git rev-parse --git-path info/exclude)
+  ```
+  Check it isn't already there. Do **not** edit the tracked `.gitignore`. Use `git rev-parse --git-path info/exclude` — a literal `.git/info/exclude` path silently fails in git worktrees where `.git` is a file, not a dir.
+- **Create `.cbc/` before your first write** — it does not exist yet in a fresh session: `mkdir -p .cbc/`. A missing dir is NOT a fallback reason — create it. Use `/tmp/cbc-orchestration-<repo>-<YYYYMMDD>.md` ONLY if a write to `.cbc/` actually fails (read-only filesystem).
 
 Keep it scannable — a table of agents × (surface / branch / deps / merge order / room), a
 **Servers** section (see below), and a short "open collisions" section. This is the map, not
@@ -249,17 +269,28 @@ Write this block verbatim as the first section:
 open reconcile rooms directly for cross-agent detail, and ask me for a dev server.
 ```
 
+Write these fields immediately after the charter block every time you create or rewrite the map:
+
+```
+status: ACTIVE | DONE
+next-action: <terse one-liner — what a resumed orchestrator should do first>
+branch: <branch name in this worktree>
+worktree: <absolute path to this worktree>
+```
+
+`status: ACTIVE` for any session with open rooms. `status: DONE` only when all rooms are closed and all poll shells stopped. Update `next-action` after every significant transition so a post-compaction resume can re-enter without asking the user.
+
 #### Session-start hygiene — wipe, compact, or keep
 
 When you launch as a fresh orchestrator, **read the existing map first** (if it exists) and
 **summarize what you see** — open workers, in-flight rooms, running servers, pending collisions,
-merge order. Then **ask the user** which of three to do. Never decide unilaterally; never silently
+merge order, and the `status`/`next-action` fields. Then **ask the user** which of three to do. Never decide unilaterally; never silently
 inherit yesterday's context, which may be stale, polluted, or entirely unrelated to the current work:
 
-- **Wipe** — the prior session is fully done (features merged, rooms closed) or you're starting
+- **Wipe** — the prior session is fully done (features merged, rooms closed, `status: DONE`) or you're starting
   a completely new piece of work. Blank slate; re-emit the role charter.
 - **Compact** — some threads are still live (open rooms, in-flight workers, running servers,
-  pending merge order) but finished work should be dropped. Keep only what is still active;
+  pending merge order, `status: ACTIVE`) but finished work should be dropped. Keep only what is still active;
   drop the rest; re-emit the charter at the top. Like `/compact` for the map.
 - **Keep** — you are resuming mid-session, or the user says the existing map is current.
   Leave the file as-is (the charter is already present; prepend it if the map predates this

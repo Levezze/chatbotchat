@@ -19,11 +19,13 @@ loop from scratch.
 1. **Discover your workers first.** Before you freeze or probe, know who you have:
    run `git worktree list` from root — it enumerates every active worktree with its absolute path.
    For each path, check for `.cbc/worker-*.md` to find the worker's state file. Read any you find
-   **as a discovery aid only** — they tell you who exists, which branch/worktree, and the last
-   phase they recorded, so you know whom to probe in step 2. **A worker file is never treated as
+   **as a discovery aid only** — they tell you who exists, which branch/worktree, the last
+   phase they recorded, and (if present) `next-action`. **A worker file is never treated as
    confirmed current status** (Rule 6): the file may be stale or compacted. The room probe in
    step 2 is the only source of fresh status; an unprobed or unanswered worker stays `unverified`
-   even if its file looks recent.
+   even if its file looks recent. Exception: a file with `status: DONE` means the worker finished
+   and the room closed — it does not need a probe, but verify with `cbc_status <room-id>` before
+   you skip it.
 
 2. **Stop the board.** Send a hold into **every** room you hold: *"Orchestrator
    re-grounding. Pause implementation and hold — don't write more code or decide anything. Send
@@ -48,7 +50,9 @@ loop from scratch.
    rooms your agents opened among themselves you never joined, so they aren't yours to re-ground;
    their outcome reaches you as status on the report lines.) Do **not** trust any pre-compact recollection.
    Verify external claims (merged / deployed / contract is now X) against `git`/`gh` as always.
-   Overwrite the map with current truth (create one if there isn't yet).
+   Overwrite the map with current truth (create one if there isn't yet). Set `status: ACTIVE` and
+   update `next-action` in the map to reflect where you are after the rebuild — this is the resume
+   signal if another compaction follows before you finish re-grounding.
 
    **`cbc_recap` is not fresh status.** It re-reads the *existing* thread — if an agent sent
    nothing since the step-2 hold, recap surfaces the *same stale message*, which is not fresh
