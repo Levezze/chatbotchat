@@ -106,11 +106,16 @@ On every start (fresh invocation or post-`/compact` resume), find your state fil
 ls .cbc/worker-*.md 2>/dev/null || ls /tmp/cbc-worker-*.md 2>/dev/null
 ```
 
-Read any file found. If `status: ACTIVE` and the room is still open (`cbc_status <room-id>` returns anything other than `closed`/`archived`):
+Read any file found. Run the **liveness guard** (matches CLAUDE.md's two-condition check):
+1. Read `worktree:` (if present). Run `git -C <worktree-path> branch --show-current` (or bare `git branch --show-current` if no `worktree:`) — does it match `branch:` in the file?
+2. `cbc_status <room-id>` returns anything other than `closed`/`archived`?
 
-**You are resuming a live session.** Do NOT re-run "Open the line." Do NOT re-present status to the user. Read `next-action` and continue from there. Check `phase ≠ last-synced-to-orchestrator` — if they differ, your first action is to push the missed update to the orchestrator before anything else.
+**If both pass AND `status: ACTIVE`:** you are resuming a live session. Do NOT re-run "Open the line." Do NOT re-present status to the user. In order:
+1. **Relaunch the background poll** using the label from your state file's `poll-label` field — the poll shell died during compaction and must come back before you can receive anything.
+2. **`cbc_recap` your room** to catch up on messages that arrived while the poll was dead — especially any holds or sequencing changes from the orchestrator. Do not act on in-flight state before you've read what you missed.
+3. **Then check `phase ≠ last-synced-to-orchestrator`** — if they differ, push the missed update now. This step is last, not first: pushing before you've read a hold violates the "Implementing through a hold" anti-pattern.
 
-If `status: DONE`, or the room is closed/archived, or no file is found: proceed fresh from "Open the line."
+**If the guard fails** (branch gone, room closed, `status: DONE`, or no file found): write `status: DONE` into the file (if one was found), then proceed fresh from "Open the line."
 
 ## Open the line
 

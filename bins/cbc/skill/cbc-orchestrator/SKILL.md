@@ -65,9 +65,15 @@ On every start (fresh invocation or post-`/compact` resume), find the orchestrat
 ls .cbc/orchestration-*.md 2>/dev/null || ls /tmp/cbc-orchestration-*.md 2>/dev/null
 ```
 
-Read any file found. If `status: ACTIVE`:
+Read any file found. Run the **liveness guard** (matches CLAUDE.md's convention):
+1. Read `worktree:` (if present). Run `git -C <worktree-path> branch --show-current` (or bare `git branch --show-current`) — does it match `branch:` in the file? (The orchestrator manages many rooms, so CLAUDE.md's room-liveness step is not applicable here — branch match is the practical guard.)
 
-**You are resuming a live session.** Read `next-action` and continue from there. Do NOT re-run "Your first move" from scratch — your rooms are already open and polls were running. Instead: relaunch any polls whose shells died during the compaction, then continue from `next-action`. The map is your re-grounding document; `cbc_recap` each room to get current state before you act.
+**If the guard passes AND `status: ACTIVE`:** you are resuming a live session. Do NOT re-run "Your first move" from scratch — your rooms are already open. In order:
+1. **Relaunch all polls unconditionally** — you cannot tell which shells survived the compaction, and `cbc poll` is idempotent (same cursor, brief dual-listener overlap is fine).
+2. **`cbc_recap` each room** to catch up on messages that arrived while polls were dead before you act on anything.
+3. **Then continue from `next-action`.**
+
+**If the guard fails** (branch gone, `status: DONE`, or no map found): write `status: DONE` into the file (if one was found), then proceed fresh from "Your first move."
 
 If `status: DONE`, or no map is found: proceed fresh from "Your first move."
 
@@ -265,11 +271,13 @@ Write this block verbatim as the first section:
 open reconcile rooms directly for cross-agent detail, and ask me for a dev server.
 ```
 
-Write these two fields immediately after the charter block every time you create or rewrite the map:
+Write these fields immediately after the charter block every time you create or rewrite the map:
 
 ```
 status: ACTIVE | DONE
 next-action: <terse one-liner — what a resumed orchestrator should do first>
+branch: <branch name in this worktree>
+worktree: <absolute path to this worktree>
 ```
 
 `status: ACTIVE` for any session with open rooms. `status: DONE` only when all rooms are closed and all poll shells stopped. Update `next-action` after every significant transition so a post-compaction resume can re-enter without asking the user.
