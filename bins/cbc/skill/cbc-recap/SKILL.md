@@ -51,7 +51,7 @@ loop from scratch.
    Overwrite the map with current truth (create one if there isn't yet).
 
    **`cbc_recap` is not fresh status.** It re-reads the *existing* thread — if an agent sent
-   nothing since the step-3 hold, recap surfaces the *same stale message*, which is not fresh
+   nothing since the step-2 hold, recap surfaces the *same stale message*, which is not fresh
    status. An agent that did **not** answer the step-3 probe is **UNVERIFIED** in the rebuilt
    picture; mark it `unverified` / `stale` in the map and surface it to the **user** (who can
    open the worker's chat directly). It is never written down as "idle" or "done" from a stale
