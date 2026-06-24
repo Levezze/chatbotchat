@@ -23,7 +23,10 @@ loop from scratch.
 2. **Ask all of them for fresh status.** Request each agent's *current* state — where it sits in
    its sequence, surfaces it's touching, blockers, and **what changed since the last grounding**.
    Concise status, not a code dump. Fire these into every room, then let the background polls
-   collect the answers.
+   collect the answers. **This step is non-skippable** — you do not get to omit an agent's probe
+   by judging it idle, done, or quiet from memory. That judgment *is* the bug this procedure
+   guards against. Every held agent gets the request; "I'm sure it's idle" is not a reason to
+   skip one.
 3. **Now you can `/compact` — that's the point.** With the stop-and-status request already out,
    the truth lives in the rooms and the map, not your context. While the answers come back, the
    user can compact you (or `/clear` and resume): you'll lose the polluted in-head picture but
@@ -36,6 +39,13 @@ loop from scratch.
    their outcome reaches you as status on the report lines.) Do **not** trust any pre-compact recollection.
    Verify external claims (merged / deployed / contract is now X) against `git`/`gh` as always.
    Overwrite the map with current truth (create one if there isn't yet).
+
+   **`cbc_recap` is not fresh status.** It re-reads the *existing* thread — if an agent sent
+   nothing since the step-2 hold, recap surfaces the *same stale message*, which is not fresh
+   status. An agent that did **not** answer the step-2 probe is **UNVERIFIED** in the rebuilt
+   picture; mark it `unverified` / `stale` in the map and surface it to the **user** (who can
+   open the worker's chat directly). It is never written down as "idle" or "done" from a stale
+   thread.
 5. **Reprint the deterministic recap, then release.** Print the same clean "stop to breathe"
    board recap `/cbc-orchestrator` defines (roster + per-agent sequence + collisions /
    merge-order). Then hand each held agent its single, clear responsibility and release the holds
@@ -58,3 +68,8 @@ session is not a setback but a clean restart.
 - **Skipping the freeze.** Rebuilding while agents keep implementing reproduces the drift.
 - **Releasing agents before the rebuild and reprint.** Ground fully, print the recap, *then* hand
   out single responsibilities.
+- **Skipping a step-2 probe** because you "know" the agent is idle or quiet. That judgment is
+  precisely what this procedure guards against — fire the request into every room.
+- **Treating a silent room's `cbc_recap` as fresh status.** If the agent sent nothing since the
+  hold, recap returns the same stale message. An agent that did not reply to the step-2 probe is
+  UNVERIFIED — surface it to the user, never write it down as "idle" or "done."
