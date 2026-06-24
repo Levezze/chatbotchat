@@ -3,7 +3,7 @@
 //! external devkit checkout.
 //!
 //! CBC ships a small family of skills: `cbc` (drive a room well) plus the orchestration
-//! set `cbc-orchestrator` / `cbc-report` / `cbc-peer` / `cbc-recap` / `cbc-reconcile`
+//! set `cbc-orchestrator` / `cbc-worker` / `cbc-peer` / `cbc-recap` / `cbc-reconcile`
 //! (coordinate many agents across one or more repos), and `cbc-refresh` (replace a
 //! polluted room with a fresh one while preserving the thread). Each skill's text is embedded
 //! ([`BUNDLED_SKILLS`] via
@@ -45,8 +45,8 @@ const BUNDLED_SKILLS: &[BundledSkill] = &[
         body: include_str!("../skill/cbc-orchestrator/SKILL.md"),
     },
     BundledSkill {
-        name: "cbc-report",
-        body: include_str!("../skill/cbc-report/SKILL.md"),
+        name: "cbc-worker",
+        body: include_str!("../skill/cbc-worker/SKILL.md"),
     },
     BundledSkill {
         name: "cbc-peer",

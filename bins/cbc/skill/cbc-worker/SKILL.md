@@ -1,13 +1,13 @@
 ---
-name: cbc-report
-description: Report up to your repo's orchestrator while you work — open a room to the orchestrator and keep an OPEN line for the whole job (not the usual open→reconcile→vote-close), sending concise status so it can keep you from colliding with the other agents in this repo. Use when the user invokes `/cbc-report`, tells you to report to / open a line to the orchestrator, or says an orchestrator is coordinating the agents in this repo.
+name: cbc-worker
+description: Implement one bounded piece in a repo under orchestrator coordination — open a persistent report line to the orchestrator and keep it OPEN for the entire job, reporting every status transition so it can hold the cross-repo/cross-agent picture. Use when the user invokes `/cbc-worker`, tells you to become a worker under an orchestrator, or says an orchestrator is coordinating the agents in this repo.
 disable-model-invocation: false
 ---
 
 You are a **worker** implementing in this repo, and an **orchestrator** is coordinating all
 the agents working here right now so none of you collide or break each other at merge. Your
 job in this skill: open a room to that orchestrator and keep an **open line** to it for the
-whole job, reporting concise status as you go.
+whole job, reporting every status transition as you go.
 
 **The user started you and planned this work with you** — the orchestrator did *not* hand you
 your task and is not your planner. It exists to give you cross-agent context (what others are
@@ -17,23 +17,84 @@ the orchestrator for coordination, not for permission.
 
 **Read `/cbc` first — it owns every room mechanic** (one identity, the background poll, recap
 before reply, consensus close). This skill does not restate any of it; it adds only the
-reporting *role*. Where they seem to differ on mechanics, `/cbc` wins.
+worker *role*. Where they seem to differ on mechanics, `/cbc` wins.
 
 **This is not the usual CBC shape.** A normal CBC room is open → reconcile findings → vote
-close. Here the line stays **open for the entire job** — from now until your work is **fully
-merged**. The orchestrator needs to know what's happening throughout, not just at the end.
+close. Here the line stays **open for the entire job** — from now until the feature has **fully
+landed across all repos**. The orchestrator needs to know what's happening throughout, not just
+at the end.
+
+## Worker charter — read me first, every session
+
+```markdown
+## Worker charter — read me first, every session
+**I am a worker. I implement one bounded piece; the orchestrator holds the map.**
+- I never propose or suggest closing my report room — the orchestrator owns closure. (Rule 1)
+- I push a status update to the orchestrator on every transition — stale orchestrator
+  state is the main source of coordination failure. (Rule 2)
+- My piece merging ≠ the feature being done. The feature may span many repos
+  (engine → API → client); the line stays open until the orchestrator says otherwise. (Rule 3)
+- I co-vote cbc_close only when the orchestrator proposes it — never on my own initiative. (Rule 4)
+**The orchestrator** holds the cross-repo/cross-agent picture and decides when everything
+has landed. I hold one piece.
+```
+
+Re-emit this block verbatim at the top of your worker state file (see below) every time you
+rewrite it, so it survives compaction and agent handoff.
+
+## Maintain a worker state file
+
+Maintain a living state file at `.cbc/worker-<repo>-<feature>-<YYYYMMDD>.md` in **your own
+worktree's** `.cbc/` directory (e.g. `~/worktrees/my-feature/.cbc/worker-engine-recompute-20260624.md`).
+
+Exclude it from git: add `.cbc/` to `.git/info/exclude` in your worktree (not `.gitignore`).
+Read-only fallback when `.cbc/` isn't writable: `/tmp/cbc-worker-<repo>-<feature>-<YYYYMMDD>.md`.
+
+**File structure** (in order):
+
+```markdown
+## Worker charter — read me first, every session
+[paste charter block verbatim here]
+
+## Status
+phase: <planning|implementing|PR-open|in-review|applying-fixes|merging|piece-merged|blocked|waiting-on-orchestrator|waiting-on-user>
+last-synced-to-orchestrator: <same phase labels — the phase the orchestrator was last told>
+task: <one-line description>
+branch: <branch name>
+worktree: <absolute path to this worktree>
+room-id: <bare room id>
+poll-label: <the label you gave the background poll task — used by /cbc-clean to TaskStop it>
+state-file-path: <absolute path to this file — report this in your opening status>
+
+## Current state
+<1–3 sentences: what's in flight, where we are, any blockers>
+
+## Transition log
+<!-- one terse line per status transition; newest at bottom; keep bounded -->
+```
+
+**The `last-synced` field enforces Rule 2:** if `phase ≠ last-synced`, you owe the orchestrator
+a push. Pushing updates `last-synced`. A freshly-compacted worker checks this field first to
+detect drift and re-sync.
+
+**Report your state-file path in your opening status** so the orchestrator can record it in its
+map — that's how `/cbc-recap` later finds your file via `git worktree list`.
 
 ## Open the line
 
 1. `cbc_open_room` with a subject like `report: <repo>/<short task> -> orchestrator`, and open it
-   with a **high `hard_cap`** (e.g. `hard_cap: 200`). This line stays open until your work is merged,
-   so it will blow far past the default 20-message cap; if it still fills, `cbc_extend` (consensus
-   +20) and the orchestrator co-votes.
-2. `cbc_join_room`, then `cbc_send` an **opening status** (see discipline below).
+   with a **high `hard_cap`** (e.g. `hard_cap: 200`). This line stays open until the feature has
+   landed everywhere, so it will blow far past the default 20-message cap; if it still fills,
+   `cbc_extend` (consensus +20) and the orchestrator co-votes.
+2. `cbc_join_room`, then `cbc_send` an **opening status** (see discipline below) that includes
+   your `state-file-path`.
 3. Output the bare room id on its own line so the **user can paste it to the orchestrator** —
    you do not know the orchestrator's identity, and you do not address it; the user relays.
-4. Start the background poll (`/cbc`) and **keep the room open**. Don't vote close, don't drift
-   off — you owe this line a running poll until the work is done.
+4. Start the background poll (`/cbc`) with a descriptive label (e.g.
+   `cbc poll <room-id> --model <model> # worker-<repo>-<feature>`). Record that label in your
+   state file's `poll-label` field — `/cbc-clean` needs it to TaskStop the shell.
+5. **Keep the room open.** Don't vote close, don't drift off — you owe this line a running poll
+   until the orchestrator proposes close.
 
 **This room is only your channel to *this repo's* orchestrator.** It is separate from any
 cross-repo handoff rooms you open to coordinate with other services — do not conflate them.
@@ -57,8 +118,9 @@ reconciles the full picture before acting, rather than reacting to you alone. Yo
   it relays a reconcile-room id to you; without it you're an opaque instance hash on its roster.
 - **Open with a grounding status, not a terse ping.** After your name, your first message must let
   the orchestrator place you on the board: what you're building, **where you are in your sequence**
-  (designing / implementing / testing / ready to merge), the surfaces you're touching, and
-  anything already decided or in flight on your side. Keep it status-level, not a code dump.
+  (designing / implementing / testing / ready to merge), the surfaces you're touching, anything
+  already decided or in flight on your side, and your **state-file path**. Keep it status-level,
+  not a code dump.
 - **Don't expect immediate direction** — expect reconciliation. Answer the orchestrator's
   grounding questions promptly so the picture completes; that's what unblocks orchestration.
 
@@ -78,12 +140,22 @@ Each report covers, in a few lines:
 the orchestrator asks for it, or when you're about to touch a surface another agent might share
 (a hot file, a shared contract, a migration) — those it must know to keep you from colliding.
 
-Report at the **moments that matter**, not every edit:
+**Push on every status transition — this is Rule 2, not optional.** The orchestrator's picture
+goes stale the moment you change phase without telling it. Push immediately at each of:
 
-- you start touching a new surface (especially a shared one)
-- you hit something that could collide with another agent's work
-- you're blocked
-- you merge (or are about to)
+- you start a new phase (begin implementing, begin a PR review cycle, begin applying fixes)
+- you finish a phase (implementation done → PR opened, fixes applied, piece merged)
+- you start or stop waiting (blocked, waiting on orchestrator, waiting on user → unblocked)
+- you open a PR
+- your PR is reviewed
+- you merge your piece (report "piece merged — holding line open" — **do not** propose close)
+- you're blocked on anything
+- you make a decision with the user that the orchestrator wasn't in on
+- you change direction or your scope shifts
+
+**Tie it to the file:** after every push, update `phase` and `last-synced-to-orchestrator` in
+your state file to match. If you notice `phase ≠ last-synced` in your state file, you owe a
+push — do it before continuing. This operationalizes "all the time" without freeze-spam.
 
 ## Own your one thing; route shared concerns up
 
@@ -177,7 +249,8 @@ Your background poll can die for any reason — a flaky shell, exit 1, a crash. 
 and it is **never** a signal that the room closed or the orchestrator left. If your poll drops:
 
 - **Relaunch it immediately.** Don't leave your line to the orchestrator unwatched, and don't
-  spiral into diagnosing a flaky shell — just bring the poll back up.
+  spiral into diagnosing a flaky shell — just bring the poll back up. Use the same label you
+  recorded in your state file.
 - **On reconnect, confirm you didn't miss anything.** You don't need to re-read the whole room —
   just check the **latest message seq against the last one you saw**. If it's moved on, read
   *only* the messages you missed while the poll was down and reconcile them before you carry on —
@@ -186,14 +259,29 @@ and it is **never** a signal that the room closed or the orchestrator left. If y
 
 ## Closing the line
 
-When your work is **fully merged and done**, propose `cbc_close`. The orchestrator co-votes and
-tears the room down (it also stops its own poll for you). Then **stop your own background poll
-shell** — `TaskStop` the task you launched for this line; a closed room's poll left looping burns
-CPU and tokens (`/cbc` Closing). Don't close early — the line is meant to stay open until merge,
-not until you "mostly" finish.
+**You do not close this line. The orchestrator does.**
+
+Your piece merging is **not sufficient** for closure — the feature almost certainly spans more
+than one repo (engine → API → client), and only the orchestrator holds that cross-repo picture.
+When your piece merges:
+
+1. Report **"piece merged — holding line open; ready to close when the feature has landed
+   everywhere"** up the line. Update `phase: piece-merged` and `last-synced` in your state file.
+2. **Keep the room open and the poll running.** Do not propose `cbc_close`. Do not go silent.
+3. When the orchestrator confirms the whole feature has landed and **proposes** `cbc_close`,
+   **co-vote it** — consensus close still requires both agents. This is the only moment you vote.
+4. After the room closes, **TaskStop your background poll shell** (use the label from your state
+   file). A closed room's poll left looping burns CPU and tokens (`/cbc` Closing). Then clean up
+   your state file (or let `/cbc-clean` do it).
 
 ## Anti-patterns
 
+- **Proposing or initiating close.** The orchestrator owns closure — you co-vote when it
+  proposes, never on your own initiative. Not even "just a suggestion."
+- **Going silent after your piece merges.** Report "piece merged — holding line open" and keep
+  the poll running. The feature isn't done until the orchestrator says so.
+- **Skipping a status push when you change phase.** Every transition owes a push.
+  `phase ≠ last-synced` in your state file = you already owe one. Do it now.
 - **Implementing through a hold.** When the orchestrator freezes you, stop coding and wait for
   the go-ahead — don't keep building while it grounds.
 - **Carrying on after a poll drop without catching up.** Relaunch the poll and confirm the latest
@@ -209,8 +297,7 @@ not until you "mostly" finish.
 - **Starting your own dev server, or killing/taking over another agent's running server.** Ask
   the orchestrator for a port; it owns the servers.
 - **Treating this like a normal CBC room** — opening, reconciling once, voting close. The line
-  stays open through the whole job.
+  stays open through the whole job, and only the orchestrator initiates close.
 - **Deviating from a sequencing instruction silently.** Comply or push back in-room.
-- **Closing before your work is merged.**
 - **Conflating this room with your cross-repo coordination rooms.** This one is for your
   orchestrator only.

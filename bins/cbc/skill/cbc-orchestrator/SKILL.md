@@ -24,7 +24,7 @@ only the orchestrator *role* on top. When this skill and `/cbc` seem to differ o
    You do not edit source, you do not commit, you do not open PRs.
 
 2. **You do not open worker rooms.** It is one-to-many: you don't know how many agents are
-   running. Each worker opens a room *to you* (via `/cbc-report`) and the **user pastes you
+   running. Each worker opens a room *to you* (via `/cbc-worker`) and the **user pastes you
    the room id**. You `cbc_join_room` → `cbc_recap` → start a background poll for each. You
    never `cbc_open_room` for a worker. (Opening peer-orchestrator rooms is different — that is
    `/cbc-peer`, which you also load.)
@@ -118,7 +118,7 @@ every agent by a human name shaped `<repo>-<feature>`** — the repo it works in
 doing: `engine-recompute`, `engine-kb-definitions`, `api-fix-contract`, `client-labels`. "recompute
 b9kws7pe5 — holding" is noise; "engine-recompute — holding" is legible at a glance.
 
-- **Derive the name from the worker's opener.** `/cbc-report` has each worker announce its
+- **Derive the name from the worker's opener.** `/cbc-worker` has each worker announce its
   `<repo>-<feature>` name and set it as its room nickname; its report subject (`report:
   <repo>/<task>`) also carries it. Use that — don't invent one. If a worker hasn't given a clear
   name, ask for it rather than falling back to the hash.
@@ -178,7 +178,7 @@ default 20-message hard cap. Don't let a coordination line hit the wall mid-flig
 - **Peer rooms you open** (`/cbc-peer`): open them with a high `hard_cap` — e.g. `hard_cap: 200`
   (`cbc_open_room` / `cbc open --hard-cap` takes the cap up front) — so a long cross-repo
   coordination doesn't 409 partway through.
-- **Report rooms are opened by your workers**, so *they* set the cap — `/cbc-report` tells them to
+- **Report rooms are opened by your workers**, so *they* set the cap — `/cbc-worker` tells them to
   open the line big for the same reason. If one still fills, `cbc_extend` is a consensus vote
   (+20); co-vote it so the line keeps flowing.
 - There is no "unlimited" — a high `hard_cap` at open plus `cbc_extend` as a safety net is the
@@ -200,7 +200,7 @@ Your context is the **shape** of each agent's work, not its detail. Per agent, t
 
 Pull implementation detail only when a reconciliation actually needs it — then ask for just
 that. Do not let workers dump plans, diffs, or full designs on you; if one starts to, redirect
-to a one-line status (`/cbc-report` already tells them to keep it terse).
+to a one-line status (`/cbc-worker` already tells them to keep it terse).
 
 ### The orchestration map is your one artifact
 
@@ -459,10 +459,16 @@ activity state*. Both guard against acting on a partial, stale view.
 ## Teardown — stop the shell, not just the vote
 
 CBC has no "destroy room" command, and `cbc close --force` is a human-only escape hatch you
-must not use. So when a worker's job is **fully merged and done**:
+must not use.
 
-1. Co-vote `cbc_close` (consensus) — the finished worker proposes close; you confirm. The room
-   closes only once you both vote (`/cbc` covers this).
+**You own closure.** A worker finishing its piece is **necessary but not sufficient** — the
+feature almost certainly spans more than one repo (engine → API → client), and you are the only
+agent holding that cross-repo picture. The report line stays open until **every downstream repo
+the feature touches has landed.** When you are satisfied the whole feature is done:
+
+1. **Propose `cbc_close`** — you initiate it; the worker co-votes. The room closes only once
+   both vote (`/cbc` covers this). The worker never initiates close on their own; if they report
+   "piece merged — holding line open," that is correct behavior — they are waiting for you.
 2. A closed room is terminal, so its poll exits on its own — but **also stop that room's
    background-poll shell yourself** (TaskStop / kill the labeled background task you started for
    it, and end any `/loop` driving it). You hold one poll per room; left alone, finished-room
