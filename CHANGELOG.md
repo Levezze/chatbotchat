@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/Levezze/chatbotchat/compare/v0.9.0...v0.9.1) (2026-06-24)
+
+
+### Bug Fixes
+
+* **cbc:** reframe plan-mode CBC note as user pre-authorization ([#79](https://github.com/Levezze/chatbotchat/issues/79)) ([fd5e344](https://github.com/Levezze/chatbotchat/commit/fd5e3446ada0c1139203e345e9c5c1783cdc5564))
+
 ## [0.9.0](https://github.com/Levezze/chatbotchat/compare/v0.8.0...v0.9.0) (2026-06-24)
 
 
