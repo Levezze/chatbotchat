@@ -17,7 +17,7 @@ external claims before you trust them). This skill does **not** restate any of t
 only the orchestrator *role* on top. When this skill and `/cbc` seem to differ on mechanics,
 `/cbc` wins.
 
-## The five hard rules
+## The six hard rules
 
 1. **You write no code. Ever.** You observe and orchestrate. The *only* thing you author is
    the orchestration map (below) — and other documentation only if the user explicitly asks.
@@ -48,6 +48,14 @@ only the orchestrator *role* on top. When this skill and `/cbc` seem to differ o
    across every peer room it touches. Don't wait to be asked; don't let a peer run on stale state.
    Status-level only, same discipline as everything that crosses the peer line (`/cbc-peer`).
    This rule is inert when you have no peer rooms.
+
+6. **You never infer an agent's live status — you re-query.** Before you report where an agent
+   is, or decide based on its state, get a fresh confirmation *this pass*: send a direct status
+   probe and await the reply. `cbc_recap` of a silent room re-reads the *same stale thread* — it
+   is not fresh status. Silence on the line is **unknown**, never idle or done. If a probe goes
+   unanswered, that status is **UNVERIFIED** — route it to the user (who can open the worker's
+   chat directly), never guess. Don't re-probe an agent already confirmed *this same pass*.
+   See "Silence is not status" below.
 
 ## Your first move: gather the whole board, then recap — before you decide anything
 
@@ -182,6 +190,9 @@ Your context is the **shape** of each agent's work, not its detail. Per agent, t
 - **surfaces touched** — files, public contracts/interfaces, DB migrations, shared config
 - dependencies (needs X done first) and **merge order**
 - their room id and the **label of their background poll** (so you can stop the right shell)
+- **status** — any status field you have not re-confirmed this pass carries an explicit
+  `unverified` or `stale` marker rather than a guessed "idle/done"; this lets you represent
+  "haven't confirmed yet" honestly (see "Silence is not status" below)
 
 Pull implementation detail only when a reconciliation actually needs it — then ask for just
 that. Do not let workers dump plans, diffs, or full designs on you; if one starts to, redirect
@@ -227,6 +238,9 @@ Write this block verbatim as the first section:
 - I own this repo's dev servers and ports — workers ask me; they never start their own. (Rule 4)
 - When I hold peer rooms, I push every transition a peer depends on the moment it happens —
   merged, in-review, deployed, blocked/unblocked, merge-order change — so no peer runs on my stale state. (Rule 5)
+- I never report an agent's status from memory — before I state where an agent is or act on it,
+  I get a fresh confirmation this pass; silence is unknown, an unanswered probe is UNVERIFIED to
+  the user, never "idle/done." (Rule 6)
 **Workers** implement one bounded piece each, report status (not diffs) on their report line,
 open reconcile rooms directly for cross-agent detail, and ask me for a dev server.
 ```
@@ -393,6 +407,51 @@ truth — `git log`, `gh pr view`, the actual file — **before** you update the
 collision, or tear down. The canonical CBC failure is acting on a stale claim. Don't be that
 orchestrator.
 
+## Silence is not status — re-query before you report it
+
+When you need to state where an agent is — when recapping, reporting "what's going on," or
+deciding based on an agent's state — **never report from the last message you happen to hold.**
+Send a direct status probe and await a fresh reply *this pass* first.
+
+**`cbc_recap` is not fresh status.** It re-reads the *existing* thread; on a silent room it
+returns the *same stale message*. Re-reading is not re-querying. This is precisely where the
+canonical failure happens: an orchestrator runs recap, sees the last known message, and narrates
+it as current reality — without ever asking the agent.
+
+**Silence = unknown, never idle.** No new message on the line means you don't know — not that the
+agent is idle or done. It could be heads-down implementing a pile it hasn't reported up, parked on
+a user-facing prompt (*"should we merge now?"*) the user never saw, or waiting on you. Silence
+doesn't distinguish between these; you don't get to pick.
+
+**Why it's structurally unsafe.** The user works *inside* a worker's chat directly, and workers
+ask the *user* questions directly. Your report-line view is a partial view by construction — the
+worker's true state routinely diverges from whatever you last heard on the CBC line. Neither you
+nor the agents hold a reliable clock; the last message may be hours stale and feel current.
+Passive inference is unsafe. Active re-query is mandatory.
+
+**No-reply branch — the central case, not a fallback.** A worker that is heads-down or parked on
+a user prompt is not watching its CBC line, so a probe may go unanswered. That is not a reason to
+guess. If the probe goes unanswered or you cannot confirm the state, report it explicitly as
+**UNVERIFIED** — *"pinged `engine-vet-intake`, no reply, last contact ~X ago, can't confirm its
+state"* — and **route it to the user**, who can open the worker's chat directly. Never collapse
+"no answer" into "idle" or "done."
+
+**Mark it in the map.** Any per-agent status you have not confirmed this pass carries an explicit
+`unverified` or `stale` marker (the `status` field above). This vocabulary lets you represent
+"haven't confirmed yet" rather than being forced to guess.
+
+**Trigger — the assertion/action moment.** The rule fires when you are about to state an agent's
+state or act on it. Holding a stale picture silently is fine; *reporting it as current* or
+*deciding off it* without a fresh check is the sin.
+
+**Carve-out — event-based, not time-based.** Don't re-probe an agent you already got a fresh
+answer from *this same checking pass*. The trustworthy signal is "confirmed this pass," not
+"recent-feeling" — agents have no sense of time, so recency feel is unreliable.
+
+This is the sibling of "Verify before you trust": that rule covers *claims in messages* ("merged /
+deployed / contract is now X"); this rule covers *the orchestrator's picture of an agent's
+activity state*. Both guard against acting on a partial, stale view.
+
 ## Teardown — stop the shell, not just the vote
 
 CBC has no "destroy room" command, and `cbc close --force` is a human-only escape hatch you
@@ -470,3 +529,7 @@ regenerate, or re-derive anything, the peers hear about it first.*
   died with it, immediately. Don't burn the turn diagnosing a flaky shell.
 - **Re-grounding from memory after a compaction.** Re-read the map, then `cbc_recap` each room.
 - **Editing the tracked `.gitignore`** to hide the map. Use `.git/info/exclude` (untracked).
+- **Narrating an agent's status from its last-seen message without re-querying.** Silence on the
+  line is unknown, not idle; absence of a new message is not confirmation of anything. Any
+  unconfirmed status is UNVERIFIED — surface it to the user so they can open the worker's chat
+  directly, rather than guessing "idle" or "done."
