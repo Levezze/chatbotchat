@@ -47,7 +47,14 @@ rewrite it, so it survives compaction and agent handoff.
 Maintain a living state file at `.cbc/worker-<repo>-<feature>-<YYYYMMDD>.md` in **your own
 worktree's** `.cbc/` directory (e.g. `~/worktrees/my-feature/.cbc/worker-engine-recompute-20260624.md`).
 
-Exclude it from git: add `.cbc/` to `.git/info/exclude` in your worktree (not `.gitignore`).
+Exclude it from git — append `.cbc/` to the worktree's git-exclude file (not `.gitignore`, which is tracked):
+
+```bash
+echo '.cbc/' >> $(git rev-parse --git-path info/exclude)
+```
+
+`git rev-parse --git-path info/exclude` resolves correctly in both normal repos (`.git/info/exclude`) and git worktrees (`.git` is a file there, not a dir — a literal `.git/info/exclude` path silently fails). Check the file isn't already excluded before appending.
+
 Read-only fallback when `.cbc/` isn't writable: `/tmp/cbc-worker-<repo>-<feature>-<YYYYMMDD>.md`.
 
 **File structure** (in order):
@@ -57,6 +64,8 @@ Read-only fallback when `.cbc/` isn't writable: `/tmp/cbc-worker-<repo>-<feature
 [paste charter block verbatim here]
 
 ## Status
+status: ACTIVE | DONE
+next-action: <terse one-liner — what a resumed agent should do first>
 phase: <planning|implementing|PR-open|in-review|applying-fixes|merging|piece-merged|blocked|waiting-on-orchestrator|waiting-on-user>
 last-synced-to-orchestrator: <same phase labels — the phase the orchestrator was last told>
 task: <one-line description>
@@ -77,8 +86,24 @@ state-file-path: <absolute path to this file — report this in your opening sta
 a push. Pushing updates `last-synced`. A freshly-compacted worker checks this field first to
 detect drift and re-sync.
 
+**`status: ACTIVE|DONE` + `next-action` are the resume fields.** Set `status: ACTIVE` when you open the file; set `status: DONE` only when the room closes and the poll is stopped. Update `next-action` after every transition — it is what a fresh agent reads to re-enter without re-running setup. See "Resuming?" below.
+
 **Report your state-file path in your opening status** so the orchestrator can record it in its
 map — that's how `/cbc-recap` later finds your file via `git worktree list`.
+
+## Resuming? — check before doing anything
+
+On every start (fresh invocation or post-`/compact` resume), find your state file:
+
+```bash
+ls .cbc/worker-*.md 2>/dev/null || ls /tmp/cbc-worker-*.md 2>/dev/null
+```
+
+Read any file found. If `status: ACTIVE` and the room is still open (`cbc_status <room-id>` returns anything other than `closed`/`archived`):
+
+**You are resuming a live session.** Do NOT re-run "Open the line." Do NOT re-present status to the user. Read `next-action` and continue from there. Check `phase ≠ last-synced-to-orchestrator` — if they differ, your first action is to push the missed update to the orchestrator before anything else.
+
+If `status: DONE`, or the room is closed/archived, or no file is found: proceed fresh from "Open the line."
 
 ## Open the line
 

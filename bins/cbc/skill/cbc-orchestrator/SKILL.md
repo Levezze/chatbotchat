@@ -57,6 +57,20 @@ only the orchestrator *role* on top. When this skill and `/cbc` seem to differ o
    chat directly), never guess. Don't re-probe an agent already confirmed *this same pass*.
    See "Silence is not status" below.
 
+## Resuming? — check before doing anything
+
+On every start (fresh invocation or post-`/compact` resume), find the orchestration map:
+
+```bash
+ls .cbc/orchestration-*.md 2>/dev/null || ls /tmp/cbc-orchestration-*.md 2>/dev/null
+```
+
+Read any file found. If `status: ACTIVE`:
+
+**You are resuming a live session.** Read `next-action` and continue from there. Do NOT re-run "Your first move" from scratch — your rooms are already open and polls were running. Instead: relaunch any polls whose shells died during the compaction, then continue from `next-action`. The map is your re-grounding document; `cbc_recap` each room to get current state before you act.
+
+If `status: DONE`, or no map is found: proceed fresh from "Your first move."
+
 ## Your first move: gather the whole board, then recap — before you decide anything
 
 When you're brought in there are already many moving parts: agents mid-implementation,
@@ -211,9 +225,11 @@ back into a mess mid-session, or your own context grows polluted and you stop tr
 in-head picture, run **`/cbc-recap`** — the mid-flight reset that stops the board, pulls fresh
 status, survives a `/compact`, and rebuilds the picture from the rooms and this map.
 
-- Before first write, ensure `.cbc/` is git-excluded **locally and untracked** — append a
-  `.cbc/` line to `.git/info/exclude` (check it isn't already there; do **not** edit the
-  tracked `.gitignore`, which would be a committed change other agents would see).
+- Before first write, ensure `.cbc/` is git-excluded **locally and untracked** — append `.cbc/` to the worktree's git-exclude file:
+  ```bash
+  echo '.cbc/' >> $(git rev-parse --git-path info/exclude)
+  ```
+  Check it isn't already there. Do **not** edit the tracked `.gitignore`. Use `git rev-parse --git-path info/exclude` — a literal `.git/info/exclude` path silently fails in git worktrees where `.git` is a file, not a dir.
 - If the repo dir is read-only, fall back to `/tmp/cbc-orchestration-<repo>-<YYYYMMDD>.md`.
 
 Keep it scannable — a table of agents × (surface / branch / deps / merge order / room), a
@@ -249,17 +265,26 @@ Write this block verbatim as the first section:
 open reconcile rooms directly for cross-agent detail, and ask me for a dev server.
 ```
 
+Write these two fields immediately after the charter block every time you create or rewrite the map:
+
+```
+status: ACTIVE | DONE
+next-action: <terse one-liner — what a resumed orchestrator should do first>
+```
+
+`status: ACTIVE` for any session with open rooms. `status: DONE` only when all rooms are closed and all poll shells stopped. Update `next-action` after every significant transition so a post-compaction resume can re-enter without asking the user.
+
 #### Session-start hygiene — wipe, compact, or keep
 
 When you launch as a fresh orchestrator, **read the existing map first** (if it exists) and
 **summarize what you see** — open workers, in-flight rooms, running servers, pending collisions,
-merge order. Then **ask the user** which of three to do. Never decide unilaterally; never silently
+merge order, and the `status`/`next-action` fields. Then **ask the user** which of three to do. Never decide unilaterally; never silently
 inherit yesterday's context, which may be stale, polluted, or entirely unrelated to the current work:
 
-- **Wipe** — the prior session is fully done (features merged, rooms closed) or you're starting
+- **Wipe** — the prior session is fully done (features merged, rooms closed, `status: DONE`) or you're starting
   a completely new piece of work. Blank slate; re-emit the role charter.
 - **Compact** — some threads are still live (open rooms, in-flight workers, running servers,
-  pending merge order) but finished work should be dropped. Keep only what is still active;
+  pending merge order, `status: ACTIVE`) but finished work should be dropped. Keep only what is still active;
   drop the rest; re-emit the charter at the top. Like `/compact` for the map.
 - **Keep** — you are resuming mid-session, or the user says the existing map is current.
   Leave the file as-is (the charter is already present; prepend it if the map predates this
