@@ -191,10 +191,7 @@ pub fn ensure_session_start_hook(settings: &mut Value) -> anyhow::Result<bool> {
     for wrapper in session_start_arr.iter() {
         if let Some(inner) = wrapper.get("hooks").and_then(|h| h.as_array()) {
             for entry in inner {
-                if entry
-                    .get("command")
-                    .and_then(|c| c.as_str())
-                    == Some(CBC_SESSION_START_COMMAND)
+                if entry.get("command").and_then(|c| c.as_str()) == Some(CBC_SESSION_START_COMMAND)
                 {
                     return Ok(false);
                 }
@@ -444,7 +441,10 @@ mod tests {
         assert!(changed, "empty settings must be modified");
         let arr = v["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["hooks"][0]["command"], json!(CBC_SESSION_START_COMMAND));
+        assert_eq!(
+            arr[0]["hooks"][0]["command"],
+            json!(CBC_SESSION_START_COMMAND)
+        );
         assert_eq!(arr[0]["hooks"][0]["type"], json!("command"));
     }
 
@@ -484,9 +484,15 @@ mod tests {
         let arr = v["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(arr.len(), 2, "must append, not replace");
         // caveman entry still present
-        assert_eq!(arr[0]["hooks"][0]["command"], json!("node caveman-activate.js"));
+        assert_eq!(
+            arr[0]["hooks"][0]["command"],
+            json!("node caveman-activate.js")
+        );
         // cbc entry appended
-        assert_eq!(arr[1]["hooks"][0]["command"], json!(CBC_SESSION_START_COMMAND));
+        assert_eq!(
+            arr[1]["hooks"][0]["command"],
+            json!(CBC_SESSION_START_COMMAND)
+        );
     }
 
     #[test]
@@ -501,7 +507,11 @@ mod tests {
             json!("mcp__chatbotchat"),
             "allow rule must survive"
         );
-        assert_eq!(v["hooks"]["PreToolUse"], json!([]), "other hooks must survive");
+        assert_eq!(
+            v["hooks"]["PreToolUse"],
+            json!([]),
+            "other hooks must survive"
+        );
         // cbc hook added
         assert_eq!(
             v["hooks"]["SessionStart"][0]["hooks"][0]["command"],
@@ -547,8 +557,11 @@ mod tests {
     fn apply_hook_appends_and_backs_up() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
-        std::fs::write(&path, "{\n  \"permissions\": { \"allow\": [\"mcp__chatbotchat\"] }\n}\n")
-            .unwrap();
+        std::fs::write(
+            &path,
+            "{\n  \"permissions\": { \"allow\": [\"mcp__chatbotchat\"] }\n}\n",
+        )
+        .unwrap();
 
         let outcome = apply_hook_rule(&path).unwrap();
         assert_eq!(outcome, Outcome::Added);
@@ -561,7 +574,10 @@ mod tests {
             json!(CBC_SESSION_START_COMMAND)
         );
         // allow rule preserved
-        assert_eq!(written["permissions"]["allow"][0], json!("mcp__chatbotchat"));
+        assert_eq!(
+            written["permissions"]["allow"][0],
+            json!("mcp__chatbotchat")
+        );
 
         let backup = PathBuf::from(format!("{}.bak", path.display()));
         assert!(backup.is_file(), "backup must exist");

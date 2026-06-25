@@ -419,8 +419,20 @@ agents:
         let o = parse_orchestrator(content).expect("should parse active orchestrator");
         assert_eq!(o.model, "claude-opus-4-8");
         assert_eq!(o.rooms.len(), 2);
-        assert_eq!(o.rooms[0], ("repo-worker-feat".to_string(), "feat-room-20260625-1100".to_string()));
-        assert_eq!(o.rooms[1], ("repo-worker-fix".to_string(), "fix-room-20260625-1105".to_string()));
+        assert_eq!(
+            o.rooms[0],
+            (
+                "repo-worker-feat".to_string(),
+                "feat-room-20260625-1100".to_string()
+            )
+        );
+        assert_eq!(
+            o.rooms[1],
+            (
+                "repo-worker-fix".to_string(),
+                "fix-room-20260625-1105".to_string()
+            )
+        );
     }
 
     #[test]
@@ -552,8 +564,14 @@ agents:
         let entry = ActiveEntry::Orchestrator(OrchestratorEntry {
             model: "claude-opus-4-8".to_string(),
             rooms: vec![
-                ("repo-worker-feat".to_string(), "room-a-20260625-1100".to_string()),
-                ("repo-worker-fix".to_string(), "room-b-20260625-1105".to_string()),
+                (
+                    "repo-worker-feat".to_string(),
+                    "room-a-20260625-1100".to_string(),
+                ),
+                (
+                    "repo-worker-fix".to_string(),
+                    "room-b-20260625-1105".to_string(),
+                ),
             ],
         });
         let mut out = Vec::new();
@@ -594,11 +612,9 @@ agents:
 
         let mut out = Vec::new();
         let mut killed = Vec::new();
-        run_session_start(
-            &mut input.as_bytes(),
-            &mut out,
-            &mut |id| killed.push(id.to_string()),
-        )
+        run_session_start(&mut input.as_bytes(), &mut out, &mut |id| {
+            killed.push(id.to_string())
+        })
         .unwrap();
 
         assert!(out.is_empty(), "startup source must produce no output");
@@ -625,11 +641,9 @@ agents:
 
         let mut out = Vec::new();
         let mut killed = Vec::new();
-        run_session_start(
-            &mut input.as_bytes(),
-            &mut out,
-            &mut |id| killed.push(id.to_string()),
-        )
+        run_session_start(&mut input.as_bytes(), &mut out, &mut |id| {
+            killed.push(id.to_string())
+        })
         .unwrap();
 
         let text = String::from_utf8(out).unwrap();
@@ -751,8 +765,14 @@ agents:
         .unwrap();
 
         let text = String::from_utf8(out).unwrap();
-        assert!(text.contains("room-a-20260625-1000"), "must emit first room");
-        assert!(text.contains("room-b-20260625-1005"), "must emit second room");
+        assert!(
+            text.contains("room-a-20260625-1000"),
+            "must emit first room"
+        );
+        assert!(
+            text.contains("room-b-20260625-1005"),
+            "must emit second room"
+        );
         assert_eq!(killed.len(), 2);
     }
 
@@ -802,11 +822,9 @@ agents:
     fn run_malformed_json_is_no_op() {
         let mut out = Vec::new();
         let mut killed: Vec<String> = Vec::new();
-        run_session_start(
-            &mut "{ not valid json".as_bytes(),
-            &mut out,
-            &mut |id| killed.push(id.to_string()),
-        )
+        run_session_start(&mut "{ not valid json".as_bytes(), &mut out, &mut |id| {
+            killed.push(id.to_string())
+        })
         .unwrap();
         assert!(out.is_empty(), "malformed JSON must be a silent no-op");
         assert!(killed.is_empty());
