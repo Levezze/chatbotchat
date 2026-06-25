@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/Levezze/chatbotchat/compare/v0.10.0...v0.11.0) (2026-06-25)
+
+
+### Features
+
+* **cbc:** checkup heartbeat — stale detection, /cbc-checkup, /cbc-clean, worker discipline ([#83](https://github.com/Levezze/chatbotchat/issues/83)) ([d033f85](https://github.com/Levezze/chatbotchat/commit/d033f85a6b01b0e7347e8466de43c906c5dcbc4f))
+
 ## [0.10.0](https://github.com/Levezze/chatbotchat/compare/v0.9.1...v0.10.0) (2026-06-25)
 
 
