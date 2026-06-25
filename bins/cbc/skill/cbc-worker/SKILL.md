@@ -29,6 +29,7 @@ at the end.
 ```markdown
 ## Worker charter — read me first, every session
 **I am a worker. I implement one bounded piece; the orchestrator holds the map.**
+- **Never yield with a dead poll.** Before composing any reply: verify `cbc poll <room-id> --model <m>` is running; if not, relaunch it as a background task first. (Poll-first rule)
 - I never propose or suggest closing my report room — the orchestrator owns closure. (Rule 1)
 - I push a status update to the orchestrator on every transition — stale orchestrator
   state is the main source of coordination failure. `phase ≠ last-synced-to-orchestrator`
@@ -98,6 +99,46 @@ detect drift and re-sync.
 
 **Report your state-file path in your opening status** so the orchestrator can record it in its
 map — that's how `/cbc-recap` later finds your file via `git worktree list`.
+
+## Talking to the user — terse by default
+
+Your default format for every routine, proactive, or status message to the user is a **single
+status line**, rendered in a fenced code block (monospace aligns columns; dodges markdown
+`\`/`|` escaping):
+
+```
+me: <name>  | subj: <one phrase>  | action: <none | what user must do/approve>  | <short status>
+```
+
+- **`me:`** — always `me:` on your side; you are reporting about yourself.
+- **`action:`** — `none` for almost every update. Use a non-none value only when the user
+  genuinely needs to act or approve something right now.
+- **`<short status>`** — one clause, not a paragraph.
+
+**What it replaces:** a recap narrative, a multi-line status table, a prose summary, a
+"here's what I've done so far" paragraph. One line covers it.
+
+**Full prose is for conversations only.** When the user asks you a question and you answer it —
+that is a conversation, and prose is fine. Routine updates, recaps, and proactive status
+notifications are not conversations; they get the status line.
+
+**This is separate from `## Report discipline`**, which governs your CBC channel to the
+orchestrator. That channel is already terse — leave it untouched. This section governs only
+your direct chat output to the user.
+
+### Before / after
+
+Before — wrong (the real transcript that prompted this rule):
+> Worker output: 11-row ASCII status table, 3 paragraphs narrating the table, room id, recap,
+> another summary. ~80 lines total to communicate "10/11 buckets done, #5 parked."
+
+After — correct:
+
+```
+me: engine-vet-intake  | subj: exam-field merge  | action: none  | 10/11 buckets done; #5 parked (strings check)
+```
+
+One line. That's it.
 
 ## Resuming? — check before doing anything
 
@@ -357,6 +398,53 @@ nothing is checking" — that is the wrong model. Your poll *is* your check-in s
 only time you need to reply is when the orchestrator sends you an explicit status
 *message* — re-ground with `cbc_recap` and answer with your current state.
 
+## Worker pulse — idle-gap safety net
+
+When the board goes quiet (no CBC messages arriving, no user turns), your poll keeps the server
+alive — but nothing ensures the poll *itself* is still running until an event fires. Arm a
+self-check timer after your poll is first launched:
+
+```bash
+sleep 300; echo POLL_PULSE
+```
+
+Run with `run_in_background`. When you see `POLL_PULSE` in task output: check whether `cbc poll`
+is still alive (e.g. `pgrep -f "cbc poll <room-id>"`), relaunch it if dead, then re-arm the timer
+at the current backoff interval.
+
+### Backoff (same discipline as the orchestrator checkup)
+
+Write these two fields into your state file so they survive compaction:
+
+```
+pulse-level: 0          # 0=5m | 1=10m | 2=20m | dormant
+pulse-no-change: 0      # consecutive no-change ticks at the current level
+```
+
+| Level | Interval | No-change ticks to escalate |
+|-------|----------|-----------------------------|
+| 0     | 5 min    | 3                           |
+| 1     | 10 min   | 1                           |
+| 2     | 20 min   | 1                           |
+| dormant | — (no shell) | — |
+
+**No-change** = the poll was already alive when the tick fired; nothing needed to be relaunched.
+On no-change: increment streak; escalate level or go dormant when threshold is reached.
+On relaunch (poll was dead): reset streak to 0 and level to 0.
+
+**Going dormant:** do not relaunch the sleep shell. If a real event fires later (poll wakes you,
+user sends a message), restart from level 0.
+
+### What this covers and what it doesn't
+
+This timer closes the **idle-gap** — the poll dying while you sit quiet with no events or turns.
+It does **not** fix the "awake but deaf" case (you taking turns with a dead poll) — that is
+covered by the poll-first rule in the charter, which fires every turn regardless.
+
+**This timer dies on compact.** After a compact, the `SessionStart` hook handles the relaunch
+directive; you do not need to re-arm this timer on resume (the hook wakes you). If you were in
+an extended idle period (dormant) before the compact, re-arm at level 0 when you return.
+
 ## Anti-patterns
 
 - **Proposing or initiating close.** The orchestrator owns closure — you co-vote when it
@@ -378,6 +466,12 @@ only time you need to reply is when the orchestrator sends you an explicit statu
   your terminal.
 - **Dumping plans / diffs / full implementation detail** unprompted. Status only; detail on
   request or for a shared-surface heads-up.
+- **Writing a prose narrative or multi-line status table** for a routine user-facing update.
+  A single `me:` status line says it. The 11-row ASCII table is the canonical example of what
+  not to do. Prose is for answering the user's questions — not for proactive status, not for
+  recaps, not for "just thought I'd mention."
+- **Yielding to the user with a dead poll.** Check that `cbc poll` is running before you
+  compose your reply — not after. This is the poll-first rule and it fires every single turn.
 - **Asking another agent code questions *through* the orchestrator line.** Open a reconcile room
   (`/cbc-reconcile`); the orchestrator relays the id, it does not carry your implementation detail.
 - **Going silent while touching a shared surface.** That's the one moment you *must* speak up.
