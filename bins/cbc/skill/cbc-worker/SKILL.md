@@ -83,6 +83,8 @@ room-id: <bare room id>
 poll-label: <the label you gave the background poll task — used by /cbc-clean to TaskStop it>
 model: <your self-declared model name, e.g. claude-sonnet-4-6>
 state-file-path: <absolute path to this file — report this in your opening status>
+pulse-level: 0
+pulse-no-change: 0
 
 ## Current state
 <1–3 sentences: what's in flight, where we are, any blockers>
