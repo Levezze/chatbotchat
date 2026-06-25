@@ -1523,7 +1523,7 @@ async fn status_includes_per_participant_poll_freshness() {
         .as_i64()
         .expect("seconds_since_poll must be an integer for fresh participant");
     assert!(
-        fresh_secs >= 0 && fresh_secs < 60,
+        (0..60).contains(&fresh_secs),
         "fresh participant should have seconds_since_poll in [0, 60), got {fresh_secs}"
     );
     assert_eq!(
