@@ -128,7 +128,7 @@ Read any file found. Run the **liveness guard** (matches CLAUDE.md's two-conditi
    your `state-file-path`.
 3. **Set your terminal title** so the user can see your name in their tab list without manual renaming.
    Write your `<repo>-worker-<feature>` name to a tty-keyed file — the shell's `precmd` hook reads it
-   every prompt and applies it via OSC escape. See `docs/TERMINAL_TITLES.md` for setup.
+   every prompt and applies it via OSC escape. See `docs/TERMINAL_TITLES.md` in the chatbotchat repo for setup.
    ```bash
    mkdir -p /tmp/cbc-termtitle
    t=$(ps -o tty= -p $PPID | tr -d ' ')

@@ -85,7 +85,7 @@ full picture before you do anything else:
 
 0. **Set your terminal title** so the user can identify your tab. Write `<repo>-orchestrator`
    (e.g. `engine-orchestrator`) to the tty-keyed name-file — the shell's `precmd` hook applies it.
-   See `docs/TERMINAL_TITLES.md` for setup.
+   See `docs/TERMINAL_TITLES.md` in the chatbotchat repo for setup.
    ```bash
    mkdir -p /tmp/cbc-termtitle
    t=$(ps -o tty= -p $PPID | tr -d ' ')
