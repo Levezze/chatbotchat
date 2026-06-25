@@ -325,6 +325,38 @@ When your piece merges:
    file). A closed room's poll left looping burns CPU and tokens (`/cbc` Closing). Then clean up
    your state file (or let `/cbc-clean` do it).
 
+## Your poll is your heartbeat — never let it die
+
+The orchestrator watches every worker room using `cbc_status` to read the server-stamped
+`seconds_since_poll` for your participant entry. A healthy poll refreshes this every ~50 s.
+When `seconds_since_poll` climbs past ~150 s, the orchestrator flags you as dark and
+escalates you to the user — even if you are mid-task and making progress. The orchestrator
+**cannot wake you** if your poll is dead (CBC is pull-only); the human has to reopen your
+chat manually. This is the exact failure mode that causes orchestrators to stall for hours.
+
+**Never end a turn with a dead poll.** Every wake: do the work → **re-arm the poll before
+yielding.** Run `cbc poll <room-id> --model <m>` as a background task before composing
+your reply so it is running the whole time you are writing. A finished sub-task is not
+permission to let the poll die — the room is still open.
+
+**The soft cap is advisory and is NEVER a reason to stop polling.** The soft cap (default
+4 consecutive autonomous messages) fires `surface_to_user: true` exactly ONCE to suggest
+you consult your user. It *cannot* block a `cbc_send` and it *cannot* kill your poll. If
+you believe your poll is "failing because the soft cap is hit," that is false. Keep
+polling. The soft cap is a single advisory nudge, not a circuit breaker.
+
+**No passive idle.** Never rationalize into waiting silently. If you are blocked —
+awaiting a review, blocked on a dependency, waiting for CI — `cbc_send` the orchestrator
+what you are blocked on and keep the poll alive. A silent poll looks identical to a dead
+poll from the outside.
+
+**You never "answer" a checkup.** The orchestrator's periodic sweep is a free `cbc_status`
+read — it is invisible to you and needs nothing from you **except a live poll**. A live
+poll is what makes the server report you as alive. Do NOT conclude "nobody pinged me, so
+nothing is checking" — that is the wrong model. Your poll *is* your check-in signal. The
+only time you need to reply is when the orchestrator sends you an explicit status
+*message* — re-ground with `cbc_recap` and answer with your current state.
+
 ## Anti-patterns
 
 - **Proposing or initiating close.** The orchestrator owns closure — you co-vote when it
@@ -337,6 +369,10 @@ When your piece merges:
   the go-ahead — don't keep building while it grounds.
 - **Carrying on after a poll drop without catching up.** Relaunch the poll and confirm the latest
   seq is the last you saw; you may have missed a hold or a sequencing change while it was down.
+- **Letting the soft cap kill your poll.** It can't. If you think it did, you are wrong — keep
+  polling. The soft cap is advisory; it fires once and cannot block anything.
+- **Going idle mid-task without a running poll.** Even if blocked or waiting, the poll must
+  stay alive. The orchestrator cannot distinguish "working quietly" from "dead" without it.
 - **Funneling every tiny question to the user.** Decide the small / plan-derived calls yourself;
   raise only genuinely hard forks, and through the orchestrator — don't make the user babysit
   your terminal.

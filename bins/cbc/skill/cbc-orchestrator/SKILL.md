@@ -295,16 +295,25 @@ next-action: <terse one-liner — what a resumed orchestrator should do first>
 branch: <branch name in this worktree>
 worktree: <absolute path to this worktree>
 model: <your self-declared model name, e.g. claude-opus-4-8>
+checkup-level: 0          # 0=5m | 1=10m | 2=20m | dormant
+no-change-streak: 0       # consecutive no-change ticks at the current level
 
 agents:
-  <repo>-worker-<feature>: <room-id> (handle <hash>) — <one-line status>
-  <repo>-worker-<other>:   <room-id> (handle <hash>) — <one-line status>
+  <repo>-worker-<feature>: <room-id> (handle <hash>) — <subject> — ✓
+  <repo>-worker-<other>:   <room-id> (handle <hash>) — <subject> — quiet
 ```
 
 The `agents:` block is the **name registry** — the name is the key; the handle is a parenthetical
-cross-reference, never the label. Add an entry the moment a worker's room id is handed to you and
-update its status after every push. This registry is what survives compaction and lets a resumed
-orchestrator re-read the board without re-asking for names.
+cross-reference, never the label. Each entry ends with a **liveness marker** (`✓` / `quiet` /
+`⚠dark`) updated on every checkup tick — this marker IS the durable cross-tick state that lets
+the checkup detect newly-dark vs continuing-dark without relying on memory. Add an entry the
+moment a worker's room id is handed to you and update its status after every push and every tick.
+This registry is what survives compaction and lets a resumed orchestrator re-read the board
+without re-asking for names.
+
+`checkup-level` and `no-change-streak` are board-backed so the backoff state survives compaction.
+A resumed orchestrator that sees `checkup-level: dormant` knows the timer is not running and
+should re-arm it (or confirm with the user) before continuing.
 
 `status: ACTIVE` for any session with open rooms. `status: DONE` only when all rooms are closed and all poll shells stopped. Update `next-action` after every significant transition so a post-compaction resume can re-enter without asking the user.
 
@@ -514,6 +523,78 @@ answer from *this same checking pass*. The trustworthy signal is "confirmed this
 This is the sibling of "Verify before you trust": that rule covers *claims in messages* ("merged /
 deployed / contract is now X"); this rule covers *the orchestrator's picture of an agent's
 activity state*. Both guard against acting on a partial, stale view.
+
+## The checkup heartbeat — a backing-off fallback
+
+Your per-room `cbc poll` is the **primary** detector: it fires `counterpart_stale` the
+moment a worker's poll drops past the server's 15-min ghost window. But before that window
+closes, a dead worker is invisible. The checkup heartbeat covers that gap — a periodic
+sweep using the server-stamped `seconds_since_poll` field on each participant in
+`cbc_status` (read-only, free, no cap burn), catching a dead poll within ~5 min rather
+than 15.
+
+**This is a backing-off fallback, not an always-on timer.** When nothing is moving it
+backs off and eventually sleeps; per-room polls keep watching event-driven while it rests.
+
+### Arm the checkup at session start
+
+As soon as you have opened your first worker room, arm the checkup:
+
+```bash
+sleep 300; echo CHECKUP_TICK
+```
+
+Run with `run_in_background`. When it fires, you see `CHECKUP_TICK` in the task output —
+run `/cbc-checkup` (the sweep procedure is fully documented there). Re-arm at the
+level-dictated interval afterward (see below).
+
+### The sleep shell is self-identifying
+
+After compaction you may not remember what you were waiting for. The `CHECKUP_TICK` marker
+means: **run a checkup sweep.** No memory needed.
+
+If the checkup shell is dead when a per-room poll wakes you (e.g. crash) and you are not
+dormant: relaunch it immediately, before composing your reply.
+
+### Backoff state machine (board-backed)
+
+Write these two fields into your orchestration map so they survive compaction:
+
+```
+checkup-level: 0          # 0=5m | 1=10m | 2=20m | dormant
+no-change-streak: 0       # consecutive no-change ticks at the current level
+```
+
+| Level | Interval | No-change ticks to escalate |
+|-------|----------|-----------------------------|
+| 0     | 5 min    | 3                           |
+| 1     | 10 min   | 1                           |
+| 2     | 20 min   | 1                           |
+| dormant | — (no shell) | — |
+
+**Change** = any board marker transitioned this tick, OR any room's message count advanced.
+**No-change** = all markers held, no new messages anywhere.
+
+On **change**: reset streak to 0 and level to 0 (base sensitivity). On **no-change**:
+increment streak; if streak reaches the threshold, escalate level (or go dormant).
+
+**Going dormant: announce it first.** Post a one-line note to the user: *"All workers idle
+with no movement for ~45 min — pausing checkups. I'll restart automatically when a worker
+sends something or you reopen one."* Then do NOT relaunch the sleep shell.
+
+**Revival:** the checkup restarts from level 0 whenever (a) a per-room poll delivers a
+real message, (b) the user restarts a worker, or (c) the user manually invokes
+`/cbc-checkup`. Say so briefly: *"Checkup restarted at 5 min."*
+
+### Escalation (dark workers)
+
+A worker whose `seconds_since_poll ≥ 150` (or `stale: true`) has let its poll die. Tell
+the user by name: *"worker chatbotchat-worker-auth last polled 6m ago — poll dead; I can't
+reach it. Reopen its chat / relaunch it?"* You cannot repair it — CBC is pull-only. The
+human is the only actor who can reopen a dead worker's chat.
+
+See `/cbc-checkup` for the full sweep procedure, classification thresholds, and escalation
+wording.
 
 ## Teardown — stop the shell, not just the vote
 
