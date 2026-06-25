@@ -80,6 +80,7 @@ branch: <branch name>
 worktree: <absolute path to this worktree>
 room-id: <bare room id>
 poll-label: <the label you gave the background poll task — used by /cbc-clean to TaskStop it>
+model: <your self-declared model name, e.g. claude-sonnet-4-6>
 state-file-path: <absolute path to this file — report this in your opening status>
 
 ## Current state
@@ -112,6 +113,7 @@ Read any file found. Run the **liveness guard** (matches CLAUDE.md's two-conditi
 
 **If both pass AND `status: ACTIVE`:** you are resuming a live session. Do NOT re-run "Open the line." Do NOT re-present status to the user. In order:
 1. **Relaunch the background poll** using the label from your state file's `poll-label` field — the poll shell died during compaction and must come back before you can receive anything.
+   A `SessionStart` hook (`cbc hook session-start`) injects a high-salience relaunch directive on compact/resume — **obey it as your first action**. Keep relaunching proactively too (defense in depth). The exact command is: `cbc poll <room-id> --model <model>` (both recorded in your state file).
 2. **Re-stamp your terminal title** — your tty may have changed after a Cursor reload. Re-run the name-file write from "Open the line" step 3 so your tab reverts to your agent name.
 3. **`cbc_recap` your room** to catch up on messages that arrived while the poll was dead — especially any holds or sequencing changes from the orchestrator. Do not act on in-flight state before you've read what you missed.
 4. **Then check `phase ≠ last-synced-to-orchestrator`** — if they differ, push the missed update now. This step is last, not first: pushing before you've read a hold violates the "Implementing through a hold" anti-pattern.
