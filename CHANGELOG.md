@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/Levezze/chatbotchat/compare/v0.9.1...v0.10.0) (2026-06-25)
+
+
+### Features
+
+* **cbc:** readable agent names — handoff, orchestrator map registry, terminal tab self-titling ([#81](https://github.com/Levezze/chatbotchat/issues/81)) ([c334d8d](https://github.com/Levezze/chatbotchat/commit/c334d8d2389daf2301d737f1009a09bfda1b632b))
+
 ## [0.9.1](https://github.com/Levezze/chatbotchat/compare/v0.9.0...v0.9.1) (2026-06-24)
 
 
