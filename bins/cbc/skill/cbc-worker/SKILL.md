@@ -131,7 +131,7 @@ Read any file found. Run the **liveness guard** (matches CLAUDE.md's two-conditi
    every prompt and applies it via OSC escape. See `docs/TERMINAL_TITLES.md` in the chatbotchat repo for setup.
    ```bash
    mkdir -p /tmp/cbc-termtitle
-   t=$(ps -o tty= -p $PPID | tr -d ' ')
+   t=$(basename "$(ps -o tty= -p $PPID | tr -d ' ')")
    [ -n "$t" ] && [ "$t" != "??" ] && printf '%s' "<repo>-worker-<feature>" > "/tmp/cbc-termtitle/$t"
    ```
 4. Output your name and room id together on its own line so the **user can paste both to the

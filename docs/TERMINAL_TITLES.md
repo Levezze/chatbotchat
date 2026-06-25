@@ -27,7 +27,7 @@ title escape:
 ```bash
 # Agent side (worker / orchestrator — done once on session start and again on resume):
 mkdir -p /tmp/cbc-termtitle
-t=$(ps -o tty= -p $PPID | tr -d ' ')
+t=$(basename "$(ps -o tty= -p $PPID | tr -d ' ')")
 [ -n "$t" ] && [ "$t" != "??" ] && printf '%s' "<agent-name>" > "/tmp/cbc-termtitle/$t"
 ```
 
@@ -166,7 +166,7 @@ No manual intervention needed.
   ```bash
   t="??"; pid=$PPID
   while [ "$t" = "??" ] && [ "$pid" -gt 1 ]; do
-    t=$(ps -o tty= -p "$pid" | tr -d ' ')
+    t=$(basename "$(ps -o tty= -p "$pid" | tr -d ' ')")
     pid=$(ps -o ppid= -p "$pid" | tr -d ' ')
   done
   ```

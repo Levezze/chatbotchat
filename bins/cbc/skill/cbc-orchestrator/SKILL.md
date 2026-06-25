@@ -88,7 +88,7 @@ full picture before you do anything else:
    See `docs/TERMINAL_TITLES.md` in the chatbotchat repo for setup.
    ```bash
    mkdir -p /tmp/cbc-termtitle
-   t=$(ps -o tty= -p $PPID | tr -d ' ')
+   t=$(basename "$(ps -o tty= -p $PPID | tr -d ' ')")
    [ -n "$t" ] && [ "$t" != "??" ] && printf '%s' "<repo>-orchestrator" > "/tmp/cbc-termtitle/$t"
    ```
 1. **Call a hold the instant you join — before anything else.** The very first message you send
