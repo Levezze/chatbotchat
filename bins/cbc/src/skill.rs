@@ -4,8 +4,10 @@
 //!
 //! CBC ships a small family of skills: `cbc` (drive a room well) plus the orchestration
 //! set `cbc-orchestrator` / `cbc-worker` / `cbc-peer` / `cbc-recap` / `cbc-reconcile`
-//! (coordinate many agents across one or more repos), and `cbc-refresh` (replace a
-//! polluted room with a fresh one while preserving the thread). Each skill's text is embedded
+//! (coordinate many agents across one or more repos), `cbc-refresh` (replace a polluted room
+//! with a fresh one while preserving the thread), `cbc-checkup` (orchestrator heartbeat sweep
+//! with escalating backoff), and `cbc-clean` (consensus-close a line and optionally remove the
+//! worktree). Each skill's text is embedded
 //! ([`BUNDLED_SKILLS`] via
 //! `include_str!`) so
 //! `cargo install` — which ships only the compiled binary — carries them, and the installed
@@ -63,6 +65,14 @@ const BUNDLED_SKILLS: &[BundledSkill] = &[
     BundledSkill {
         name: "cbc-refresh",
         body: include_str!("../skill/cbc-refresh/SKILL.md"),
+    },
+    BundledSkill {
+        name: "cbc-checkup",
+        body: include_str!("../skill/cbc-checkup/SKILL.md"),
+    },
+    BundledSkill {
+        name: "cbc-clean",
+        body: include_str!("../skill/cbc-clean/SKILL.md"),
     },
 ];
 

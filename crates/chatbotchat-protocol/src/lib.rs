@@ -388,6 +388,15 @@ pub struct ParticipantView {
     pub model: String,
     pub cwd: String,
     pub joined_at: String,
+    /// Seconds elapsed since this participant last polled, server-computed.
+    /// A healthy `cbc poll` refreshes this every ~50 s; values above ~150 s
+    /// indicate the poll has likely died.  Use this for liveness detection —
+    /// never subtract RFC3339 timestamps in agent code.
+    pub seconds_since_poll: i64,
+    /// `true` when `seconds_since_poll` exceeds the server's ghost window
+    /// (currently 15 min).  A ghost cannot receive messages and does not count
+    /// toward close/extend quorum.
+    pub stale: bool,
     /// Optional friendly display label; `None` renders by handle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nickname: Option<String>,
