@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/Levezze/chatbotchat/compare/v0.11.0...v0.12.0) (2026-06-25)
+
+
+### Features
+
+* **cbc:** SessionStart hook restarts CBC polls on compact/resume ([#84](https://github.com/Levezze/chatbotchat/issues/84)) ([d81ec35](https://github.com/Levezze/chatbotchat/commit/d81ec357c3a8d08cd126499b9b640c843c3e1678))
+
 ## [0.11.0](https://github.com/Levezze/chatbotchat/compare/v0.10.0...v0.11.0) (2026-06-25)
 
 
