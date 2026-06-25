@@ -70,8 +70,9 @@ Read any file found. Run the **liveness guard** (matches CLAUDE.md's convention)
 
 **If the guard passes AND `status: ACTIVE`:** you are resuming a live session. Do NOT re-run "Your first move" from scratch — your rooms are already open. In order:
 1. **Relaunch all polls unconditionally** — you cannot tell which shells survived the compaction, and `cbc poll` is idempotent (same cursor, brief dual-listener overlap is fine).
-2. **`cbc_recap` each room** to catch up on messages that arrived while polls were dead before you act on anything.
-3. **Then continue from `next-action`.**
+2. **Re-stamp your terminal title** — your tty may have changed after a Cursor reload. Re-run the name-file write (see "Your first move" step 0) so your tab reverts to `<repo>-orchestrator`.
+3. **`cbc_recap` each room** to catch up on messages that arrived while polls were dead before you act on anything.
+4. **Then continue from `next-action`.**
 
 **If the guard fails** (branch gone, `status: DONE`, or no map found): write `status: DONE` into the file (if one was found), then proceed fresh from "Your first move."
 
@@ -82,6 +83,14 @@ mid-decision, peers in other repos doing the same. **Do not start firing questio
 or directing agents.** The first task of a new orchestrator is *always* a big recap. Build the
 full picture before you do anything else:
 
+0. **Set your terminal title** so the user can identify your tab. Write `<repo>-orchestrator`
+   (e.g. `engine-orchestrator`) to the tty-keyed name-file — the shell's `precmd` hook applies it.
+   See `docs/TERMINAL_TITLES.md` for setup.
+   ```bash
+   mkdir -p /tmp/cbc-termtitle
+   t=$(ps -o tty= -p $PPID | tr -d ' ')
+   [ -n "$t" ] && [ "$t" != "??" ] && printf '%s' "<repo>-orchestrator" > "/tmp/cbc-termtitle/$t"
+   ```
 1. **Call a hold the instant you join — before anything else.** The very first message you send
    into an agent's room is a freeze: *"Orchestrator here. Pause implementation and hold — don't
    write more code or make decisions yet. Give me your current status, then wait for my
@@ -100,14 +109,14 @@ full picture before you do anything else:
 
    ```text
    Board (N rooms):
-     engine-recompute — reworking the recompute pipeline
-     engine-kb-definitions — kb definition schema
-     api-fix-contract — results contract fix
+     engine-worker-recompute — reworking the recompute pipeline
+     engine-worker-kb-definitions — kb definition schema
+     api-worker-fix-contract — results contract fix
      peer: api-orchestrator — cross-repo results contract
    Is this everyone, or are there more to add?
    ```
 
-   Name each agent `<repo>-<feature>` (see below), not by its instance hash. Only proceed once
+   Name each agent `<repo>-worker-<feature>` (see below), not by its instance hash. Only proceed once
    the user confirms. (If a name/subject isn't clear yet, say so on that line — don't invent it.)
 4. **Recap across all of them, then PRINT the recap.** `cbc_recap` every room and read it whole,
    then give the user a **clear "stop to breathe" recap** of where things stand — this is the
@@ -128,23 +137,32 @@ Re-run this hold → gather → confirm-roster → print-recap loop **every time
 (another agent or peer joins): freeze the newcomer, reconcile it against the whole board, reprint
 the updated picture, before you release it.
 
-## Name every agent `<repo>-<feature>` — never the instance hash
+## Name every agent — never the instance hash
 
 CBC mints an opaque instance/handle (e.g. `b9kws7pe5`) to route a participant; that id means
-nothing to the user scanning your board. **In your roster, your recaps, and your map, refer to
-every agent by a human name shaped `<repo>-<feature>`** — the repo it works in, then what it's
-doing: `engine-recompute`, `engine-kb-definitions`, `api-fix-contract`, `client-labels`. "recompute
-b9kws7pe5 — holding" is noise; "engine-recompute — holding" is legible at a glance.
+nothing to the user scanning your board.
 
-- **Derive the name from the worker's opener.** `/cbc-worker` has each worker announce its
-  `<repo>-<feature>` name and set it as its room nickname; its report subject (`report:
-  <repo>/<task>`) also carries it. Use that — don't invent one. If a worker hasn't given a clear
-  name, ask for it rather than falling back to the hash.
-- **Use the same name everywhere** — roster line, recap, the map's agent column, and when you
-  relay a reconcile-room id ("relay to `api-recompute`"). One name per agent, consistently.
+**Naming scheme: repo-first, role-in-name.**
+- Workers: `<repo>-worker-<feature>` — e.g. `engine-worker-recompute`, `api-worker-fix-contract`.
+- You: `<repo>-orchestrator` — e.g. `engine-orchestrator`.
+
+**In your roster, your recaps, and your map, always use these human names** — never the instance
+hash. "recompute b9kws7pe5 — holding" is noise; "engine-worker-recompute — holding" is legible at
+a glance.
+
+- **Derive the name from the user's handoff.** `/cbc-worker` has each worker output its name and
+  room id together at handoff — the user pastes `<repo>-worker-<feature>: <room-id>`. Use that name.
+  Write it into the `agents:` registry in your map immediately (see map fields below).
+- **If no name arrived with the room id**, do NOT fall back to the handle. Acquire it in order:
+  1. read the room **nickname** or the worker's opener via `cbc_status` or `cbc_recap`;
+  2. if still unclear, **`cbc_send` a direct question to the worker**: *"What's your
+     `<repo>-worker-<feature>` name?"* and write the answer into the `agents:` registry;
+  3. **never** label the agent by its instance hash, even temporarily.
+- **Use the same name everywhere** — roster line, recap, the `agents:` registry, and when you relay a
+  reconcile-room id ("relay to `api-worker-fix-contract`"). One name per agent, consistently.
 - **Share names across the peer boundary.** When you coordinate with a peer orchestrator
-  (`/cbc-peer`), refer to agents by these names so both sides can cross-reference the relevant
-  agents across repos — `engine-recompute ↔ api-recompute` is meaningful; two opaque hashes are not.
+  (`/cbc-peer`), refer to agents by these names so both sides can cross-reference —
+  `engine-worker-recompute ↔ api-worker-recompute` is meaningful; two opaque hashes are not.
 
 ## Running one poll per room — yes, many at once
 
@@ -206,7 +224,7 @@ default 20-message hard cap. Don't let a coordination line hit the wall mid-flig
 
 Your context is the **shape** of each agent's work, not its detail. Per agent, track:
 
-- **`<repo>-<feature>` name** / what they're building (one line of intent) — the human name, not
+- **`<repo>-worker-<feature>` name** / what they're building (one line of intent) — the human name, not
   the instance hash
 - branch or worktree
 - **surfaces touched** — files, public contracts/interfaces, DB migrations, shared config
@@ -276,7 +294,16 @@ status: ACTIVE | DONE
 next-action: <terse one-liner — what a resumed orchestrator should do first>
 branch: <branch name in this worktree>
 worktree: <absolute path to this worktree>
+
+agents:
+  <repo>-worker-<feature>: <room-id> (handle <hash>) — <one-line status>
+  <repo>-worker-<other>:   <room-id> (handle <hash>) — <one-line status>
 ```
+
+The `agents:` block is the **name registry** — the name is the key; the handle is a parenthetical
+cross-reference, never the label. Add an entry the moment a worker's room id is handed to you and
+update its status after every push. This registry is what survives compaction and lets a resumed
+orchestrator re-read the board without re-asking for names.
 
 `status: ACTIVE` for any session with open rooms. `status: DONE` only when all rooms are closed and all poll shells stopped. Update `next-action` after every significant transition so a post-compaction resume can re-enter without asking the user.
 
@@ -302,8 +329,8 @@ Maintain a **Servers** section in the map, kept as a small table:
 
 | Port | Server / command | Agent / feature | Status |
 |------|-----------------|-----------------|--------|
-| 3000 | `npm run dev` | api-feature | running |
-| 5173 | `vite --port 5173` | client-labels | running |
+| 3000 | `npm run dev` | api-worker-feature | running |
+| 5173 | `vite --port 5173` | engine-worker-labels | running |
 
 Update it when you start a server, when a server stops, and when a feature is done and its
 isolated server is torn down.
@@ -529,9 +556,9 @@ regenerate, or re-derive anything, the peers hear about it first.*
 
 ## Anti-patterns
 
-- **Labeling agents by their instance hash** instead of `<repo>-<feature>`. "recompute b9kws7pe5"
-  is noise to the user; "engine-recompute" is legible — and it's what lets peers cross-reference
-  agents across repos.
+- **Labeling agents by their instance hash** instead of `<repo>-worker-<feature>`. "recompute b9kws7pe5"
+  is noise to the user; "engine-worker-recompute" is legible — and it's what lets peers cross-reference
+  agents across repos. If no name arrived at handoff, ask the worker via CBC before falling back.
 - **Writing code or committing.** You orchestrate; you never implement.
 - **Opening a worker room.** Workers open to you; the user relays the id. You only join.
 - **Spawning implementation agents or subagents from your own shell.** Workers are sessions the
