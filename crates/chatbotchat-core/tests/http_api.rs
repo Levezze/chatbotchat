@@ -1504,7 +1504,9 @@ async fn status_includes_per_participant_poll_freshness() {
     assert_eq!(resp.status(), StatusCode::OK);
     let status = body_json(resp.into_body()).await;
 
-    let roster = status["participants"].as_array().expect("participants array");
+    let roster = status["participants"]
+        .as_array()
+        .expect("participants array");
     assert_eq!(roster.len(), 2);
 
     let fresh_p = roster
