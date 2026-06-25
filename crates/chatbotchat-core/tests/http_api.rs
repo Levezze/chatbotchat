@@ -1471,6 +1471,80 @@ async fn status_lists_participants_after_join() {
     assert!(roster[0]["joined_at"].as_str().is_some());
 }
 
+/// `GET /rooms/:id` must include `seconds_since_poll` (non-negative integer) and
+/// `stale: bool` for every participant.  A participant who just joined has a fresh
+/// poll timestamp, so `stale` must be `false` and `seconds_since_poll` must be
+/// small (< 60).  A participant whose `last_poll_at` was seeded 20 min in the past
+/// must have `stale: true` and a large `seconds_since_poll`.
+#[tokio::test]
+async fn status_includes_per_participant_poll_freshness() {
+    let (app, storage) = test_router_returning_storage().await;
+    let room_id = open_room_id(&app, "freshness check").await;
+
+    // Join one participant — server sets last_poll_at = now.
+    let (_, body) = join(&app, &room_id, "mvp-engine", "opus47", "/work/a").await;
+    let fresh_handle = body["handle"].as_str().unwrap().to_string();
+
+    // Join a second participant then seed its last_poll_at 20 min in the past.
+    let (_, body2) = join(&app, &room_id, "mvp-engine", "sonnet46", "/work/a").await;
+    let stale_handle = body2["handle"].as_str().unwrap().to_string();
+    let past = OffsetDateTime::now_utc() - Duration::minutes(20);
+    storage
+        .touch_last_poll(&stale_handle, past)
+        .await
+        .expect("seed stale timestamp");
+
+    // Fetch status.
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/rooms/{room_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let status = body_json(resp.into_body()).await;
+
+    let roster = status["participants"].as_array().expect("participants array");
+    assert_eq!(roster.len(), 2);
+
+    let fresh_p = roster
+        .iter()
+        .find(|p| p["handle"].as_str() == Some(&fresh_handle))
+        .expect("fresh participant in roster");
+    let stale_p = roster
+        .iter()
+        .find(|p| p["handle"].as_str() == Some(&stale_handle))
+        .expect("stale participant in roster");
+
+    // Fresh participant: seconds_since_poll < 60, stale = false.
+    let fresh_secs = fresh_p["seconds_since_poll"]
+        .as_i64()
+        .expect("seconds_since_poll must be an integer for fresh participant");
+    assert!(
+        fresh_secs >= 0 && fresh_secs < 60,
+        "fresh participant should have seconds_since_poll in [0, 60), got {fresh_secs}"
+    );
+    assert_eq!(
+        fresh_p["stale"].as_bool(),
+        Some(false),
+        "fresh participant must not be stale"
+    );
+
+    // Stale participant: seconds_since_poll >= 1200 (20 min), stale = true.
+    let stale_secs = stale_p["seconds_since_poll"]
+        .as_i64()
+        .expect("seconds_since_poll must be an integer for stale participant");
+    assert!(
+        stale_secs >= 1200,
+        "stale participant should have seconds_since_poll >= 1200, got {stale_secs}"
+    );
+    assert_eq!(
+        stale_p["stale"].as_bool(),
+        Some(true),
+        "participant with last_poll_at 20 min ago must be stale"
+    );
+}
+
 #[tokio::test]
 async fn join_missing_room_is_404() {
     let app = test_router().await;

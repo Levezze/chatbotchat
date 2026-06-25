@@ -527,7 +527,12 @@ impl CbcMcp {
         match self.client.status(&room_id).await {
             Ok(status) => json_with_next(
                 &status,
-                "Room status above (state + participants). Use it to decide whether to join, send, wait, or close.",
+                "Room status above (state + participants). Each participant entry includes \
+                 `seconds_since_poll` (server-stamped seconds since that participant last polled — \
+                 a healthy cbc poll refreshes every ~50 s; values above ~150 s indicate the poll \
+                 has likely died) and `stale` (true when seconds_since_poll > 900 s / 15 min, the \
+                 server's ghost window). Use these for liveness detection — never subtract \
+                 timestamps yourself. Then use it to decide whether to join, send, wait, or close.",
             ),
             Err(e) => err_json(&e.to_string()),
         }

@@ -152,13 +152,14 @@ async fn get_room(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<RoomStatus>, ApiError> {
+    let now = OffsetDateTime::now_utc();
     let room = state
         .storage
         .get_room(&id)
         .await?
         .ok_or(ApiError::NotFound)?;
     let participants = state.storage.list_participants(&id).await?;
-    Ok(Json(room_to_status(&room, &participants)?))
+    Ok(Json(room_to_status(&room, &participants, now)?))
 }
 
 /// Query params for `GET /rooms`. `state` deserializes from the same snake_case
@@ -203,6 +204,7 @@ async fn transcript(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<RoomTranscript>, ApiError> {
+    let now = OffsetDateTime::now_utc();
     let room = state
         .storage
         .get_room(&id)
@@ -220,6 +222,7 @@ async fn transcript(
         &messages,
         hard_cap_count,
         soft_cap_consecutive,
+        now,
     )?))
 }
 
@@ -1615,7 +1618,10 @@ fn rand_sess_candidates() -> impl Iterator<Item = String> {
     })
 }
 
-fn participant_view(p: &Participant) -> Result<ParticipantView, ApiError> {
+fn participant_view(p: &Participant, now: OffsetDateTime) -> Result<ParticipantView, ApiError> {
+    let elapsed = now - p.last_poll_at;
+    let seconds_since_poll = elapsed.whole_seconds().max(0);
+    let stale = elapsed > lifecycle::GHOST_AFTER;
     Ok(ParticipantView {
         handle: p.handle.clone(),
         repo: p.repo.clone(),
@@ -1625,6 +1631,8 @@ fn participant_view(p: &Participant) -> Result<ParticipantView, ApiError> {
             .joined_at
             .format(&Rfc3339)
             .map_err(|e| ApiError::Internal(e.to_string()))?,
+        seconds_since_poll,
+        stale,
         nickname: p.nickname.clone(),
     })
 }
@@ -1637,10 +1645,14 @@ fn normalize_nickname(nickname: Option<String>) -> Option<String> {
         .filter(|n| !n.is_empty())
 }
 
-fn room_to_status(room: &Room, participants: &[Participant]) -> Result<RoomStatus, ApiError> {
+fn room_to_status(
+    room: &Room,
+    participants: &[Participant],
+    now: OffsetDateTime,
+) -> Result<RoomStatus, ApiError> {
     let participants = participants
         .iter()
-        .map(participant_view)
+        .map(|p| participant_view(p, now))
         .collect::<Result<Vec<_>, ApiError>>()?;
 
     Ok(RoomStatus {
@@ -1679,10 +1691,11 @@ fn room_to_transcript(
     messages: &[Message],
     hard_cap_count: i64,
     soft_cap_consecutive: i64,
+    now: OffsetDateTime,
 ) -> Result<RoomTranscript, ApiError> {
     let participants = participants
         .iter()
-        .map(participant_view)
+        .map(|p| participant_view(p, now))
         .collect::<Result<Vec<_>, ApiError>>()?;
     let messages = messages
         .iter()
