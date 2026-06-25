@@ -88,11 +88,11 @@ being a unilateral decision.
   one runs servers and hands URLs to the other's workers on request, exactly as in the
   cross-repo case.
 
-**Refer to agents by their `<repo>-<feature>` or `<feature>` name across the peer line** —
-`engine-recompute`, `api-recompute`, `client-labels` — never by an opaque instance hash. That's
-what lets both sides cross-reference the relevant agents: when you say "engine-recompute changed
-the result contract", the peer knows exactly which of its agents (`api-recompute`) that lands on.
-Trade names, not hashes.
+**Refer to agents by their `<repo>-worker-<feature>` name across the peer line** —
+`engine-worker-recompute`, `api-worker-recompute`, `client-worker-labels` — never by an opaque
+instance hash. That's what lets both sides cross-reference the relevant agents: when you say
+"engine-worker-recompute changed the result contract", the peer knows exactly which of its agents
+(`api-worker-recompute`) that lands on. Trade names, not hashes.
 
 The rule of thumb: **if a change on your side forces the peer's side to adapt, regenerate,
 re-derive, wait, or avoid a surface, announce it across the peer line first.** Work touching a
@@ -117,8 +117,8 @@ Transitions that warrant an immediate push:
   cleared and the peer can proceed.
 
 Broadcast to **all** peer rooms the transition touches, so every peer holds the same current
-picture and none acts on stale state. Use the same `<repo>-<feature>` / `<feature>` names (see
-above) so the peer knows exactly which of its agents the transition lands on.
+picture and none acts on stale state. Use the same `<repo>-worker-<feature>` names (see above) so the peer knows exactly which of its
+agents the transition lands on.
 
 This is the **sender-side** mirror of "verify before you trust": you broadcasting transitions
 promptly is what keeps a peer from ever needing to re-verify a stale "in review" that merged 12

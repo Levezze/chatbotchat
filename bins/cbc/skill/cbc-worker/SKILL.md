@@ -112,8 +112,9 @@ Read any file found. Run the **liveness guard** (matches CLAUDE.md's two-conditi
 
 **If both pass AND `status: ACTIVE`:** you are resuming a live session. Do NOT re-run "Open the line." Do NOT re-present status to the user. In order:
 1. **Relaunch the background poll** using the label from your state file's `poll-label` field — the poll shell died during compaction and must come back before you can receive anything.
-2. **`cbc_recap` your room** to catch up on messages that arrived while the poll was dead — especially any holds or sequencing changes from the orchestrator. Do not act on in-flight state before you've read what you missed.
-3. **Then check `phase ≠ last-synced-to-orchestrator`** — if they differ, push the missed update now. This step is last, not first: pushing before you've read a hold violates the "Implementing through a hold" anti-pattern.
+2. **Re-stamp your terminal title** — your tty may have changed after a Cursor reload. Re-run the name-file write from "Open the line" step 3 so your tab reverts to your agent name.
+3. **`cbc_recap` your room** to catch up on messages that arrived while the poll was dead — especially any holds or sequencing changes from the orchestrator. Do not act on in-flight state before you've read what you missed.
+4. **Then check `phase ≠ last-synced-to-orchestrator`** — if they differ, push the missed update now. This step is last, not first: pushing before you've read a hold violates the "Implementing through a hold" anti-pattern.
 
 **If the guard fails** (branch gone, room closed, `status: DONE`, or no file found): write `status: DONE` into the file (if one was found), then proceed fresh from "Open the line."
 
@@ -125,12 +126,22 @@ Read any file found. Run the **liveness guard** (matches CLAUDE.md's two-conditi
    `cbc_extend` (consensus +20) and the orchestrator co-votes.
 2. `cbc_join_room`, then `cbc_send` an **opening status** (see discipline below) that includes
    your `state-file-path`.
-3. Output the bare room id on its own line so the **user can paste it to the orchestrator** —
-   you do not know the orchestrator's identity, and you do not address it; the user relays.
-4. Start the background poll (`/cbc`) with a descriptive label (e.g.
-   `cbc poll <room-id> --model <model> # worker-<repo>-<feature>`). Record that label in your
+3. **Set your terminal title** so the user can see your name in their tab list without manual renaming.
+   Write your `<repo>-worker-<feature>` name to a tty-keyed file — the shell's `precmd` hook reads it
+   every prompt and applies it via OSC escape. See `docs/TERMINAL_TITLES.md` in the chatbotchat repo for setup.
+   ```bash
+   mkdir -p /tmp/cbc-termtitle
+   t=$(basename "$(ps -o tty= -p $PPID | tr -d ' ')")
+   [ -n "$t" ] && [ "$t" != "??" ] && printf '%s' "<repo>-worker-<feature>" > "/tmp/cbc-termtitle/$t"
+   ```
+4. Output your name and room id together on its own line so the **user can paste both to the
+   orchestrator at once** — format: `<repo>-worker-<feature>: <room-id>`. You do not know the
+   orchestrator's identity; the user relays. When the name travels with the id, the orchestrator
+   records it immediately without having to ask.
+5. Start the background poll (`/cbc`) with a descriptive label (e.g.
+   `cbc poll <room-id> --model <model> # <repo>-worker-<feature>`). Record that label in your
    state file's `poll-label` field — `/cbc-clean` needs it to TaskStop the shell.
-5. **Keep the room open.** Don't vote close, don't drift off — you owe this line a running poll
+6. **Keep the room open.** Don't vote close, don't drift off — you owe this line a running poll
    until the orchestrator proposes close.
 
 **This room is only your channel to *this repo's* orchestrator.** It is separate from any
@@ -148,11 +159,12 @@ reconciles the full picture before acting, rather than reacting to you alone. Yo
   hold.** Don't keep implementing through a hold: that's how parallel agents diverge into a merge
   salad while the orchestrator is still grounding. Resume only when it hands you your single
   responsibility and clears you to go.
-- **Lead with your `<repo>-<feature>` name.** Identify yourself by what you do and the repo you're
-  in — `engine-recompute`, `api-fix-contract`, `client-labels` — not by a bare task word. Set it as
-  your room **nickname** too (`--nick <repo>-<feature>` / the `nickname` field) so it shows in
-  `cbc status`. This is the name the orchestrator will use for you on its board, in its map, and when
-  it relays a reconcile-room id to you; without it you're an opaque instance hash on its roster.
+- **Lead with your `<repo>-worker-<feature>` name.** Identify yourself by your role AND what you're
+  doing — `engine-worker-recompute`, `api-worker-fix-contract`, `engine-worker-kb-definitions` — not by
+  a bare task word. Set it as your room **nickname** too (`--nick <repo>-worker-<feature>` / the
+  `nickname` field) so it shows in `cbc status`. This is the name the orchestrator will use for you on
+  its board, in its map, and when it relays a reconcile-room id to you; without it you're an opaque
+  instance hash on its roster.
 - **Open with a grounding status, not a terse ping.** After your name, your first message must let
   the orchestrator place you on the board: what you're building, **where you are in your sequence**
   (designing / implementing / testing / ready to merge), the surfaces you're touching, anything
