@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::time::Duration;
 
 mod context;
+mod hook;
 mod install;
 mod mcp;
 mod settings;
@@ -312,6 +313,33 @@ enum Command {
         #[arg(long)]
         skills_dir: Option<std::path::PathBuf>,
     },
+    /// Register the CBC Claude Code hooks in ~/.claude/settings.json.
+    ///
+    /// Adds a `SessionStart` hook that fires on compact/resume, kills any stale
+    /// `cbc poll` process for the active room, and injects a high-salience
+    /// relaunch directive — so Sonnet workers re-arm their polls after
+    /// compaction without having to remember the skill instructions.
+    ///
+    /// Idempotent; backs up the file before editing; preserves all other hooks
+    /// and settings. Degrades to a printed manual snippet on parse errors.
+    InstallHooks,
+    /// Run a Claude Code hook handler (reads the hook event JSON from stdin).
+    Hook {
+        #[command(subcommand)]
+        event: HookEvent,
+    },
+}
+
+/// The Claude Code hook events that `cbc hook` handles.
+#[derive(Debug, Subcommand)]
+enum HookEvent {
+    /// Handle a `SessionStart` event.
+    ///
+    /// On `compact` or `resume` sources: scans `.cbc/` for active CBC state
+    /// files, kills any stale `cbc poll` process per room, and writes a
+    /// high-salience relaunch directive to stdout (injected as a system
+    /// reminder before the model's first turn).  Silent on all other sources.
+    SessionStart,
 }
 
 #[tokio::main]
@@ -656,6 +684,33 @@ async fn main() -> anyhow::Result<()> {
                 skill::print_outcome(&dir, name, outcome);
             }
         }
+        Command::InstallHooks => {
+            let path = settings::settings_path()?;
+            match settings::apply_hook_rule(&path) {
+                Ok(outcome) => settings::print_hook_outcome(&path, &outcome),
+                Err(e) => {
+                    eprintln!("Could not edit {} automatically: {e:#}", path.display());
+                    settings::print_manual_hook_snippet();
+                }
+            }
+        }
+        Command::Hook { event } => match event {
+            HookEvent::SessionStart => {
+                hook::run_session_start(
+                    &mut std::io::stdin(),
+                    &mut std::io::stdout(),
+                    &mut |room_id| {
+                        // Silently kill any stale cbc poll process for this room.
+                        // pkill exits 1 when nothing matches — that's fine.
+                        std::process::Command::new("pkill")
+                            .args(["-f", &format!("cbc poll {}", room_id)])
+                            .status()
+                            .ok();
+                    },
+                )
+                .context("running SessionStart hook handler")?;
+            }
+        },
     }
 
     Ok(())

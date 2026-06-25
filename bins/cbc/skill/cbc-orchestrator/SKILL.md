@@ -69,7 +69,7 @@ Read any file found. Run the **liveness guard** (matches CLAUDE.md's convention)
 1. Read `worktree:` (if present). Run `git -C <worktree-path> branch --show-current` (or bare `git branch --show-current`) — does it match `branch:` in the file? (The orchestrator manages many rooms, so CLAUDE.md's room-liveness step is not applicable here — branch match is the practical guard.)
 
 **If the guard passes AND `status: ACTIVE`:** you are resuming a live session. Do NOT re-run "Your first move" from scratch — your rooms are already open. In order:
-1. **Relaunch all polls unconditionally** — you cannot tell which shells survived the compaction, and `cbc poll` is idempotent (same cursor, brief dual-listener overlap is fine).
+1. **Relaunch all polls unconditionally** — you cannot tell which shells survived the compaction, and a `SessionStart` hook (`cbc hook session-start`) injects a high-salience relaunch directive on compact/resume for every room in your `agents:` registry — **obey it as your first action**. Keep relaunching proactively regardless (defense in depth). The command for each room: `cbc poll <room-id> --model <model>` (model recorded in the map's `model:` field).
 2. **Re-stamp your terminal title** — your tty may have changed after a Cursor reload. Re-run the name-file write (see "Your first move" step 0) so your tab reverts to `<repo>-orchestrator`.
 3. **`cbc_recap` each room** to catch up on messages that arrived while polls were dead before you act on anything.
 4. **Then continue from `next-action`.**
@@ -294,6 +294,7 @@ status: ACTIVE | DONE
 next-action: <terse one-liner — what a resumed orchestrator should do first>
 branch: <branch name in this worktree>
 worktree: <absolute path to this worktree>
+model: <your self-declared model name, e.g. claude-opus-4-8>
 checkup-level: 0          # 0=5m | 1=10m | 2=20m | dormant
 no-change-streak: 0       # consecutive no-change ticks at the current level
 
