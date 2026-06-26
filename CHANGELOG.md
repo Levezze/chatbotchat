@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.0](https://github.com/Levezze/chatbotchat/compare/v0.12.0...v0.13.0) (2026-06-26)
+
+
+### Features
+
+* **cbc:** terse status-line output, orchestrator autonomy modes, worker poll-survival ([#87](https://github.com/Levezze/chatbotchat/issues/87)) ([fb1bb45](https://github.com/Levezze/chatbotchat/commit/fb1bb457f4ed47c9e00bdd45b4c4402b5b204ae6))
+
 ## [0.12.0](https://github.com/Levezze/chatbotchat/compare/v0.11.0...v0.12.0) (2026-06-25)
 
 
