@@ -126,10 +126,11 @@ produces a Variant A block that holds until the user answers.
 
 ## The USER DECISION block
 
-Every decision you surface to the user — and every decision you make autonomously in `--afk`
-mode — is presented in **one of two fixed formats below, verbatim, every time.** Never bury
-a decision in prose. The user's ability to catch decisions at a glance depends on these blocks
-always looking identical.
+Every decision has exactly **two output paths** — no burying in prose, no third format:
+- **Blocking decision → Variant A** (any mode): the verbatim template below. Looks identical every time; holds until the user answers.
+- **FYI decision in `--afk`** (non-floor only): a status-line row with `action: none (FYI)`. Uses the same status-line format already defined above — not a separate template.
+
+The user catches decisions at a glance because these two paths are consistent and exclusive.
 
 ### Variant A — input needed (regular, `--auto`, or any `--afk` floor hit) — BLOCKS and waits
 

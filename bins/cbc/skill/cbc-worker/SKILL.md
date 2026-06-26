@@ -443,9 +443,10 @@ This timer closes the **idle-gap** — the poll dying while you sit quiet with n
 It does **not** fix the "awake but deaf" case (you taking turns with a dead poll) — that is
 covered by the poll-first rule in the charter, which fires every turn regardless.
 
-**This timer dies on compact.** After a compact, the `SessionStart` hook handles the relaunch
-directive; you do not need to re-arm this timer on resume (the hook wakes you). If you were in
-an extended idle period (dormant) before the compact, re-arm at level 0 when you return.
+**This timer dies on compact.** After a compact, the `SessionStart` hook handles relaunching
+the poll; re-arm this pulse timer at level 0 when you finish your first post-resume action and
+are about to go idle again. (The hook wakes you and handles the poll; the pulse timer is yours
+to re-arm.)
 
 ## Anti-patterns
 
