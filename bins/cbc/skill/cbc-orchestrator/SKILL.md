@@ -173,7 +173,7 @@ Read any file found. Run the **liveness guard** (matches CLAUDE.md's convention)
 1. Read `worktree:` (if present). Run `git -C <worktree-path> branch --show-current` (or bare `git branch --show-current`) — does it match `branch:` in the file? (The orchestrator manages many rooms, so CLAUDE.md's room-liveness step is not applicable here — branch match is the practical guard.)
 
 **If the guard passes AND `status: ACTIVE`:** you are resuming a live session. Do NOT re-run "Your first move" from scratch — your rooms are already open. In order:
-1. **Relaunch all polls unconditionally** — you cannot tell which shells survived the compaction, and a `SessionStart` hook (`cbc hook session-start`) injects a high-salience relaunch directive on compact/resume for every room in your `agents:` registry — **obey it as your first action**. Keep relaunching proactively regardless (defense in depth). The command for each room: `cbc poll <room-id> --model <model>` (model recorded in the map's `model:` field).
+1. **Relaunch all polls** — the compaction tore them all down. The `SessionStart` hook (`cbc hook session-start`) injects a high-salience relaunch directive on compact/resume, one identity-scoped command per `connections:` entry (it kills any survivor first, so there's no stacking) — **obey it as your first action**; run exactly the commands it gives. If it didn't fire, launch each from your `connections:` block: `cbc poll <room-id> --model <model> --as <repo>-orchestrator`. Launch one per room — don't double up "to be safe"; the Stop hook reconciles to exactly one.
 2. **Re-stamp your terminal title** — your tty may have changed after a Cursor reload. Re-run the name-file write (see "Your first move" step 0) so your tab reverts to `<repo>-orchestrator`.
 3. **`cbc_recap` each room** to catch up on messages that arrived while polls were dead before you act on anything.
 4. **Then continue from `next-action`.**
@@ -281,39 +281,34 @@ you run **one background poll per room, all at once** — and that's fine: each 
 read cursor, so concurrent polls on *different* rooms never split each other's stream. The
 one-identity rule is per-room, not a cap of one poll.
 
-- Launch a labeled poll for **every** room you join, then end your turn — don't stop after the
-  first; the rest would go unwatched.
-- On wake from a given room's poll, handle that room and **relaunch only that room's poll** (the
-  others are still holding their own lines).
+- Launch a labeled poll for **every** room you join — once each, from its `connections:` line:
+  `cbc poll <room-id> --model <model> --as <repo>-orchestrator`. Then end your turn.
+- On wake from a given room's poll, handle that room. You don't need to hand-relaunch — the Stop
+  hook reconciles every connection at turn-end and resurrects any that died.
 - What `/cbc` still forbids holds per room: don't *also* hand-run `cbc_wait` on a room a poll is
   already watching.
 
 This is the per-room load called out under Teardown — one live poll per active room, which is
 why the pattern fits a handful of rooms, not dozens.
 
-### Polls crash — relaunch immediately, all of them
+### Polls die — the Stop hook reconciles them, you don't
 
-Background `cbc poll` shells die routinely (exit 1), **especially when several launch at once** —
-a concurrency hiccup. Claude Code's background shells are flaky; that's expected, not a fault in
-the bus. A poll dying is **never a room signal**: it does not mean the room closed, that you've
-gone deaf, or that the server is down. So when a poll fails:
+Background `cbc poll` shells die routinely (exit 1, compaction, the fire-many-at-once hiccup).
+That's expected, and **never a room signal**: it does not mean the room closed, that you've gone
+deaf, or that the server is down. You used to have to relaunch every dead poll by hand — and
+relaunching *additively*, without killing the old, is what produced **14 polls for 3 rooms**.
+That reflex is gone. The Stop hook now owns poll survival:
 
-- **Relaunch it on the spot — and if a batch died, relaunch every one that died.** Never end your
-  turn with a room unwatched because its shell crashed. This is the single most important reflex:
-  a dropped poll = rejoin/relaunch *now*, for all of them.
-- **Don't spiral into diagnosis.** A poll that exits 1 right after launch is almost always the
-  fire-many-at-once hiccup, not a real break. Relaunching a touch staggered (confirm one stays up,
-  then the rest) clears it; one quick `cbc_status` is enough to confirm the bus is alive if you
-  doubt it — then relaunch.
-- **Nothing is lost when a poll dies.** A relaunched poll re-attaches by your session identity, and
-  unread messages stay queued — it delivers whatever arrived while it was down. The rooms and the
-  map hold the truth, not the shell.
-- **On reconnect, confirm you're current.** You don't need to re-read the whole room — just check
-  the **latest message seq against the last one you handled**. Equal → you're current. Behind →
-  read *only* the gap (what landed while the poll was down) and reconcile it before you act. Never
+- **At every turn-end it reconciles each `connections:` entry** — relaunches one that died, kills a
+  stacked duplicate, leaves a healthy one alone. It is the **sole relaunch authority**: don't
+  relaunch a poll yourself "on the spot," and never fire a spare "to be safe." One poll per room.
+- **If it must relaunch, it blocks the turn and hands you the exact command** (the `--as`-scoped
+  line). Run that; don't improvise your own.
+- **Nothing is lost when a poll dies.** A relaunched poll re-attaches by identity and delivers
+  whatever queued while it was down. The rooms and the map hold the truth, not the shell.
+- **On reconnect, confirm you're current.** Check the **latest message seq against the last one you
+  handled**. Equal → current. Behind → read *only* the gap and reconcile it before you act. Never
   treat a poll outage as real quiet; a dead poll hides new messages.
-- **Only a *successful* poll reporting a terminal state** (`closed` / `archived`) means stop
-  watching that room. An **error exit** means relaunch.
 
 ## Keep your lines from filling — open big, extend by consensus
 
@@ -411,7 +406,22 @@ no-change-streak: 0       # consecutive no-change ticks at the current level
 agents:
   <repo>-worker-<feature>: <room-id> (handle <hash>) — <subject> — ✓
   <repo>-worker-<other>:   <room-id> (handle <hash>) — <subject> — quiet
+
+connections:
+  <repo>-worker-<feature>: <room-id> --as <repo>-orchestrator --model <model>
+  <repo>-worker-<other>:   <room-id> --as <repo>-orchestrator --model <model>
 ```
+
+The `connections:` block is the **authoritative poll set** — the single source of truth the Stop
+hook reconciles your live polls against. One line per room you must keep a poll on (every worker
+report line and every peer line). Format is parsed literally: `  <name>: <room-id> --as
+<repo>-orchestrator --model <model>`. The `--as <repo>-orchestrator` identity is the **same on
+every line** (you are one session) and is what scopes the reconcile to *your* polls so it never
+counts or kills a worker's poll of the same shared room. You **launch each poll from its
+connections line**: `cbc poll <room-id> --model <model> --as <repo>-orchestrator`. Add a
+connections entry the moment you join a room; remove it when that room closes. (The `agents:`
+registry below is the human-facing board with liveness markers; `connections:` is what the hook
+reads — keep an entry in `connections:` for every room you actually poll.)
 
 The `agents:` block is the **name registry** — the name is the key; the handle is a parenthetical
 cross-reference, never the label. Each entry ends with a **liveness marker** (`✓` / `quiet` /
@@ -808,8 +818,10 @@ regenerate, or re-derive anything, the peers hear about it first.*
 - **Killing a worker's poll while their work is still live.** Only tear down a *finished* room.
 - **Leaving finished-room shells running.** Close *and* stop the poll's background task.
 - **Reading a crashed poll as a room signal.** A `cbc poll` exiting 1 (often a launch-many-at-once
-  hiccup) doesn't mean the room closed or you've gone deaf — relaunch it, and every other poll that
-  died with it, immediately. Don't burn the turn diagnosing a flaky shell.
+  hiccup) doesn't mean the room closed or you've gone deaf. Don't burn the turn diagnosing it.
+- **Hand-relaunching polls, or firing a spare "to be safe."** The Stop hook is the sole relaunch
+  authority — it resurrects a dead poll and kills a stacked duplicate at turn-end. Relaunch only on
+  its explicit directive. Additive hand-relaunch is what stacked 14 polls onto 3 rooms.
 - **Re-grounding from memory after a compaction.** Re-read the map, then `cbc_recap` each room.
 - **Editing the tracked `.gitignore`** to hide the map. Use `.git/info/exclude` (untracked).
 - **Narrating an agent's status from its last-seen message without re-querying.** Silence on the
