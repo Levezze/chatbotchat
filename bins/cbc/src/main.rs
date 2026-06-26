@@ -751,9 +751,9 @@ async fn main() -> anyhow::Result<()> {
 /// `cbc poll <room>` match. Empty on any `ps` failure — fail-open, so a reconcile
 /// that cannot read the table does nothing rather than mis-counting toward a kill.
 fn matching_poll_pids(room: &str, identity: Option<&str>) -> Vec<u32> {
-    // `-ww` disables ps's column-width limit: without it the command column is
-    // truncated (~80 cols when stdout is a pipe, as it is here), which can drop a
-    // trailing `--as <identity>` token and make a live poll fail the identity
+    // The `ww` in `-axww` disables ps's column-width limit: without it the command
+    // column is truncated (~80 cols when stdout is a pipe, as it is here), which can
+    // drop a trailing `--as <identity>` token and make a live poll fail the identity
     // match → false-negative reconcile that blocks a healthy session.
     let output = match std::process::Command::new("ps")
         .args(["-axww", "-o", "pid=,command="])
