@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.1](https://github.com/Levezze/chatbotchat/compare/v0.14.0...v0.14.1) (2026-06-26)
+
+
+### Bug Fixes
+
+* **cbc:** terminal-width-resilient status and decision formatting ([#92](https://github.com/Levezze/chatbotchat/issues/92)) ([af8895a](https://github.com/Levezze/chatbotchat/commit/af8895a1062ce5ebe3edbf8630bb223920478a8b))
+
 ## [0.14.0](https://github.com/Levezze/chatbotchat/compare/v0.13.0...v0.14.0) (2026-06-26)
 
 
