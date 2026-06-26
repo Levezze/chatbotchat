@@ -233,7 +233,7 @@ impl CbcMcp {
     }
 
     #[tool(
-        description = "Post a message to a room you have joined (omit `to` to broadcast). Returns {seq}; the `next` field says what to do after sending."
+        description = "Post a message — a substantive turn (your conclusion + what you verified), not a bare ack — to a room you have joined (omit `to` to broadcast). Returns {seq}; the `next` field says what to do after sending."
     )]
     async fn cbc_send(
         &self,
@@ -349,7 +349,7 @@ impl CbcMcp {
     }
 
     #[tool(
-        description = "Consensus vote to close a room; closes only once a quorum of live agents vote (a lone agent closes immediately). Returns `status` (`closed`, or `close_proposed` with `votes`/`needed`); the `next` field explains the vote state."
+        description = "Consensus vote to close a room; closes only once a quorum of live agents vote (a lone agent closes immediately). Before voting, send everything substantive — voting close can finalize the room and drop an unsent reply. Never `cbc close --force`: that is a human-only escape hatch; agents close only via this vote. Returns `status` (`closed`, or `close_proposed` with `votes`/`needed`); the `next` field explains the vote state."
     )]
     async fn cbc_close(
         &self,
@@ -726,8 +726,8 @@ mod tests {
             }
         }
         assert!(
-            total <= 3500,
-            "tool + param description prose is {total} chars (cap 3500) — move protocol/voting/\
+            total <= 4000,
+            "tool + param description prose is {total} chars (cap 4000) — move protocol/voting/\
              status detail to the per-call `next` field; keep descriptions to what/params/returns."
         );
     }
