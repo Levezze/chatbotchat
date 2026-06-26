@@ -29,7 +29,7 @@ at the end.
 ```markdown
 ## Worker charter — read me first, every session
 **I am a worker. I implement one bounded piece; the orchestrator holds the map.**
-- **Never yield with a dead poll.** Before composing any reply: verify `cbc poll <room-id> --model <m>` is running; if not, relaunch it as a background task first. (Poll-first rule)
+- **The Stop hook keeps my poll alive — I never relaunch "to be safe."** At every turn-end it reconciles my declared poll: if it died, it blocks the turn and hands me the exact relaunch line; if I accidentally stacked two, it kills the extra. So I launch the poll once, and relaunch *only* when the hook tells me to. Spawning a spare poll is what caused 14 polls for 3 rooms — don't. (Poll reconcile)
 - I never propose or suggest closing my report room — the orchestrator owns closure. (Rule 1)
 - I push a status update to the orchestrator on every transition — stale orchestrator
   state is the main source of coordination failure. `phase ≠ last-synced-to-orchestrator`
@@ -73,6 +73,7 @@ A missing `.cbc/` dir is NOT a reason to fall back — create it. Use `/tmp/cbc-
 
 ## Status
 status: ACTIVE | DONE
+mode: worker
 next-action: <terse one-liner — what a resumed agent should do first>
 phase: <planning|implementing|PR-open|in-review|applying-fixes|merging|piece-merged|blocked|waiting-on-orchestrator|waiting-on-user>
 last-synced-to-orchestrator: <same phase labels — the phase the orchestrator was last told>
@@ -83,8 +84,9 @@ room-id: <bare room id>
 poll-label: <the label you gave the background poll task — used by /cbc-clean to TaskStop it>
 model: <your self-declared model name, e.g. claude-sonnet-4-6>
 state-file-path: <absolute path to this file — report this in your opening status>
-pulse-level: 0
-pulse-no-change: 0
+
+connections:
+  orchestrator: <room-id> --as <repo>-worker-<feature> --model <model>
 
 ## Current state
 <1–3 sentences: what's in flight, where we are, any blockers>
@@ -98,6 +100,21 @@ a push. Pushing updates `last-synced`. A freshly-compacted worker checks this fi
 detect drift and re-sync.
 
 **`status: ACTIVE|DONE` + `next-action` are the resume fields.** Set `status: ACTIVE` when you open the file; set `status: DONE` only when the room closes and the poll is stopped. Update `next-action` after every transition — it is what a fresh agent reads to re-enter without re-running setup. See "Resuming?" below.
+
+**`mode: worker` is what attaches you to the orchestrator.** It's the default for this skill — keep it `worker`. (A standalone session with no orchestrator is `mode: direct`; absent ⇒ `direct`.) The hooks read this field to decide worker-specific behavior.
+
+**The `connections:` block is the single source of truth the Stop hook reconciles your poll against.** One line per room you must hold open — for a worker that's exactly one, your orchestrator line. Format is load-bearing and parsed literally:
+
+```
+connections:
+  orchestrator: <room-id> --as <repo>-worker-<feature> --model <model>
+```
+
+- `<room-id>` — your bare report-line room id (same id as `room-id:` above).
+- `--as <repo>-worker-<feature>` — your **identity**, identical to your agent name/nickname. It scopes the reconcile to *your* poll so it never counts or kills the orchestrator's poll of this same shared room. Pick it once and keep it stable across compaction (it lives in this file, so it survives).
+- `--model <model>` — same model as `model:` above.
+
+You **launch the poll from this line**: `cbc poll <room-id> --model <model> --as <repo>-worker-<feature>` — the `--as` value byte-matches the declared one, so the hook always sees your poll as covered. Declare and launch with the same identity; never two different ones.
 
 **Report your state-file path in your opening status** so the orchestrator can record it in its
 map — that's how `/cbc-recap` later finds your file via `git worktree list`.
@@ -155,8 +172,7 @@ Read any file found. Run the **liveness guard** (matches CLAUDE.md's two-conditi
 2. `cbc_status <room-id>` returns anything other than `closed`/`archived`?
 
 **If both pass AND `status: ACTIVE`:** you are resuming a live session. Do NOT re-run "Open the line." Do NOT re-present status to the user. In order:
-1. **Relaunch the background poll** using the label from your state file's `poll-label` field — the poll shell died during compaction and must come back before you can receive anything.
-   A `SessionStart` hook (`cbc hook session-start`) injects a high-salience relaunch directive on compact/resume — **obey it as your first action**. Keep relaunching proactively too (defense in depth). The exact command is: `cbc poll <room-id> --model <model>` (both recorded in your state file).
+1. **Relaunch the background poll** — the poll shell died during compaction and must come back before you can receive anything. The `SessionStart` hook (`cbc hook session-start`) injects a high-salience relaunch directive on compact/resume — **obey it as your first action**; it already carries the exact command. If for any reason it didn't fire, launch from your `connections:` line: `cbc poll <room-id> --model <model> --as <repo>-worker-<feature>`. Launch it **once** — don't add a second "to be safe"; the Stop hook reconciles to exactly one.
 2. **Re-stamp your terminal title** — your tty may have changed after a Cursor reload. Re-run the name-file write from "Open the line" step 3 so your tab reverts to your agent name.
 3. **`cbc_recap` your room** to catch up on messages that arrived while the poll was dead — especially any holds or sequencing changes from the orchestrator. Do not act on in-flight state before you've read what you missed.
 4. **Then check `phase ≠ last-synced-to-orchestrator`** — if they differ, push the missed update now. This step is last, not first: pushing before you've read a hold violates the "Implementing through a hold" anti-pattern.
@@ -183,9 +199,11 @@ Read any file found. Run the **liveness guard** (matches CLAUDE.md's two-conditi
    orchestrator at once** — format: `<repo>-worker-<feature>: <room-id>`. You do not know the
    orchestrator's identity; the user relays. When the name travels with the id, the orchestrator
    records it immediately without having to ask.
-5. Start the background poll (`/cbc`) with a descriptive label (e.g.
-   `cbc poll <room-id> --model <model> # <repo>-worker-<feature>`). Record that label in your
-   state file's `poll-label` field — `/cbc-clean` needs it to TaskStop the shell.
+5. Start the background poll (`/cbc`) **once**, from your `connections:` line, with a descriptive
+   label: `cbc poll <room-id> --model <model> --as <repo>-worker-<feature> # <repo>-worker-<feature>`.
+   The `--as` identity must match your `connections:` block exactly. Record the label in your state
+   file's `poll-label` field — `/cbc-clean` needs it to TaskStop the shell. Do not launch a second
+   poll; the Stop hook keeps this one alive.
 6. **Keep the room open.** Don't vote close, don't drift off — you owe this line a running poll
    until the orchestrator proposes close.
 
@@ -337,19 +355,22 @@ the room** with your reasoning so it can re-decide. Never silently deviate from 
 instruction; silent deviation is exactly what causes the merge salad this whole setup exists to
 prevent.
 
-## Keep the line alive — reconnect on drop
+## Keep the line alive — the hook reconnects, you catch up
 
-Your background poll can die for any reason — a flaky shell, exit 1, a crash. That's expected,
-and it is **never** a signal that the room closed or the orchestrator left. If your poll drops:
+Your background poll can die for any reason — a flaky shell, exit 1, a crash, a compaction. That's
+expected, and it is **never** a signal that the room closed or the orchestrator left. You do **not**
+police it yourself: the Stop hook reconciles your poll at every turn-end (relaunches it if dead,
+kills a stray duplicate), and the SessionStart hook relaunches it after compaction. Your job on a
+drop is only to **catch up on what you missed**:
 
-- **Relaunch it immediately.** Don't leave your line to the orchestrator unwatched, and don't
-  spiral into diagnosing a flaky shell — just bring the poll back up. Use the same label you
-  recorded in your state file.
-- **On reconnect, confirm you didn't miss anything.** You don't need to re-read the whole room —
-  just check the **latest message seq against the last one you saw**. If it's moved on, read
-  *only* the messages you missed while the poll was down and reconcile them before you carry on —
-  the orchestrator may have sent a hold, a sequencing change, or your single-responsibility
-  assignment in that gap. A dead poll hides new messages; never assume the quiet was real.
+- **When the poll comes back, confirm you didn't miss anything.** You don't need to re-read the
+  whole room — just check the **latest message seq against the last one you saw**. If it's moved
+  on, read *only* the messages you missed while the poll was down and reconcile them before you
+  carry on — the orchestrator may have sent a hold, a sequencing change, or your
+  single-responsibility assignment in that gap. A dead poll hides new messages; never assume the
+  quiet was real.
+- **Never spawn a second poll to "make sure."** Two polls for one room is the stacking bug the
+  reconcile exists to prevent. Relaunch only on the hook's explicit directive.
 
 ## Closing the line
 
@@ -368,7 +389,7 @@ When your piece merges:
    file). A closed room's poll left looping burns CPU and tokens (`/cbc` Closing). Then clean up
    your state file (or let `/cbc-clean` do it).
 
-## Your poll is your heartbeat — never let it die
+## Your poll is your heartbeat — the hook keeps it beating
 
 The orchestrator watches every worker room using `cbc_status` to read the server-stamped
 `seconds_since_poll` for your participant entry. A healthy poll refreshes this every ~50 s.
@@ -377,10 +398,10 @@ escalates you to the user — even if you are mid-task and making progress. The 
 **cannot wake you** if your poll is dead (CBC is pull-only); the human has to reopen your
 chat manually. This is the exact failure mode that causes orchestrators to stall for hours.
 
-**Never end a turn with a dead poll.** Every wake: do the work → **re-arm the poll before
-yielding.** Run `cbc poll <room-id> --model <m>` as a background task before composing
-your reply so it is running the whole time you are writing. A finished sub-task is not
-permission to let the poll die — the room is still open.
+**You don't hand-police the poll — the Stop hook does.** It cannot end a turn with your declared
+poll dead: it blocks turn-end and forces the relaunch. So there is no "re-arm before yielding"
+ritual for you to remember and no spare poll to spawn — launch it once, obey the hook's relaunch
+directive when it fires, and otherwise leave it alone.
 
 **The soft cap is advisory and is NEVER a reason to stop polling.** The soft cap (default
 4 consecutive autonomous messages) fires `surface_to_user: true` exactly ONCE to suggest
@@ -400,53 +421,19 @@ nothing is checking" — that is the wrong model. Your poll *is* your check-in s
 only time you need to reply is when the orchestrator sends you an explicit status
 *message* — re-ground with `cbc_recap` and answer with your current state.
 
-## Worker pulse — idle-gap safety net
+## Poll survival — handled by the hooks, not a timer
 
-When the board goes quiet (no CBC messages arriving, no user turns), your poll keeps the server
-alive — but nothing ensures the poll *itself* is still running until an event fires. Arm a
-self-check timer after your poll is first launched:
+There is **no pulse timer to arm** anymore. The old self-check `sleep` shell died on the same
+compaction it was meant to survive and, lacking an identity scope, relaunched polls additively
+(the 14-polls-for-3-rooms bug). It's gone. Coverage now:
 
-```bash
-sleep 300; echo POLL_PULSE
-```
-
-Run with `run_in_background`. When you see `POLL_PULSE` in task output: check whether `cbc poll`
-is still alive (e.g. `pgrep -f "cbc poll <room-id>"`), relaunch it if dead, then re-arm the timer
-at the current backoff interval.
-
-### Backoff (same discipline as the orchestrator checkup)
-
-Write these two fields into your state file so they survive compaction:
-
-```
-pulse-level: 0          # 0=5m | 1=10m | 2=20m | dormant
-pulse-no-change: 0      # consecutive no-change ticks at the current level
-```
-
-| Level | Interval | No-change ticks to escalate |
-|-------|----------|-----------------------------|
-| 0     | 5 min    | 3                           |
-| 1     | 10 min   | 1                           |
-| 2     | 20 min   | 1                           |
-| dormant | — (no shell) | — |
-
-**No-change** = the poll was already alive when the tick fired; nothing needed to be relaunched.
-On no-change: increment streak; escalate level or go dormant when threshold is reached.
-On relaunch (poll was dead): reset streak to 0 and level to 0.
-
-**Going dormant:** do not relaunch the sleep shell. If a real event fires later (poll wakes you,
-user sends a message), restart from level 0.
-
-### What this covers and what it doesn't
-
-This timer closes the **idle-gap** — the poll dying while you sit quiet with no events or turns.
-It does **not** fix the "awake but deaf" case (you taking turns with a dead poll) — that is
-covered by the poll-first rule in the charter, which fires every turn regardless.
-
-**This timer dies on compact.** After a compact, the `SessionStart` hook handles relaunching
-the poll; re-arm this pulse timer at level 0 when you finish your first post-resume action and
-are about to go idle again. (The hook wakes you and handles the poll; the pulse timer is yours
-to re-arm.)
+- **Awake but deaf** (you take a turn with a dead poll) — the Stop hook reconciles at turn-end and
+  forces the relaunch. Fully covered.
+- **Compaction** (everything torn down) — the SessionStart hook relaunches. Fully covered.
+- **Idle crash** (poll dies while you sit with no turns and no messages) — the one residual gap: a
+  dead poll can't wake you, so nothing fires until the next user turn. This is bounded, accepted
+  for now, and is what the orchestrator heartbeat will close. If you *are* given a turn, the Stop
+  hook catches it immediately.
 
 ## Anti-patterns
 
@@ -473,8 +460,9 @@ to re-arm.)
   A single `me:` status line says it. The 11-row ASCII table is the canonical example of what
   not to do. Prose is for answering the user's questions — not for proactive status, not for
   recaps, not for "just thought I'd mention."
-- **Yielding to the user with a dead poll.** Check that `cbc poll` is running before you
-  compose your reply — not after. This is the poll-first rule and it fires every single turn.
+- **Spawning a spare poll, or relaunching when the hook didn't ask.** One poll per room. The Stop
+  hook resurrects a dead poll and kills a stacked duplicate — relaunch only on its explicit
+  directive. A second poll "to be safe" is the stacking bug, not safety.
 - **Asking another agent code questions *through* the orchestrator line.** Open a reconcile room
   (`/cbc-reconcile`); the orchestrator relays the id, it does not carry your implementation detail.
 - **Going silent while touching a shared surface.** That's the one moment you *must* speak up.

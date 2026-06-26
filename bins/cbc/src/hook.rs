@@ -1163,6 +1163,34 @@ connections:
         assert!(parse_connections("status: ACTIVE\nno block here\n").is_empty());
     }
 
+    // ── declared_connections (the fallback chain B2 reconciles against) ─────────
+
+    /// Pins the worker SKILL.md template: a `mode: worker` file with the documented
+    /// `connections:` block must resolve to one identity-scoped connection.  If the
+    /// skill's block format drifts from the parser, this fails.
+    #[test]
+    fn declared_connections_worker_template_is_identity_scoped() {
+        let content = "\
+## Status
+status: ACTIVE
+mode: worker
+room-id: report-engine-recompute-20260626-1430
+model: claude-sonnet-4-6
+
+connections:
+  orchestrator: report-engine-recompute-20260626-1430 --as engine-worker-recompute --model claude-sonnet-4-6
+";
+        let conns = declared_connections(content);
+        assert_eq!(conns.len(), 1);
+        assert_eq!(conns[0].room_id, "report-engine-recompute-20260626-1430");
+        assert_eq!(
+            conns[0].identity.as_deref(),
+            Some("engine-worker-recompute"),
+            "the --as identity must reach the reconcile so it is session-scoped"
+        );
+        assert_eq!(conns[0].model, "claude-sonnet-4-6");
+    }
+
     // ── parse_worker_mode ─────────────────────────────────────────────────────
 
     #[test]
