@@ -340,6 +340,13 @@ enum HookEvent {
     /// high-salience relaunch directive to stdout (injected as a system
     /// reminder before the model's first turn).  Silent on all other sources.
     SessionStart,
+    /// Handle a `Stop` event — the per-turn poll reconcile (B2).
+    ///
+    /// Scans `.cbc/` for declared connections and converges each to exactly one
+    /// identity-scoped `cbc poll`: kills surplus polls itself, and blocks
+    /// turn-end with a relaunch directive when a declared room has none (and the
+    /// loop guard `stop_hook_active` is clear).  Replaces the worker pulse-timer.
+    Stop,
 }
 
 #[tokio::main]
@@ -699,21 +706,107 @@ async fn main() -> anyhow::Result<()> {
                 hook::run_session_start(
                     &mut std::io::stdin(),
                     &mut std::io::stdout(),
-                    &mut |room_id| {
-                        // Silently kill any stale cbc poll process for this room.
-                        // pkill exits 1 when nothing matches — that's fine.
-                        std::process::Command::new("pkill")
-                            .args(["-f", &format!("cbc poll {}", room_id)])
-                            .status()
-                            .ok();
-                    },
+                    // Identity-scoped per-pid kill (B3): on compaction everything is
+                    // relaunched, so reap every poll of THIS session's identity for
+                    // the room — never a peer's poll of the same shared room, which
+                    // the old unscoped `pkill -f "cbc poll <room>"` could hit.
+                    &mut |room, identity| kill_all_polls(room, identity),
                 )
                 .context("running SessionStart hook handler")?;
+            }
+            HookEvent::Stop => {
+                hook::run_stop(
+                    &mut std::io::stdin(),
+                    &mut std::io::stdout(),
+                    &mut |room, identity| count_polls(room, identity),
+                    // launched-this-turn is always `false`: by the time Stop fires
+                    // (after the tool-result round-trip) a still-alive poll is already
+                    // process-visible, so a genuine launch shows up in the count. A
+                    // poll that launched AND exited this turn (delivered a message)
+                    // leaves the room deaf — blocking and relaunching (idempotently)
+                    // is correct there, not skipping.
+                    &mut |_room, _identity| false,
+                    &mut |order: &hook::KillOrder| {
+                        kill_surplus_polls(&order.room_id, order.identity.as_deref())
+                    },
+                )
+                .context("running Stop hook handler")?;
             }
         },
     }
 
     Ok(())
+}
+
+// ── Hook reconcile: live poll-process matching (B2/B3) ──────────────────────────
+//
+// The Stop and SessionStart hooks reconcile declared connections against running
+// `cbc poll` processes. Every match is identity-scoped (`--as <identity>`) so a
+// count or kill can only ever see THIS session's polls, never a peer's poll of the
+// same shared two-party room (the B0.5(b) friendly-fire trap). We read the process
+// table with `ps` and filter each line through `hook::poll_matches`, which also
+// excludes the `/bin/zsh -c` wrapper that would otherwise double-count (trap a).
+
+/// Pids of every live process whose command line is an identity-scoped
+/// `cbc poll <room>` match. Empty on any `ps` failure — fail-open, so a reconcile
+/// that cannot read the table does nothing rather than mis-counting toward a kill.
+fn matching_poll_pids(room: &str, identity: Option<&str>) -> Vec<u32> {
+    let output = match std::process::Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut pids = Vec::new();
+    for line in text.lines() {
+        let line = line.trim_start();
+        let Some((pid_str, cmd)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        let Ok(pid) = pid_str.parse::<u32>() else {
+            continue;
+        };
+        if hook::poll_matches(cmd.trim_start(), room, identity) {
+            pids.push(pid);
+        }
+    }
+    pids
+}
+
+/// Count live identity-scoped polls for `{room, identity}` (Stop reconcile seam).
+fn count_polls(room: &str, identity: Option<&str>) -> usize {
+    matching_poll_pids(room, identity).len()
+}
+
+/// `SIGTERM` a pid. Best-effort: a poll that already exited is not an error.
+fn kill_pid(pid: u32) {
+    std::process::Command::new("kill")
+        .arg(pid.to_string())
+        .status()
+        .ok();
+}
+
+/// Reduce identity-scoped polls for `{room, identity}` to at most one by killing
+/// the surplus per-pid (Stop reconcile, `n > 1`). Acts on the live table, so it
+/// converges to exactly one even if the count drifted since planning. Per-pid and
+/// identity-scoped — never `pkill -f`, so it can only reap this session's polls.
+fn kill_surplus_polls(room: &str, identity: Option<&str>) {
+    let pids = matching_poll_pids(room, identity);
+    for pid in pids.into_iter().skip(1) {
+        kill_pid(pid);
+    }
+}
+
+/// Kill ALL identity-scoped polls for `{room, identity}` (SessionStart/compaction:
+/// every poll is about to be relaunched, so leave none behind). Identity-scoped, so
+/// a peer's poll of the same shared room is untouched — the B3 fix for the old
+/// unscoped `pkill -f "cbc poll <room>"`.
+fn kill_all_polls(room: &str, identity: Option<&str>) {
+    for pid in matching_poll_pids(room, identity) {
+        kill_pid(pid);
+    }
 }
 
 /// CLI analog of the MCP `next` field: the re-ground discipline a waking agent

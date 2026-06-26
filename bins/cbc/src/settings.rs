@@ -154,19 +154,22 @@ pub fn print_manual_snippet() {
     println!("  {{ \"permissions\": {{ \"allow\": [\"{CBC_ALLOW_RULE}\"] }} }}");
 }
 
-// ── install-hooks (SessionStart hook) ────────────────────────────────────────
+// ── install-hooks (SessionStart + Stop hooks) ────────────────────────────────
 
 /// The `cbc hook session-start` command string registered in `hooks.SessionStart`.
 pub const CBC_SESSION_START_COMMAND: &str = "cbc hook session-start";
 
-/// Ensure `settings["hooks"]["SessionStart"]` contains a wrapper object with a
-/// `hooks` array entry of `{"type":"command","command":"cbc hook session-start"}`.
+/// The `cbc hook stop` command string registered in `hooks.Stop` — the per-turn
+/// poll reconcile (B2). Clap kebab-cases the `Stop` subcommand to `stop`.
+pub const CBC_STOP_COMMAND: &str = "cbc hook stop";
+
+/// Ensure `settings["hooks"][event]` contains a wrapper object whose inner `hooks`
+/// array has an entry of `{"type":"command","command":<command>}`.
 ///
-/// Idempotent: if any existing wrapper's inner `hooks` array already has an
-/// entry with that `command`, returns `Ok(false)` without modifying `settings`.
-/// Errors rather than clobbering when `hooks` or `SessionStart` has the wrong
-/// JSON type.
-pub fn ensure_session_start_hook(settings: &mut Value) -> anyhow::Result<bool> {
+/// Idempotent: if any existing wrapper's inner `hooks` array already has an entry
+/// with that `command`, returns `Ok(false)` without modifying `settings`. Errors
+/// rather than clobbering when `hooks` or `hooks[event]` has the wrong JSON type.
+fn ensure_command_hook(settings: &mut Value, event: &str, command: &str) -> anyhow::Result<bool> {
     use serde_json::json;
 
     let root = settings
@@ -180,39 +183,50 @@ pub fn ensure_session_start_hook(settings: &mut Value) -> anyhow::Result<bool> {
         .as_object_mut()
         .context("`hooks` is not a JSON object; refusing to overwrite it")?;
 
-    let session_start = hooks_map
-        .entry("SessionStart")
+    let event_val = hooks_map
+        .entry(event)
         .or_insert_with(|| Value::Array(Vec::new()));
-    let session_start_arr = session_start
-        .as_array_mut()
-        .context("`hooks.SessionStart` is not a JSON array; refusing to overwrite it")?;
+    let event_arr = event_val.as_array_mut().with_context(|| {
+        format!("`hooks.{event}` is not a JSON array; refusing to overwrite it")
+    })?;
 
     // Already present? Check every wrapper's inner hooks array.
-    for wrapper in session_start_arr.iter() {
+    for wrapper in event_arr.iter() {
         if let Some(inner) = wrapper.get("hooks").and_then(|h| h.as_array()) {
             for entry in inner {
-                if entry.get("command").and_then(|c| c.as_str()) == Some(CBC_SESSION_START_COMMAND)
-                {
+                if entry.get("command").and_then(|c| c.as_str()) == Some(command) {
                     return Ok(false);
                 }
             }
         }
     }
 
-    session_start_arr.push(json!({
+    event_arr.push(json!({
         "hooks": [
             {
                 "type": "command",
-                "command": CBC_SESSION_START_COMMAND
+                "command": command
             }
         ]
     }));
     Ok(true)
 }
 
-/// Read the settings at `path` (treating a missing file as empty), merge in the
-/// CBC `SessionStart` hook entry, and — only if that changed anything — back the
-/// original up to `<path>.bak` and rewrite it as 2-space-pretty JSON.
+/// Ensure the CBC `SessionStart` hook is registered. See [`ensure_command_hook`].
+pub fn ensure_session_start_hook(settings: &mut Value) -> anyhow::Result<bool> {
+    ensure_command_hook(settings, "SessionStart", CBC_SESSION_START_COMMAND)
+}
+
+/// Ensure the CBC `Stop` hook (per-turn poll reconcile) is registered.
+pub fn ensure_stop_hook(settings: &mut Value) -> anyhow::Result<bool> {
+    ensure_command_hook(settings, "Stop", CBC_STOP_COMMAND)
+}
+
+/// Read the settings at `path` (treating a missing file as empty), merge in BOTH
+/// CBC hook entries (`SessionStart` + `Stop`), and — only if that changed anything
+/// — back the original up to `<path>.bak` and rewrite it as 2-space-pretty JSON.
+/// Installing both here means an existing SessionStart-only install gains the Stop
+/// reconcile on the next `install-hooks` run.
 pub fn apply_hook_rule(path: &Path) -> anyhow::Result<Outcome> {
     let existed = path.exists();
     let original = if existed {
@@ -228,7 +242,11 @@ pub fn apply_hook_rule(path: &Path) -> anyhow::Result<Outcome> {
             .with_context(|| format!("parsing {} as JSON", path.display()))?
     };
 
-    let changed = ensure_session_start_hook(&mut settings)?;
+    // Apply both as separate statements (not short-circuited) so a SessionStart-only
+    // install still gets Stop added; `changed` is true if either was written.
+    let changed_session_start = ensure_session_start_hook(&mut settings)?;
+    let changed_stop = ensure_stop_hook(&mut settings)?;
+    let changed = changed_session_start || changed_stop;
     if !changed {
         return Ok(Outcome::AlreadyPresent);
     }
@@ -258,20 +276,21 @@ pub fn print_hook_outcome(path: &Path, outcome: &Outcome) {
     match outcome {
         Outcome::Created | Outcome::Added => {
             println!(
-                "Registered the CBC SessionStart hook in Claude Code settings:\n  {}",
+                "Registered the CBC SessionStart + Stop hooks in Claude Code settings:\n  {}",
                 path.display()
             );
             if matches!(outcome, Outcome::Added) {
                 println!("(backed up the previous file to {}.bak)", path.display());
             }
             println!(
-                "Restart any open Claude Code session to pick it up.\n\
-                 The hook fires on compact/resume and relaunches your CBC polls automatically."
+                "Restart any open Claude Code session to pick them up.\n\
+                 SessionStart relaunches your CBC polls on compact/resume; Stop reconciles \
+                 them to exactly one per declared room at every turn-end."
             );
         }
         Outcome::AlreadyPresent => {
             println!(
-                "CBC SessionStart hook already registered in {}; nothing to do.",
+                "CBC SessionStart + Stop hooks already registered in {}; nothing to do.",
                 path.display()
             );
         }
@@ -282,7 +301,7 @@ pub fn print_hook_outcome(path: &Path, outcome: &Outcome) {
 pub fn print_manual_hook_snippet() {
     println!("Add this to your Claude Code settings (~/.claude/settings.json) by hand:");
     println!(
-        r#"  {{"hooks": {{"SessionStart": [{{"hooks": [{{"type":"command","command":"{CBC_SESSION_START_COMMAND}"}}]}}]}}}}"#
+        r#"  {{"hooks": {{"SessionStart": [{{"hooks": [{{"type":"command","command":"{CBC_SESSION_START_COMMAND}"}}]}}], "Stop": [{{"hooks": [{{"type":"command","command":"{CBC_STOP_COMMAND}"}}]}}]}}}}"#
     );
 }
 
@@ -590,5 +609,109 @@ mod tests {
         apply_hook_rule(&path).unwrap(); // Created
         let outcome = apply_hook_rule(&path).unwrap();
         assert_eq!(outcome, Outcome::AlreadyPresent);
+    }
+
+    // ── ensure_stop_hook ──────────────────────────────────────────────────────
+
+    #[test]
+    fn stop_hook_adds_entry_to_empty_settings() {
+        let mut v = json!({});
+        let changed = ensure_stop_hook(&mut v).unwrap();
+        assert!(changed, "empty settings must be modified");
+        assert_eq!(
+            v["hooks"]["Stop"][0]["hooks"][0]["command"],
+            json!(CBC_STOP_COMMAND)
+        );
+        assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["type"], json!("command"));
+    }
+
+    #[test]
+    fn stop_hook_is_idempotent_when_already_present() {
+        let mut v = json!({
+            "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": CBC_STOP_COMMAND }] }] }
+        });
+        let changed = ensure_stop_hook(&mut v).unwrap();
+        assert!(!changed, "re-adding must report no change");
+        assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn stop_hook_coexists_with_session_start_and_preserves_it() {
+        let mut v = json!({});
+        ensure_session_start_hook(&mut v).unwrap();
+        ensure_stop_hook(&mut v).unwrap();
+        assert_eq!(
+            v["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+            json!(CBC_SESSION_START_COMMAND),
+            "SessionStart hook survives adding Stop"
+        );
+        assert_eq!(
+            v["hooks"]["Stop"][0]["hooks"][0]["command"],
+            json!(CBC_STOP_COMMAND)
+        );
+    }
+
+    #[test]
+    fn stop_hook_errors_on_wrong_typed_stop_array() {
+        let mut v = json!({ "hooks": { "Stop": "not-an-array" } });
+        assert!(
+            ensure_stop_hook(&mut v).is_err(),
+            "non-array Stop must error, not be overwritten"
+        );
+    }
+
+    #[test]
+    fn apply_hook_installs_both_session_start_and_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".claude").join("settings.json");
+        apply_hook_rule(&path).unwrap();
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            written["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+            json!(CBC_SESSION_START_COMMAND)
+        );
+        assert_eq!(
+            written["hooks"]["Stop"][0]["hooks"][0]["command"],
+            json!(CBC_STOP_COMMAND)
+        );
+    }
+
+    #[test]
+    fn apply_hook_upgrades_a_session_start_only_install_by_adding_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        // Pre-existing install with ONLY the SessionStart hook (the old shape).
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "hooks": {
+                    "SessionStart": [
+                        { "hooks": [{ "type": "command", "command": CBC_SESSION_START_COMMAND }] }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let outcome = apply_hook_rule(&path).unwrap();
+        assert_eq!(
+            outcome,
+            Outcome::Added,
+            "adding Stop to a SessionStart-only install is a change"
+        );
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            written["hooks"]["Stop"][0]["hooks"][0]["command"],
+            json!(CBC_STOP_COMMAND),
+            "the Stop hook must be added"
+        );
+        assert_eq!(
+            written["hooks"]["SessionStart"].as_array().unwrap().len(),
+            1,
+            "the existing SessionStart hook must not be duplicated"
+        );
     }
 }
