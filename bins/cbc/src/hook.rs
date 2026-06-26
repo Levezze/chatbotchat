@@ -290,8 +290,10 @@ pub enum ReconcileAction {
     /// Exactly one healthy poll — leave it alone (never thrash).
     Ok,
     /// More than one — the hook kills the surplus itself (identity-scoped, so
-    /// safe), leaving one.  `surplus` = how many to kill.
-    KillExtras { surplus: usize },
+    /// safe), leaving one. The kill re-derives the exact pids to reap from the
+    /// live process table at kill time (see `kill_surplus_polls`), so no count
+    /// is carried here — a planned count would only go stale before the kill.
+    KillExtras,
     /// Zero polls and none launched this turn — block turn-end and force the
     /// model to relaunch (only a model-launched poll can wake the session).
     BlockAndRelaunch,
@@ -306,7 +308,7 @@ pub fn reconcile_action(n: usize, launched_this_turn: bool) -> ReconcileAction {
         1 => ReconcileAction::Ok,
         0 if launched_this_turn => ReconcileAction::Ok,
         0 => ReconcileAction::BlockAndRelaunch,
-        more => ReconcileAction::KillExtras { surplus: more - 1 },
+        _ => ReconcileAction::KillExtras,
     }
 }
 
@@ -398,8 +400,6 @@ pub fn poll_matches(cmdline: &str, room: &str, identity: Option<&str>) -> bool {
 pub struct KillOrder {
     pub room_id: String,
     pub identity: Option<String>,
-    /// How many surplus polls to kill (leaving exactly one).
-    pub surplus: usize,
 }
 
 /// The reconcile plan for one Stop event: surplus kills to perform now, and the
@@ -424,10 +424,9 @@ pub fn plan_stop(
         let n = count(&c.room_id, id);
         match reconcile_action(n, launched(&c.room_id, id)) {
             ReconcileAction::Ok => {}
-            ReconcileAction::KillExtras { surplus } => plan.kills.push(KillOrder {
+            ReconcileAction::KillExtras => plan.kills.push(KillOrder {
                 room_id: c.room_id.clone(),
                 identity: c.identity.clone(),
-                surplus,
             }),
             ReconcileAction::BlockAndRelaunch => {
                 plan.relaunch.push(poll_command(&c.room_id, &c.model, id))
@@ -479,6 +478,20 @@ pub fn scan_active(cbc_dir: &Path) -> Vec<ActiveEntry> {
 /// across all of them, in deterministic order.  Any active `.md` whose content
 /// yields connections (new `connections:` block or legacy `room-id`/`agents:`)
 /// contributes; non-active or non-CBC files contribute nothing.
+///
+/// RESIDUAL (cross-session): this reconciles EVERY active file in `<cwd>/.cbc`,
+/// not just the calling session's. The skills mandate a per-worktree `.cbc`
+/// (one session ↔ one dir), so normally these are the session's own files. The
+/// residual fires only when two sessions share one worktree's `.cbc`, or a stale
+/// `ACTIVE` file from a prior session lingers (the CLAUDE.md liveness guard is
+/// what clears those): session A's Stop could then relaunch a poll under file
+/// B's `--as` identity. It is bounded — identity-scoping means the relaunch is
+/// correct whenever A legitimately owns that identity, and the `stop_hook_active`
+/// loop guard caps it at one block — and is the same friendly-fire class as the
+/// legacy room-only fallback in [`poll_matches`]. The clean fix (deferred: it
+/// needs file + hook plumbing and migration of existing files) is to tag each
+/// state file with the owning `session_id` and filter here to the session_id the
+/// Stop payload carries.
 pub fn scan_declared(cbc_dir: &Path) -> Vec<DeclaredConnection> {
     let mut out = Vec::new();
     let iter = match std::fs::read_dir(cbc_dir) {
@@ -505,26 +518,29 @@ pub fn scan_declared(cbc_dir: &Path) -> Vec<DeclaredConnection> {
 }
 
 /// The Stop-hook block JSON that forces the model to relaunch dead polls.
-/// `additionalContext` carries the SOLE-relaunch-authority directive plus the
-/// exact commands, so the model relaunches here and ONLY here (a poll exit is
-/// never an independent relaunch trigger).
+///
+/// The Stop event's blocking contract is a TOP-LEVEL `{"decision":"block",
+/// "reason":<text>}` — `reason` is the field fed back to the model when it is
+/// blocked from ending its turn, so the SOLE-relaunch-authority directive plus
+/// the exact commands ride there (the model relaunches here and ONLY here; a
+/// poll exit is never an independent relaunch trigger). `hookSpecificOutput.
+/// additionalContext` is the NON-blocking continue path and is deliberately not
+/// used here: nesting `decision` under it (the prior shape) left the block inert
+/// because the harness never read it. See code.claude.com/docs/en/hooks.md.
 fn stop_block_json(relaunch: &[String]) -> String {
-    let mut ctx = String::from(
+    let mut reason = String::from(
         "⚠ CBC RECONCILE — one or more declared rooms have NO live poll and none was launched \
          this turn. You are deaf on those rooms. Before yielding, relaunch each as a background \
          task (run_in_background) — this hook is the SOLE relaunch authority; do NOT relaunch \
          polls on your own from a poll-exit notification:",
     );
     for cmd in relaunch {
-        ctx.push_str("\n  ");
-        ctx.push_str(cmd);
+        reason.push_str("\n  ");
+        reason.push_str(cmd);
     }
     let payload = serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": "Stop",
-            "decision": "block",
-            "additionalContext": ctx,
-        }
+        "decision": "block",
+        "reason": reason,
     });
     payload.to_string()
 }
@@ -752,14 +768,11 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_surplus_kills_all_but_one() {
-        assert_eq!(
-            reconcile_action(5, false),
-            ReconcileAction::KillExtras { surplus: 4 }
-        );
+    fn reconcile_more_than_one_is_kill_extras() {
+        assert_eq!(reconcile_action(5, false), ReconcileAction::KillExtras);
         assert_eq!(
             reconcile_action(2, true),
-            ReconcileAction::KillExtras { surplus: 1 },
+            ReconcileAction::KillExtras,
             "launched-this-turn is irrelevant when polls already exist"
         );
     }
@@ -897,13 +910,22 @@ mod tests {
         .unwrap();
 
         let text = String::from_utf8(out).unwrap();
-        assert!(
-            text.contains("\"decision\":\"block\""),
-            "must block; got:\n{text}"
+        // The Stop harness reads `decision`/`reason` at the TOP LEVEL of the hook
+        // JSON — a `decision` nested under `hookSpecificOutput` is ignored and the
+        // turn is NOT blocked. Assert the parsed shape, not a substring, so a
+        // regression back to the nested form is caught.
+        let v: serde_json::Value =
+            serde_json::from_str(&text).expect("Stop block output must be valid JSON");
+        assert_eq!(
+            v.get("decision").and_then(|d| d.as_str()),
+            Some("block"),
+            "`decision: \"block\"` must be TOP-LEVEL (where Stop reads it), not nested; got:\n{text}"
         );
+        let reason = v.get("reason").and_then(|r| r.as_str()).unwrap_or("");
         assert!(
-            text.contains("cbc poll room-a-20260625-1000 --model opus --as api"),
-            "must inject relaunch cmd; got:\n{text}"
+            reason.contains("cbc poll room-a-20260625-1000 --model opus --as api"),
+            "the relaunch command must ride in the top-level `reason` (the field fed back to the \
+             model on a Stop block); got reason:\n{reason}"
         );
         assert!(kills.is_empty());
     }
@@ -963,7 +985,7 @@ mod tests {
 
         assert!(out.is_empty(), "surplus-only must not block");
         assert_eq!(kills.len(), 1);
-        assert_eq!(kills[0].surplus, 2);
+        assert_eq!(kills[0].room_id, "room-a-20260625-1000");
         assert_eq!(kills[0].identity.as_deref(), Some("api"));
     }
 
@@ -1024,7 +1046,6 @@ mod tests {
             vec![KillOrder {
                 room_id: "room-20260625-1000".to_string(),
                 identity: Some("me".to_string()),
-                surplus: 3,
             }]
         );
     }
@@ -1057,7 +1078,7 @@ mod tests {
         assert!(plan.relaunch[0].contains("room-a-20260625-1000"));
         assert_eq!(plan.kills.len(), 1);
         assert_eq!(plan.kills[0].room_id, "room-c-20260625-1000");
-        assert_eq!(plan.kills[0].surplus, 1);
+        assert_eq!(plan.kills[0].identity.as_deref(), Some("me"));
     }
 
     // ── declared_connections (unified) ────────────────────────────────────────

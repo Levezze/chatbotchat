@@ -751,16 +751,28 @@ async fn main() -> anyhow::Result<()> {
 /// `cbc poll <room>` match. Empty on any `ps` failure — fail-open, so a reconcile
 /// that cannot read the table does nothing rather than mis-counting toward a kill.
 fn matching_poll_pids(room: &str, identity: Option<&str>) -> Vec<u32> {
+    // `-ww` disables ps's column-width limit: without it the command column is
+    // truncated (~80 cols when stdout is a pipe, as it is here), which can drop a
+    // trailing `--as <identity>` token and make a live poll fail the identity
+    // match → false-negative reconcile that blocks a healthy session.
     let output = match std::process::Command::new("ps")
-        .args(["-axo", "pid=,command="])
+        .args(["-axww", "-o", "pid=,command="])
         .output()
     {
         Ok(o) => o,
         Err(_) => return Vec::new(),
     };
     let text = String::from_utf8_lossy(&output.stdout);
+    select_poll_pids(&text, room, identity)
+}
+
+/// Pure parse+match over `ps -o pid=,command=` output — the testable core of
+/// [`matching_poll_pids`], split out so the line parse (incl. truncation and the
+/// zsh-wrapper exclusion) can be exercised against canned `ps` text without
+/// spawning real processes.
+fn select_poll_pids(ps_output: &str, room: &str, identity: Option<&str>) -> Vec<u32> {
     let mut pids = Vec::new();
-    for line in text.lines() {
+    for line in ps_output.lines() {
         let line = line.trim_start();
         let Some((pid_str, cmd)) = line.split_once(char::is_whitespace) else {
             continue;
@@ -1416,6 +1428,43 @@ mod tests {
             effective_max_join_wait(SAFE_JOIN_WAIT_CAP_SECS),
             SAFE_JOIN_WAIT_CAP_SECS
         );
+    }
+
+    #[test]
+    fn select_poll_pids_matches_identity_excludes_wrapper_and_peers() {
+        // Canned `ps -o pid=,command=` output. The first line is the real poll
+        // (>80 cols, so the `-ww` no-truncation fix matters in production); the
+        // others must all be excluded:
+        //   - the `/bin/zsh -c` background-task wrapper (argv0 is zsh, not cbc),
+        //   - a peer's poll of the SAME room under a different `--as` identity,
+        //   - an unrelated process.
+        let ps = "  501 cbc poll report-engine-orch-20260624-0502 --model claude-sonnet-4-6 --as engine-worker-recompute\n\
+                   \x20 777 /bin/zsh -c cbc poll report-engine-orch-20260624-0502 --model claude-sonnet-4-6 --as engine-worker-recompute\n\
+                   \x20 888 cbc poll report-engine-orch-20260624-0502 --model claude-sonnet-4-6 --as some-other-worker\n\
+                   \x20 999 /usr/bin/vim notes.md\n";
+
+        // Identity-scoped: only this session's poll (501) is selected.
+        assert_eq!(
+            select_poll_pids(
+                ps,
+                "report-engine-orch-20260624-0502",
+                Some("engine-worker-recompute")
+            ),
+            vec![501],
+            "identity scope must pick only the matching --as, never the zsh wrapper or a peer"
+        );
+
+        // Legacy room-only (identity None): both real polls match (501, 888) but
+        // never the wrapper — the documented room-wide fallback for un-migrated
+        // files.
+        assert_eq!(
+            select_poll_pids(ps, "report-engine-orch-20260624-0502", None),
+            vec![501, 888],
+            "room-only fallback matches every real poll of the room, wrapper excluded"
+        );
+
+        // A room with no live poll selects nothing.
+        assert!(select_poll_pids(ps, "no-such-room-20260101-0000", None).is_empty());
     }
 
     // --- poll_decision: the pure control flow behind `cbc poll` ---
