@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/Levezze/chatbotchat/compare/v0.13.0...v0.14.0) (2026-06-26)
+
+
+### Features
+
+* **cbc:** poll reconcile — survive death/compaction, stop stacking, identity-scoped (B1–B3) ([#89](https://github.com/Levezze/chatbotchat/issues/89)) ([b564a99](https://github.com/Levezze/chatbotchat/commit/b564a999d3977e27eece692228a74341181672d0))
+
 ## [0.13.0](https://github.com/Levezze/chatbotchat/compare/v0.12.0...v0.13.0) (2026-06-26)
 
 
