@@ -714,9 +714,11 @@ mod tests {
     fn cbc_tool_prose_within_budget() {
         let tools = CbcMcp::tool_router().list_all();
         let mut total = 0usize;
+        let mut tools_with_params = 0usize;
         for t in &tools {
             total += t.description.as_deref().map_or(0, str::len);
             if let Some(props) = t.input_schema.get("properties").and_then(|v| v.as_object()) {
+                tools_with_params += 1;
                 for schema in props.values() {
                     total += schema
                         .get("description")
@@ -725,6 +727,15 @@ mod tests {
                 }
             }
         }
+        // Guard the guard: if the schema shape ever changes so `properties` stops
+        // resolving, the param-prose sum would silently collapse to 0 and this
+        // budget would quietly weaken to descriptions-only. Most cbc tools take
+        // params (room_id, model, …), so at least one must expose `properties`.
+        assert!(
+            tools_with_params > 0,
+            "no tool exposed an input_schema `properties` object — the param-prose \
+             budget has silently degraded; the schema shape likely changed."
+        );
         assert!(
             total <= 4000,
             "tool + param description prose is {total} chars (cap 4000) — move protocol/voting/\

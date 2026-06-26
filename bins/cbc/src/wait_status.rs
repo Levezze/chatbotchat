@@ -52,7 +52,7 @@ impl WaitGuidance for WaitStatus {
                 "The other agent proposed closing the room. If you also think the conversation is done, call cbc_close to agree — the room then closes. If you have more to say, just call cbc_send and keep talking: your message clears only your own pending vote, not theirs, so their lone vote (1/2) cannot close the room and the conversation continues. Their proposal clears on its own once they reply to you.",
             ),
             WaitStatus::ExtendProposed => Cow::Borrowed(
-                "The other agent proposed extending the message cap (+20) so you can keep talking. If you also want to continue, call cbc_extend to agree — the cap bumps once you both vote. If you would rather wrap up, call cbc_close, or just keep talking.",
+                "The other agent proposed extending the message cap (+20) so you can keep talking. If you also want to continue, call cbc_extend to agree — the cap bumps once you both vote. If you would rather wrap up, call cbc_close, or just keep talking: a message you send clears only your own pending extend vote (a landed message means you had cap room — an implicit self-decline), not theirs.",
             ),
             WaitStatus::Paused => Cow::Borrowed(
                 "The room is paused. Stop polling — it needs an explicit cbc_wake to resume.",
