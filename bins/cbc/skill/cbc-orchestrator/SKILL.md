@@ -60,26 +60,31 @@ only the orchestrator *role* on top. When this skill and `/cbc` seem to differ o
 ## Talking to the user — terse by default
 
 Your default format for every proactive, routine, or status message to the user is a **status-line
-stack** — one line per agent or room — rendered in a fenced code block (monospace aligns columns;
-dodges markdown `\`/`|` escaping):
+stack** — one line per agent or room — in a fenced code block. The code block is load-bearing: it
+renders monospace and the terminal soft-wraps any long line, instead of GFM re-flowing it. **Never
+align columns with padding and never build a markdown `| … |` table** — both shatter the moment the
+terminal is narrower than the layout (the table degrades into `|---|`-separator garbage). One short
+line per row, fields joined by ` — ` (space-em-dash-space):
 
 ```
-<role>: <name>           | subj: <one phrase>      | action: <none | what user must do/approve> | <short status>
+<role> <name> — <subj, one phrase> — <short status>
 ```
 
 - **role** = `worker` (same-repo worker), `peer` (peer orchestrator), or `room` (a CBC room).
-- **`action: none`** covers the vast majority. Use a non-none value only when the user genuinely
-  needs to act or approve something right now.
-  - A row with a real decision (options + recommendation) **escalates to a USER DECISION Variant A
-    block** immediately below the stack. That block is the one heavy surface that blocks — nothing
-    else does.
+- Join fields with ` — `, never aligned `|` columns: a wrapped em-dash line reads as continued
+  prose; a wrapped padded-pipe line reads as a broken table. Keep each line short — aim to fit
+  ~76 cols so it rarely wraps at all.
+- **Most rows need no action** — just `<role> <name> — <subj> — <status>`. A row that needs the
+  user to act or decide **leads with `► `**; for a real decision (options + recommendation) it ends
+  with `↓ USER DECISION` and escalates to the Variant A block immediately below the stack. That
+  block is the one heavy surface that blocks — nothing else does.
 - **`<short status>`** — one clause, not a paragraph.
 
 **The status-line stack replaces the roster.** The `Board (N rooms):` paragraph style is gone;
-a roster is just a stack of status lines with `action: none`. Same format, every time.
+a roster is just a stack of these lines. Same format, every time.
 
-**`--afk` FYI decisions** (non-floor): render as a status-line row with `action: none (FYI)` and
-the decision + directive in the description. No separate block format; keep going.
+**`--afk` FYI decisions** (non-floor): render as a status-line row leading with `ⓘ ` (FYI), the
+decision + directive in the status. No separate block format; keep going.
 
 **Full prose only when the user asks a question** and you are answering it conversationally.
 Initial board confirms, recaps, "all quiet" notifications, and routine broker updates are not
@@ -90,10 +95,10 @@ conversations — they get the stack.
 The user's real pasted transcript (~80 lines) collapses to:
 
 ```
-worker: engine-vet-intake  | subj: exam-field merge   | action: none  | #5 parked; peers agree; HOLD merge until strings checked
-peer:   api-orchestrator   | subj: contract 1.32.1    | action: none  | synced; e2e green; parked for vet strings
-worker: engine-pdf         | subj: AI-tier test       | action: none  | Phase A local, in progress
-room:   #440, gha          | subj: —                  | action: none  | closed by consensus; polls stopped
+worker engine-vet-intake — exam-field merge — #5 parked; peers agree; HOLD merge until strings checked
+peer api-orchestrator — contract 1.32.1 — synced; e2e green; parked for vet strings
+worker engine-pdf — AI-tier test — Phase A local, in progress
+room #440 gha — closed by consensus; polls stopped
 ```
 
 If 80 lines can't collapse to ~4 rows, the format is wrong. It can.
@@ -108,7 +113,7 @@ that is your mode for the whole session. Record it as `autonomy:` in your orches
 | Lever | `/cbc-orchestrator` (regular) | `--auto` (intermediate) | `--afk` (full) |
 |---|---|---|---|
 | **Routine-merge hold** — a worker is done and ready to merge, no collision or hard call involved | hold & ask user | let it ride | let it ride |
-| **Hard-call escalation** — scope / public contract / schema-migration shape / cross-repo merge order | escalate → USER DECISION Variant A (blocks) | escalate → USER DECISION Variant A (blocks) | decide itself → status-line row, `action: none (FYI)` |
+| **Hard-call escalation** — scope / public contract / schema-migration shape / cross-repo merge order | escalate → USER DECISION Variant A (blocks) | escalate → USER DECISION Variant A (blocks) | decide itself → status-line row, `ⓘ FYI` |
 | **Hard floor** — red CI · destructive migration · production promotion · force-push · PR base ≠ `main` | USER DECISION Variant A (blocks) | USER DECISION Variant A (blocks) | USER DECISION Variant A (blocks) — **always** |
 
 **The framing that keeps all modes safe.** `/afk-merge` already owns the real risk gate
@@ -128,34 +133,42 @@ produces a Variant A block that holds until the user answers.
 
 Every decision has exactly **two output paths** — no burying in prose, no third format:
 - **Blocking decision → Variant A** (any mode): the verbatim template below. Looks identical every time; holds until the user answers.
-- **FYI decision in `--afk`** (non-floor only): a status-line row with `action: none (FYI)`. Uses the same status-line format already defined above — not a separate template.
+- **FYI decision in `--afk`** (non-floor only): a status-line row leading with `ⓘ ` (FYI). Uses the same status-line format already defined above — not a separate template.
 
 The user catches decisions at a glance because these two paths are consistent and exclusive.
 
 ### Variant A — input needed (regular, `--auto`, or any `--afk` floor hit) — BLOCKS and waits
 
-Write this block verbatim, then hold. Do not proceed until the user answers.
+Write this block verbatim, then hold. Do not proceed until the user answers. Emit it **inside a
+fenced code block** — the ``` lines below are part of what you output. Vertical labels, no markdown
+table: it renders monospace and reflows cleanly at any terminal width.
 
+~~~
 ```
-> ## 🔵 USER DECISION — input needed
->
-> **Mode:** <regular | --auto | --afk (floor)>
-> **From:** <repo-worker-feature  |  peer: repo-orchestrator>
-> **Subject:** <one line — what the work is>
-> **PR / branch:** <#N + url  |  branch name  |  not opened yet>
->
-> | Decision | Options | My recommendation |
-> |---|---|---|
-> | <the question> | <A / B / …> | <pick + one-line why> |
->
-> _Holding here until you answer._
-```
+🔵 USER DECISION — input needed
 
-**FYI decisions in `--afk` (non-floor):** render as a status-line row in your next update, with
-`action: none (FYI)` and the decision + directive in the description. Keep going — no pause.
-Example:
+Mode:      <regular | --auto | --afk (floor)>
+From:      <repo-worker-feature | peer: repo-orchestrator>
+Subject:   <one line — what the work is>
+PR/branch: <#N + url | branch name | not opened yet>
+
+Decision:
+  <the question — one or two sentences; wraps naturally>
+
+Options:
+  1. <option A>
+  2. <option B>
+
+Recommend: <which option> — <one-line why; wraps naturally>
+
+⏳ Holding here until you answer.
 ```
-worker: engine-worker-auth  | subj: session schema  | action: none (FYI)  | decided nullable expires_at → directed worker to add col with default null
+~~~
+
+**FYI decisions in `--afk` (non-floor):** render as a status-line row in your next update, leading
+with `ⓘ ` (FYI), the decision + directive in the status. Keep going — no pause. Example:
+```
+ⓘ worker engine-worker-auth — session schema — decided nullable expires_at → worker adds col, default null
 ```
 
 **Rule: Variant A blocks. FYI status-line rows never do.** The user can see at a glance which
@@ -218,22 +231,22 @@ full picture before you do anything else:
    roster back and ask "is this all?"** — a status-line stack, one line per room, no prose:
 
    ```
-   worker: engine-worker-recompute    | subj: recompute pipeline   | action: none  | in flight
-   worker: engine-worker-kb-defs      | subj: kb definition schema | action: none  | in flight
-   worker: api-worker-fix-contract    | subj: results contract fix | action: none  | in flight
-   peer:   api-orchestrator           | subj: cross-repo contract  | action: none  | in flight
+   worker engine-worker-recompute — recompute pipeline — in flight
+   worker engine-worker-kb-defs — kb definition schema — in flight
+   worker api-worker-fix-contract — results contract fix — in flight
+   peer api-orchestrator — cross-repo contract — in flight
    ```
    Is this everyone, or are there more to add?
 
    Name each agent `<repo>-worker-<feature>` (see below), not by its instance hash. Only proceed once
-   the user confirms. (If a name/subject isn't clear yet, use `subj: unknown — confirming` on that line.)
+   the user confirms. (If a name/subject isn't clear yet, use `unknown — confirming` as the subj.)
 4. **Recap across all of them, then PRINT the recap.** `cbc_recap` every room and read it whole,
    then give the user a **clear "stop to breathe" recap** of where things stand — this is the
    whole point of starting, not an afterthought. Use the status-line stack format; scale to reality:
    - **Quiet board** (all agents confirmed they just started; nothing in flight): the stack is
-     all `action: none` with a short "just started" status. Don't manufacture a mess that isn't
+     every row with a short "just started" status. Don't manufacture a mess that isn't
      there. An agent that did **not** reply to the step-1 status request is **UNVERIFIED** —
-     render it as `action: none | UNVERIFIED — no reply to hold yet`.
+     render it as `<role> <name> — <subj> — UNVERIFIED: no reply to hold yet`.
    - **Busy board** (work already in flight): render one row per agent with `<short status>`
      showing where it sits (implementing / blocked / merged / etc.) and the surfaces it touches.
      Follow the stack with a short **collisions / merge-order** section in prose if needed.
@@ -562,7 +575,7 @@ merge-order hazard):
   - **`regular` / `--auto`:** escalate to the user. Present a USER DECISION Variant A block
     (collision + recommendation), hold until answered, then direct the agents.
   - **`--afk`:** decide yourself. Apply your best judgment, direct the agents immediately,
-    and render the decision as a status-line row with `action: none (FYI)` in your next update
+    and render the decision as a status-line row with a leading `ⓘ ` (FYI) in your next update
     (decision + directive in the description). Don't quietly re-architect without surfacing it
     — the user must be able to see and override your call.
   - **Hard floor, any mode:** if the call involves red CI · destructive migration · production
@@ -578,7 +591,7 @@ agent terminals. So when a worker raises a decision: if it's small or already se
 agent's plan, it shouldn't have reached you — but if it does, answer it yourself. In
 `regular` and `--auto`, only a genuinely hard call (scope, contract, cross-cutting design)
 goes up, presented as a single Variant A block with a recommendation. In `--afk`, you handle
-it yourself and render it as a status-line row with `action: none (FYI)`. In all modes:
+it yourself and render it as a status-line row with a leading `ⓘ ` (FYI). In all modes:
 **never bury a decision in prose** — blocking decisions use Variant A, FYI decisions use the
 status line; the user spots either immediately.
 
@@ -793,7 +806,7 @@ regenerate, or re-derive anything, the peers hear about it first.*
   workers do the same on report lines, and co-vote `cbc_extend` — don't get 409'd mid-coordination.
 - **Auto-deciding a hard collision** (scope / contract / migration / cross-repo order) without
   the user — *unless running `--afk`*, in which case decide and render it as a status-line row
-  with `action: none (FYI)`. The hard floor (red CI / destructive migration / prod / force-push /
+  with a leading `ⓘ ` (FYI). The hard floor (red CI / destructive migration / prod / force-push /
   base ≠ main) always requires Variant A even in `--afk`.
 - **Burying a decision in prose** instead of using the USER DECISION block. The user misses
   inline decisions. Use Variant A for blocking decisions; render `--afk` FYI decisions as
