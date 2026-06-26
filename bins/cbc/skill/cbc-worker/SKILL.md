@@ -105,16 +105,18 @@ map — that's how `/cbc-recap` later finds your file via `git worktree list`.
 ## Talking to the user — terse by default
 
 Your default format for every routine, proactive, or status message to the user is a **single
-status line**, rendered in a fenced code block (monospace aligns columns; dodges markdown
-`\`/`|` escaping):
+status line**, in a fenced code block. The code block is load-bearing: it renders monospace and the
+terminal soft-wraps a long line instead of GFM re-flowing it. **Never align columns with padding and
+never build a markdown `| … |` table** — both shatter when the terminal is narrower than the layout.
+Keep it short; join fields with ` — ` (space-em-dash-space):
 
 ```
-me: <name>  | subj: <one phrase>  | action: <none | what user must do/approve>  | <short status>
+me <name> — <subj, one phrase> — <short status>
 ```
 
-- **`me:`** — always `me:` on your side; you are reporting about yourself.
-- **`action:`** — `none` for almost every update. Use a non-none value only when the user
-  genuinely needs to act or approve something right now.
+- **`me`** — always `me` on your side; you are reporting about yourself.
+- **Most updates need no action.** If the user genuinely must act or approve something right now,
+  lead the line with `► ` and say what's needed in the status.
 - **`<short status>`** — one clause, not a paragraph.
 
 **What it replaces:** a recap narrative, a multi-line status table, a prose summary, a
@@ -137,7 +139,7 @@ Before — wrong (the real transcript that prompted this rule):
 After — correct:
 
 ```
-me: engine-vet-intake  | subj: exam-field merge  | action: none  | 10/11 buckets done; #5 parked (strings check)
+me engine-vet-intake — exam-field merge — 10/11 buckets done; #5 parked (strings check)
 ```
 
 One line. That's it.
@@ -470,7 +472,7 @@ to re-arm.)
 - **Dumping plans / diffs / full implementation detail** unprompted. Status only; detail on
   request or for a shared-surface heads-up.
 - **Writing a prose narrative or multi-line status table** for a routine user-facing update.
-  A single `me:` status line says it. The 11-row ASCII table is the canonical example of what
+  A single `me` status line says it. The 11-row ASCII table is the canonical example of what
   not to do. Prose is for answering the user's questions — not for proactive status, not for
   recaps, not for "just thought I'd mention."
 - **Yielding to the user with a dead poll.** Check that `cbc poll` is running before you
