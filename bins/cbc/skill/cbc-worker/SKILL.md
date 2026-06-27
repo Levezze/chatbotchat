@@ -29,7 +29,7 @@ at the end.
 ```markdown
 ## Worker charter — read me first, every session
 **I am a worker. I implement one bounded piece; the orchestrator holds the map.**
-- **The Stop hook keeps my poll alive — I never relaunch "to be safe."** At every turn-end it reconciles my declared poll: if it died, it blocks the turn and hands me the exact relaunch line; if I accidentally stacked two, it kills the extra. So I launch the poll once, and relaunch *only* when the hook tells me to. Spawning a spare poll is what caused 14 polls for 3 rooms — don't. (Poll reconcile)
+- **The Stop hook keeps my poll alive — I never relaunch "to be safe."** At every turn-end it reconciles my declared poll: if it died, it blocks the turn and hands me the exact relaunch line; if I accidentally stacked two, it kills the extra. So I launch the poll once, and relaunch *only* when the hook tells me to. Spawning a spare poll is what caused 14 polls for 3 rooms — don't. A `cbc poll` task-wrapper exiting **143** (SIGTERM reap of the wrapper) or **144** (SIGURG — harmless harness bookkeeping) is **NOT** poll death: the real poll process keeps running. Hand-relaunching on a 143/144 notification is exactly what stacks orphans — trust the hook, not the exit code. (Poll reconcile)
 - I never propose or suggest closing my report room — the orchestrator owns closure. (Rule 1)
 - I push a status update to the orchestrator on every transition — stale orchestrator
   state is the main source of coordination failure. `phase ≠ last-synced-to-orchestrator`
@@ -174,7 +174,12 @@ Read any file found. Run the **liveness guard** (matches CLAUDE.md's two-conditi
 2. `cbc_status <room-id>` returns anything other than `closed`/`archived`?
 
 **If both pass AND `status: ACTIVE`:** you are resuming a live session. Do NOT re-run "Open the line." Do NOT re-present status to the user. In order:
-1. **Relaunch the background poll** — the poll shell died during compaction and must come back before you can receive anything. The `SessionStart` hook (`cbc hook session-start`) injects a high-salience relaunch directive on compact/resume — **obey it as your first action**; it already carries the exact command. If for any reason it didn't fire, launch from your `connections:` line: `cbc poll <room-id> --model <model> --as <repo>-worker-<feature>`. Launch it **once** — don't add a second "to be safe"; the Stop hook reconciles to exactly one.
+1. **Backfill `connections:` if your file predates it, THEN relaunch the poll.** First check: if your state file has `room-id:`/`poll-label:` but **no `connections:` block** (it was written by a session running the pre-block skill), add one now — from your `room-id` plus your `--as` identity — before launching anything:
+   ```
+   connections:
+     orchestrator: <room-id> --as <repo>-worker-<feature> --model <model>
+   ```
+   A file with no `connections:` block is exactly what makes the Stop hook strip your `--as` on relaunch and 400 ("not a participant"). With the block in place, relaunch the background poll: the `SessionStart` hook (`cbc hook session-start`) injects a high-salience relaunch directive on compact/resume — **obey it as your first action**; it already carries the exact command. If for any reason it didn't fire, launch from your `connections:` line: `cbc poll <room-id> --model <model> --as <repo>-worker-<feature>`. Launch it **once** — don't add a second "to be safe"; the Stop hook reconciles to exactly one.
 2. **Re-stamp your terminal title** — your tty may have changed after a Cursor reload. Re-run the name-file write from "Open the line" step 3 so your tab reverts to your agent name.
 3. **`cbc_recap` your room** to catch up on messages that arrived while the poll was dead — especially any holds or sequencing changes from the orchestrator. Do not act on in-flight state before you've read what you missed.
 4. **Then check `phase ≠ last-synced-to-orchestrator`** — if they differ, push the missed update now. This step is last, not first: pushing before you've read a hold violates the "Implementing through a hold" anti-pattern.

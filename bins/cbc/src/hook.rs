@@ -32,6 +32,11 @@ pub struct WorkerEntry {
     pub poll_label: String,
     /// The self-declared model (e.g. `claude-sonnet-4-6`).
     pub model: String,
+    /// This session's `--as <identity>`, recovered from the `poll-label` line
+    /// when it carries the full `cbc poll … --as <id>` command.  `None` for a
+    /// bare label with no flags.  Lets a legacy worker file (no `connections:`
+    /// block) still relaunch identity-scoped instead of stripping its `--as`.
+    pub identity: Option<String>,
 }
 
 /// Fields extracted from an active `.cbc/orchestration-*.md` file.
@@ -127,20 +132,12 @@ pub fn parse_connections(content: &str) -> Vec<DeclaredConnection> {
         let Some(room_id) = toks.next() else {
             continue;
         };
-        // Scan remaining tokens for --as / --model flag values.
-        let rest_toks: Vec<&str> = rest.split_whitespace().collect();
-        let flag_after = |flag: &str| -> Option<String> {
-            rest_toks
-                .iter()
-                .position(|t| *t == flag)
-                .and_then(|i| rest_toks.get(i + 1))
-                .map(|s| s.to_string())
-        };
+        // Scan remaining tokens for --as / --model flag values (shared helper).
         conns.push(DeclaredConnection {
             name,
             room_id: room_id.to_string(),
-            identity: flag_after("--as"),
-            model: flag_after("--model").unwrap_or_else(|| "<model>".to_string()),
+            identity: flag_value(rest, "--as"),
+            model: flag_value(rest, "--model").unwrap_or_else(|| "<model>".to_string()),
         });
     }
     conns
@@ -171,6 +168,19 @@ fn kv<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     line.strip_prefix(key)
         .and_then(|rest| rest.strip_prefix(':'))
         .map(str::trim)
+}
+
+/// Return the whitespace-delimited token that follows `flag` in `source`, if
+/// any.  The FIRST occurrence wins, so a real `--as <id>` flag is recovered even
+/// when a trailing `#` comment later mentions the same flag in prose.  Shared by
+/// `parse_connections` (the `connections:` block) and `parse_worker` (the legacy
+/// `poll-label` command line) so both extract flags identically.
+fn flag_value(source: &str, flag: &str) -> Option<String> {
+    let toks: Vec<&str> = source.split_whitespace().collect();
+    toks.iter()
+        .position(|t| *t == flag)
+        .and_then(|i| toks.get(i + 1))
+        .map(|s| s.to_string())
 }
 
 /// Return `true` when the file contains `status: ACTIVE`.
@@ -213,10 +223,22 @@ pub fn parse_worker(content: &str) -> Option<WorkerEntry> {
         }
     }
     let room_id = room_id?;
+    let poll_label = poll_label.unwrap_or_default();
+    // Recover poll flags the worker already wrote into its `poll-label` command
+    // line.  Pre-`connections:`-block files (the live legacy shape) keep their
+    // `--as <id>` only here; honoring it lets the reconcile relaunch
+    // identity-scoped instead of stripping the `--as` and 400-ing.
+    let identity = flag_value(&poll_label, "--as");
+    // `model:` field is canonical; fall back to a `--model` in the poll-label,
+    // then the placeholder.
+    let model = model
+        .or_else(|| flag_value(&poll_label, "--model"))
+        .unwrap_or_else(|| "<model>".to_string());
     Some(WorkerEntry {
         room_id,
-        poll_label: poll_label.unwrap_or_default(),
-        model: model.unwrap_or_else(|| "<model>".to_string()),
+        identity,
+        model,
+        poll_label,
     })
 }
 
@@ -346,12 +368,14 @@ pub fn declared_connections(content: &str) -> Vec<DeclaredConnection> {
             })
             .collect();
     }
-    // Legacy worker: single room-id.
+    // Legacy worker: single room-id.  Recover the `--as` identity from the
+    // poll-label when present (the file's own command line), so a worker file
+    // written before the `connections:` block still reconciles identity-scoped.
     if let Some(w) = parse_worker(content) {
         return vec![DeclaredConnection {
             name: w.poll_label,
             room_id: w.room_id,
-            identity: None,
+            identity: w.identity,
             model: w.model,
         }];
     }
@@ -1301,6 +1325,95 @@ room-id: some-room-20260625-0900
         assert_eq!(w.room_id, "some-room-20260625-0900");
         assert_eq!(w.poll_label, "");
         assert_eq!(w.model, "<model>");
+        assert_eq!(w.identity, None, "no poll-label ⇒ no identity");
+    }
+
+    #[test]
+    fn parse_worker_recovers_identity_from_full_command_poll_label() {
+        // The live legacy shape: the worker stuffed the whole `cbc poll …`
+        // command (with `--as`) into poll-label, plus a trailing `#` comment
+        // that ALSO mentions `--as` in prose.  The first `--as` token wins.
+        let content = "\
+## Status
+status: ACTIVE
+room-id: cbc-report-seeds-20260626-0027
+poll-label: cbc poll cbc-report-seeds-20260626-0027 --as mvp-api-claude-sonnet-4-6-9df0 --model claude-sonnet-4-6  # MUST include --as to match join identity
+model: claude-sonnet-4-6
+";
+        let w = parse_worker(content).expect("should parse active worker");
+        assert_eq!(w.room_id, "cbc-report-seeds-20260626-0027");
+        assert_eq!(
+            w.identity.as_deref(),
+            Some("mvp-api-claude-sonnet-4-6-9df0"),
+            "the --as handle already in poll-label must be recovered, not discarded"
+        );
+        assert_eq!(w.model, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn parse_worker_identity_none_for_bare_label() {
+        let content = "\
+## Status
+status: ACTIVE
+room-id: feat-room-20260625-1200
+poll-label: repo-worker-feat
+model: claude-sonnet-4-6
+";
+        let w = parse_worker(content).expect("should parse");
+        assert_eq!(
+            w.identity, None,
+            "a bare label (no --as flag) must yield identity None — no false match"
+        );
+    }
+
+    #[test]
+    fn parse_worker_recovers_model_from_poll_label_when_field_absent() {
+        // No dedicated `model:` line — the `--model` inside poll-label is the
+        // only source.  (Identity comes from the same line.)
+        let content = "\
+## Status
+status: ACTIVE
+room-id: feat-room-20260625-1300
+poll-label: cbc poll feat-room-20260625-1300 --as me-9df0 --model claude-opus-4-8
+";
+        let w = parse_worker(content).expect("should parse");
+        assert_eq!(w.identity.as_deref(), Some("me-9df0"));
+        assert_eq!(
+            w.model, "claude-opus-4-8",
+            "absent model: field ⇒ fall back to the poll-label --model"
+        );
+    }
+
+    /// The end-to-end self-heal: a legacy worker file (no `connections:` block)
+    /// whose poll-label carries the full command must yield a declared
+    /// connection WITH identity, so the Stop reconcile's relaunch emits `--as`
+    /// (no 400) and the kill is identity-scoped (no 143 on the healthy poll).
+    #[test]
+    fn declared_connections_legacy_worker_recovers_identity_from_poll_label() {
+        let content = "\
+## Status
+status: ACTIVE
+room-id: cbc-report-seeds-20260626-0027
+poll-label: cbc poll cbc-report-seeds-20260626-0027 --as mvp-api-9df0 --model claude-sonnet-4-6
+model: claude-sonnet-4-6
+";
+        let conns = declared_connections(content);
+        assert_eq!(conns.len(), 1);
+        assert_eq!(conns[0].room_id, "cbc-report-seeds-20260626-0027");
+        assert_eq!(
+            conns[0].identity.as_deref(),
+            Some("mvp-api-9df0"),
+            "legacy worker must self-heal: identity reaches the reconcile"
+        );
+        // And the relaunch command the reconcile would emit carries --as.
+        assert_eq!(
+            poll_command(
+                &conns[0].room_id,
+                &conns[0].model,
+                conns[0].identity.as_deref()
+            ),
+            "cbc poll cbc-report-seeds-20260626-0027 --model claude-sonnet-4-6 --as mvp-api-9df0"
+        );
     }
 
     // ── parse_orchestrator ────────────────────────────────────────────────────
@@ -1442,6 +1555,7 @@ agents:
             room_id: "feat-room-20260625-1000".to_string(),
             poll_label: "repo-worker-feat".to_string(),
             model: "claude-sonnet-4-6".to_string(),
+            identity: None,
         });
         let mut out = Vec::new();
         let mut killed = Vec::new();
@@ -1562,6 +1676,58 @@ agents:
             "compact output must contain poll command; got:\n{text}"
         );
         assert_eq!(killed, vec!["feat-room-20260625-1000"]);
+    }
+
+    #[test]
+    fn run_compact_legacy_worker_recovers_identity_for_relaunch_and_kill() {
+        // The compaction half of the bug: a legacy worker file (no `connections:`
+        // block) whose poll-label carries the full `cbc poll … --as <id>` command
+        // must relaunch identity-scoped on SessionStart.  This path runs through
+        // emit_relaunch -> id_of -> scan_declared -> declared_connections, distinct
+        // from the Stop path, so it needs its own guard.  Two assertions: the
+        // emitted command carries the recovered `--as` (else the poll 400s), and
+        // the stale-poll kill is identity-scoped (else it reaps another session's
+        // poll on the shared report room -> the 143 friendly-fire).
+        let dir = tempfile::tempdir().unwrap();
+        let cbc = dir.path().join(".cbc");
+        std::fs::create_dir_all(&cbc).unwrap();
+        std::fs::write(
+            cbc.join("worker-mvp-seeds-20260626.md"),
+            "status: ACTIVE\nroom-id: cbc-report-seeds-20260626-0027\npoll-label: cbc poll cbc-report-seeds-20260626-0027 --as mvp-api-9df0 --model claude-sonnet-4-6\nmodel: claude-sonnet-4-6\n",
+        )
+        .unwrap();
+
+        let input = serde_json::json!({
+            "source": "compact",
+            "cwd": dir.path().to_str().unwrap()
+        })
+        .to_string();
+
+        let mut out = Vec::new();
+        // Capture BOTH args — existing tests discard the identity, which is exactly
+        // the bit that proves the kill is identity-scoped.
+        let mut killed: Vec<(String, Option<String>)> = Vec::new();
+        run_session_start(&mut input.as_bytes(), &mut out, &mut |id, identity| {
+            killed.push((id.to_string(), identity.map(str::to_string)))
+        })
+        .unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains(
+                "cbc poll cbc-report-seeds-20260626-0027 --model claude-sonnet-4-6 --as mvp-api-9df0"
+            ),
+            "compact relaunch must carry the recovered --as (else the poll 400s); got:\n{text}"
+        );
+        assert_eq!(
+            killed,
+            vec![(
+                "cbc-report-seeds-20260626-0027".to_string(),
+                Some("mvp-api-9df0".to_string())
+            )],
+            "the stale-poll kill must be identity-scoped — Some(handle), not None — \
+             so it cannot reap another session's poll on the shared report room"
+        );
     }
 
     #[test]
