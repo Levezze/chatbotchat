@@ -315,13 +315,18 @@ enum Command {
     },
     /// Register the CBC Claude Code hooks in ~/.claude/settings.json.
     ///
-    /// Adds a `SessionStart` hook that fires on compact/resume, kills any stale
-    /// `cbc poll` process for the active room, and injects a high-salience
-    /// relaunch directive — so Sonnet workers re-arm their polls after
-    /// compaction without having to remember the skill instructions.
+    /// Adds two hooks, both identity-scoped so they only ever touch this
+    /// session's own polls — never a peer session's. `SessionStart` fires on
+    /// compact/resume: it kills this session's stale `cbc poll` process for the
+    /// active room and injects a high-salience relaunch directive — so Sonnet
+    /// workers re-arm their polls after compaction without having to remember
+    /// the skill instructions. `Stop` fires at every turn-end: it reconciles
+    /// each declared room's poll to exactly one — relaunching one that died,
+    /// killing a stacked duplicate.
     ///
-    /// Idempotent; backs up the file before editing; preserves all other hooks
-    /// and settings. Degrades to a printed manual snippet on parse errors.
+    /// Idempotent (upgrades a SessionStart-only install by adding the `Stop`
+    /// hook); backs up the file before editing; preserves all other hooks and
+    /// settings. Degrades to a printed manual snippet on parse errors.
     InstallHooks,
     /// Run a Claude Code hook handler (reads the hook event JSON from stdin).
     Hook {
