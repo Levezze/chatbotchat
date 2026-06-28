@@ -177,7 +177,10 @@ fn kv<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 /// would fabricate a wrong identity and recreate the 400.  Among the real
 /// (pre-comment) tokens the FIRST occurrence wins.  Shared by `parse_connections`
 /// (the `connections:` block) and `parse_worker` (the legacy `poll-label` command
-/// line) so both extract flags identically.
+/// line) so both extract flags identically.  A value that is itself another
+/// `--flag` (a malformed line with a missing argument, e.g. `--as --model x`)
+/// is rejected — returning it would fabricate a garbage handle that
+/// `poll_matches` can never match, recreating the friendly-fire this guards.
 fn flag_value(source: &str, flag: &str) -> Option<String> {
     let toks: Vec<&str> = source
         .split_whitespace()
@@ -186,6 +189,7 @@ fn flag_value(source: &str, flag: &str) -> Option<String> {
     toks.iter()
         .position(|t| *t == flag)
         .and_then(|i| toks.get(i + 1))
+        .filter(|v| !v.starts_with("--"))
         .map(|s| s.to_string())
 }
 
@@ -1459,6 +1463,27 @@ poll-label: cbc poll feat-room-20260625-1300 --as me-9df0 --model claude-opus-4-
         assert_eq!(
             w.model, "claude-opus-4-8",
             "absent model: field ⇒ fall back to the poll-label --model"
+        );
+    }
+
+    #[test]
+    fn flag_value_rejects_a_following_flag_as_the_value() {
+        // Malformed line: `--as` immediately followed by another flag (a missing
+        // `<id>`).  Without a guard, identity becomes `"--model"` — a garbage
+        // handle that `poll_matches` can never match, so the reconcile both
+        // relaunches a stacked poll AND reaps the healthy one: the exact
+        // friendly-fire this PR exists to kill.  The value after a flag must be
+        // a real token, never another `--flag`.  The helper now backs BOTH
+        // parse paths, so the guard hardens `parse_connections` too.
+        assert_eq!(
+            flag_value("cbc poll room --as --model claude-x", "--as"),
+            None,
+            "a flag whose value is itself another --flag must yield None, not the next flag"
+        );
+        // Sanity: a real value immediately before a `#` comment still resolves.
+        assert_eq!(
+            flag_value("room --as good-9df0 # note", "--as"),
+            Some("good-9df0".to_string())
         );
     }
 
