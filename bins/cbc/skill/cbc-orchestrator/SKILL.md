@@ -186,7 +186,12 @@ Read any file found. Run the **liveness guard** (matches CLAUDE.md's convention)
 1. Read `worktree:` (if present). Run `git -C <worktree-path> branch --show-current` (or bare `git branch --show-current`) — does it match `branch:` in the file? (The orchestrator manages many rooms, so CLAUDE.md's room-liveness step is not applicable here — branch match is the practical guard.)
 
 **If the guard passes AND `status: ACTIVE`:** you are resuming a live session. Do NOT re-run "Your first move" from scratch — your rooms are already open. In order:
-1. **Relaunch all polls** — the compaction tore them all down. The `SessionStart` hook (`cbc hook session-start`) injects a high-salience relaunch directive on compact/resume, one identity-scoped command per `connections:` entry (it kills any survivor first, so there's no stacking) — **obey it as your first action**; run exactly the commands it gives. If it didn't fire, launch each from your `connections:` block: `cbc poll <room-id> --model <model> --as <repo>-orchestrator`. Launch one per room — don't double up "to be safe"; the Stop hook reconciles to exactly one.
+1. **Backfill `connections:` if your map predates it, THEN relaunch all polls.** First check: if your map has an `agents:` block but **no `connections:` block** (it was written by a session running the pre-block skill), add one now before launching anything — one line per room you poll, each carrying your `--as` identity:
+   ```
+   connections:
+     <agent-name>: <room-id> --as <repo>-orchestrator --model <model>
+   ```
+   The hook reads `connections:`, not `agents:` — a map with no `connections:` block makes the Stop hook strip your `--as` on relaunch and 400 ("not a participant") on every room. **Ignore any `SessionStart` relaunch directive that fired before you added the block** — it was generated from the pre-block `agents:` map, which carries no `--as`, so its commands are unscoped and 400 on every room. (Unlike a worker's `poll-label`, the code cannot recover an orchestrator's `--as` from `agents:` — this backfill is the *only* heal path.) Once the block exists, launch each poll yourself from your new `connections:` block: `cbc poll <room-id> --model <model> --as <repo>-orchestrator`, one per room. (On a *later* resume — block already present — the `SessionStart` hook's per-entry directives are correctly `--as`-scoped and de-duplicated, so obey those as your first action then.) Launch one per room — don't double up "to be safe"; the Stop hook reconciles to exactly one.
 2. **Re-stamp your terminal title** — your tty may have changed after a Cursor reload. Re-run the name-file write (see "Your first move" step 0) so your tab reverts to `<repo>-orchestrator`.
 3. **`cbc_recap` each room** to catch up on messages that arrived while polls were dead before you act on anything.
 4. **Then continue from `next-action`.**
@@ -315,6 +320,11 @@ That reflex is gone. The Stop hook now owns poll survival:
 - **At every turn-end it reconciles each `connections:` entry** — relaunches one that died, kills a
   stacked duplicate, leaves a healthy one alone. It is the **sole relaunch authority**: don't
   relaunch a poll yourself "on the spot," and never fire a spare "to be safe." One poll per room.
+- **Exit 143/144 on a poll task-wrapper is NOT poll death.** 144 = SIGURG (harmless harness
+  bookkeeping); 143 = SIGTERM reaping the background *wrapper* while the real `cbc poll` child keeps
+  running. Neither means you've gone deaf, and neither is a cue to hand-relaunch — reacting to those
+  notifications is precisely what stacks the orphan polls. Let the Stop hook count live processes and
+  decide.
 - **If it must relaunch, it blocks the turn and hands you the exact command** (the `--as`-scoped
   line). Run that; don't improvise your own.
 - **Nothing is lost when a poll dies.** A relaunched poll re-attaches by identity and delivers
