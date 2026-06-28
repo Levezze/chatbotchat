@@ -171,12 +171,18 @@ fn kv<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 }
 
 /// Return the whitespace-delimited token that follows `flag` in `source`, if
-/// any.  The FIRST occurrence wins, so a real `--as <id>` flag is recovered even
-/// when a trailing `#` comment later mentions the same flag in prose.  Shared by
-/// `parse_connections` (the `connections:` block) and `parse_worker` (the legacy
-/// `poll-label` command line) so both extract flags identically.
+/// any.  A trailing `#` comment is ignored: scanning stops at the first token
+/// that begins with `#`, so an `--as`/`--model` mentioned only in prose (e.g.
+/// `repo-worker  # remember --as <id>`) is NOT mistaken for a real flag — that
+/// would fabricate a wrong identity and recreate the 400.  Among the real
+/// (pre-comment) tokens the FIRST occurrence wins.  Shared by `parse_connections`
+/// (the `connections:` block) and `parse_worker` (the legacy `poll-label` command
+/// line) so both extract flags identically.
 fn flag_value(source: &str, flag: &str) -> Option<String> {
-    let toks: Vec<&str> = source.split_whitespace().collect();
+    let toks: Vec<&str> = source
+        .split_whitespace()
+        .take_while(|t| !t.starts_with('#'))
+        .collect();
     toks.iter()
         .position(|t| *t == flag)
         .and_then(|i| toks.get(i + 1))
@@ -955,6 +961,52 @@ mod tests {
     }
 
     #[test]
+    fn run_stop_legacy_worker_relaunch_reason_carries_recovered_as() {
+        // Stop-path twin of run_compact_legacy_worker_recovers_identity_…: the
+        // ACTUAL bug shape — a LEGACY worker file (no `connections:` block) whose
+        // poll-label holds the full `cbc poll … --as <id>` command.  With no live
+        // poll, run_stop must block and the injected relaunch `reason` must carry
+        // the recovered `--as` (else the model relaunches identity-less and 400s).
+        let dir = tempfile::tempdir().unwrap();
+        let cbc = dir.path().join(".cbc");
+        std::fs::create_dir_all(&cbc).unwrap();
+        std::fs::write(
+            cbc.join("worker-legacy-fullcmd-20260626.md"),
+            "status: ACTIVE\nroom-id: cbc-report-seeds-20260626-0027\npoll-label: cbc poll cbc-report-seeds-20260626-0027 --as mvp-api-9df0 --model claude-sonnet-4-6\nmodel: claude-sonnet-4-6\n",
+        )
+        .unwrap();
+
+        let input = stop_input(dir.path(), false);
+        let mut out = Vec::new();
+        let mut kills: Vec<KillOrder> = Vec::new();
+        run_stop(
+            &mut input.as_bytes(),
+            &mut out,
+            &mut |_, _| 0,     // no live poll
+            &mut |_, _| false, // not launched this turn
+            &mut |o| kills.push(o.clone()),
+        )
+        .unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&text).expect("Stop block output must be valid JSON");
+        assert_eq!(
+            v.get("decision").and_then(|d| d.as_str()),
+            Some("block"),
+            "a legacy worker with a dead poll must block turn-end; got:\n{text}"
+        );
+        let reason = v.get("reason").and_then(|r| r.as_str()).unwrap_or("");
+        assert!(
+            reason.contains(
+                "cbc poll cbc-report-seeds-20260626-0027 --model claude-sonnet-4-6 --as mvp-api-9df0"
+            ),
+            "the relaunch command injected on the Stop path must carry the `--as` recovered \
+             from the legacy poll-label (else the relaunch 400s); got reason:\n{reason}"
+        );
+    }
+
+    #[test]
     fn run_stop_loop_guard_suppresses_block_when_stop_hook_active() {
         let dir = tempfile::tempdir().unwrap();
         let cbc = dir.path().join(".cbc");
@@ -1363,6 +1415,32 @@ model: claude-sonnet-4-6
         assert_eq!(
             w.identity, None,
             "a bare label (no --as flag) must yield identity None — no false match"
+        );
+    }
+
+    #[test]
+    fn parse_worker_ignores_as_and_model_mentioned_only_in_a_comment() {
+        // Footgun: a BARE label whose ONLY `--as`/`--model` mention lives inside a
+        // trailing `#` comment (prose, not a real flag).  Scanning the comment
+        // would fabricate identity="ghost"/model="claude-x" — WORSE than None,
+        // because a wrong --as makes poll_matches miss the healthy poll and the
+        // reconcile relaunches `--as ghost` → the exact 400 this PR kills.  The
+        // comment must be stripped before flag extraction.
+        let content = "\
+## Status
+status: ACTIVE
+room-id: feat-room-20260625-1400
+poll-label: repo-worker-feat  # remember to pass --as ghost --model claude-x or it 400s
+model: claude-sonnet-4-6
+";
+        let w = parse_worker(content).expect("should parse");
+        assert_eq!(
+            w.identity, None,
+            "an --as mentioned only in a # comment must NOT be recovered as a real flag"
+        );
+        assert_eq!(
+            w.model, "claude-sonnet-4-6",
+            "model must come from the real `model:` field, not the comment's --model"
         );
     }
 
