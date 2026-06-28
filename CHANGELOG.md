@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.2](https://github.com/Levezze/chatbotchat/compare/v0.14.1...v0.14.2) (2026-06-28)
+
+
+### Bug Fixes
+
+* **cbc:** recover --as identity in poll reconciler (stop 143/400 friendly-fire on live polls) ([#95](https://github.com/Levezze/chatbotchat/issues/95)) ([7e06e9d](https://github.com/Levezze/chatbotchat/commit/7e06e9d01e7c422480ecc6b32edbd4d6408c435a))
+
 ## [0.14.1](https://github.com/Levezze/chatbotchat/compare/v0.14.0...v0.14.1) (2026-06-26)
 
 
