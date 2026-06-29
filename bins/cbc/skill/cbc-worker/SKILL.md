@@ -29,7 +29,7 @@ at the end.
 ```markdown
 ## Worker charter — read me first, every session
 **I am a worker. I implement one bounded piece; the orchestrator holds the map.**
-- **The Stop hook keeps my poll alive — I never relaunch "to be safe."** At every turn-end it reconciles my declared poll: if it died, it blocks the turn and hands me the exact relaunch line; if I accidentally stacked two, it kills the extra. So I launch the poll once, and relaunch *only* when the hook tells me to. Spawning a spare poll is what caused 14 polls for 3 rooms — don't. A `cbc poll` task-wrapper exiting **143** (SIGTERM reap of the wrapper) or **144** (SIGURG — harmless harness bookkeeping) is **NOT** poll death: the real poll process keeps running. Hand-relaunching on a 143/144 notification is exactly what stacks orphans — trust the hook, not the exit code. (Poll reconcile)
+- **I own my poll's liveness — I verify it before every turn-end; the Stop hook is only a backup.** Before I end any turn I confirm my declared poll is actually live (`cbc_status` my room, or check for my `cbc poll` process). If it's **dead, I relaunch it myself now** from my `connections:` line with my `--as` — I do **not** end a turn deaf waiting for the hook to maybe do it. The hook is best-effort: it sometimes leaves the poll dead and sometimes stacks duplicates, so it is a safety net, not my guarantee. I avoid the 14-polls-for-3-rooms pile-up by **checking first** — relaunch only if mine is dead, never fire a spare on a live one — NOT by abstaining from relaunch. A `cbc poll` task-wrapper exiting **143** (SIGTERM reap of the wrapper) or **144** (SIGURG — harmless bookkeeping) is *not necessarily* poll death, but I **verify the real poll is still running** before trusting it — "the hook will reconcile it" is not verification, and assuming it is is exactly how I go dark. (Poll reconcile)
 - I never propose or suggest closing my report room — the orchestrator owns closure. (Rule 1)
 - I push a status update to the orchestrator on every transition — stale orchestrator
   state is the main source of coordination failure. `phase ≠ last-synced-to-orchestrator`
@@ -362,22 +362,23 @@ the room** with your reasoning so it can re-decide. Never silently deviate from 
 instruction; silent deviation is exactly what causes the merge salad this whole setup exists to
 prevent.
 
-## Keep the line alive — the hook reconnects, you catch up
+## Keep the line alive — you relaunch, then catch up
 
 Your background poll can die for any reason — a flaky shell, exit 1, a crash, a compaction. That's
-expected, and it is **never** a signal that the room closed or the orchestrator left. You do **not**
-police it yourself: the Stop hook reconciles your poll at every turn-end (relaunches it if dead,
-kills a stray duplicate), and the SessionStart hook relaunches it after compaction. Your job on a
-drop is only to **catch up on what you missed**:
+expected, and it is **never** a signal that the room closed or the orchestrator left. **Policing it
+is your job**, not the hook's: before you end a turn, confirm your poll is live, and if it died,
+**relaunch it yourself now** (the Stop hook and SessionStart hook are backups that may miss it).
+Then catch up on what you missed:
 
-- **When the poll comes back, confirm you didn't miss anything.** You don't need to re-read the
+- **When you relaunch, confirm you didn't miss anything.** You don't need to re-read the
   whole room — just check the **latest message seq against the last one you saw**. If it's moved
   on, read *only* the messages you missed while the poll was down and reconcile them before you
   carry on — the orchestrator may have sent a hold, a sequencing change, or your
   single-responsibility assignment in that gap. A dead poll hides new messages; never assume the
   quiet was real.
-- **Never spawn a second poll to "make sure."** Two polls for one room is the stacking bug the
-  reconcile exists to prevent. Relaunch only on the hook's explicit directive.
+- **Don't stack — but do relaunch.** Two polls for one room is a real bug, so check first: if your
+  poll is already live, leave it; if it's dead, relaunch the one. "Check then relaunch" is the rule
+  — *not* "wait for the hook." Never end a turn with your poll dead.
 
 ## Closing the line
 
@@ -405,10 +406,11 @@ escalates you to the user — even if you are mid-task and making progress. The 
 **cannot wake you** if your poll is dead (CBC is pull-only); the human has to reopen your
 chat manually. This is the exact failure mode that causes orchestrators to stall for hours.
 
-**You don't hand-police the poll — the Stop hook does.** It cannot end a turn with your declared
-poll dead: it blocks turn-end and forces the relaunch. So there is no "re-arm before yielding"
-ritual for you to remember and no spare poll to spawn — launch it once, obey the hook's relaunch
-directive when it fires, and otherwise leave it alone.
+**You hand-police the poll — the Stop hook is only a backstop.** Re-arm before yielding *is* a
+ritual you must run: before you end a turn, verify your poll is live and relaunch it yourself if
+it's dead. Do not rely on the hook to block turn-end and relaunch for you — it sometimes doesn't,
+and that silent miss is exactly what darkens you past the ~150 s flag. Launch once, then on any
+drop relaunch the one (check first, so you never stack a spare on a live poll).
 
 **The soft cap is advisory and is NEVER a reason to stop polling.** The soft cap (default
 4 consecutive autonomous messages) fires `surface_to_user: true` exactly ONCE to suggest
@@ -428,19 +430,20 @@ nothing is checking" — that is the wrong model. Your poll *is* your check-in s
 only time you need to reply is when the orchestrator sends you an explicit status
 *message* — re-ground with `cbc_recap` and answer with your current state.
 
-## Poll survival — handled by the hooks, not a timer
+## Poll survival — you verify before yielding; the hooks are backups
 
-There is **no pulse timer to arm** anymore. The old self-check `sleep` shell died on the same
-compaction it was meant to survive and, lacking an identity scope, relaunched polls additively
-(the 14-polls-for-3-rooms bug). It's gone. Coverage now:
+There is **no pulse timer to arm** — but there *is* a check you run every turn: before you end it,
+confirm your poll is live and relaunch it yourself if it's dead. (The old self-check `sleep` shell
+is gone — it died on the same compaction it was meant to survive and relaunched additively, the
+14-polls bug. Verify-then-relaunch replaces it — *not* "trust the hook.") Coverage:
 
-- **Awake but deaf** (you take a turn with a dead poll) — the Stop hook reconciles at turn-end and
-  forces the relaunch. Fully covered.
-- **Compaction** (everything torn down) — the SessionStart hook relaunches. Fully covered.
-- **Idle crash** (poll dies while you sit with no turns and no messages) — the one residual gap: a
-  dead poll can't wake you, so nothing fires until the next user turn. This is bounded, accepted
-  for now, and is what the orchestrator heartbeat will close. If you *are* given a turn, the Stop
-  hook catches it immediately.
+- **Awake but deaf** (you take a turn with a dead poll) — **you** catch it at turn-end and relaunch.
+  The Stop hook is a backstop here, but it sometimes misses; don't depend on it — verify yourself.
+- **Compaction** (everything torn down) — the SessionStart hook relaunches, but still confirm it
+  actually came back before you trust the line.
+- **Idle crash** (poll dies while you sit with no turns and no messages) — the residual gap: a dead
+  poll can't wake you, so nothing fires until your next turn. Bounded; on that next turn, verify and
+  relaunch first thing.
 
 ## Anti-patterns
 
