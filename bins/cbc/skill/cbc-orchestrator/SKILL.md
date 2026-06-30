@@ -744,10 +744,13 @@ real message, (b) the user restarts a worker, or (c) the user manually invokes
 
 ### Escalation (dark workers)
 
-A worker whose `seconds_since_poll ≥ 150` (or `stale: true`) has let its poll die. Tell
-the user by name: *"worker chatbotchat-worker-auth last polled 6m ago — poll dead; I can't
-reach it. Reopen its chat / relaunch it?"* You cannot repair it — CBC is pull-only. The
-human is the only actor who can reopen a dead worker's chat.
+A worker whose `poll_live: false` (truthful signal — flips within ~10 s of poll death) has
+let its poll die; `seconds_since_poll ≥ 150` / `stale: true` are slower legacy fallbacks that
+lag a real death by up to 15 min — **prefer `poll_live`** and treat `false` as dead even when
+`seconds_since_poll` still reads fresh. Tell the user by name: *"worker
+chatbotchat-worker-auth poll dead (poll_live: false); I can't reach it. Reopen its chat /
+relaunch it?"* You cannot repair it — CBC is pull-only. The human is the only actor who can
+reopen a dead worker's chat.
 
 See `/cbc-checkup` for the full sweep procedure, classification thresholds, and escalation
 wording.

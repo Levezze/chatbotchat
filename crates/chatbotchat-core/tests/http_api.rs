@@ -23,6 +23,19 @@ async fn test_router_with_cap(cap: std::time::Duration) -> axum::Router {
     router(AppState::with_wait_cap(storage, cap))
 }
 
+/// A router with both an explicit long-poll cap and a short presence grace, so a
+/// test can observe the `poll_live` truth flip from a dropped connection without
+/// waiting the full default grace window.
+async fn test_router_with_cap_and_grace(
+    cap: std::time::Duration,
+    grace: std::time::Duration,
+) -> axum::Router {
+    let storage = Storage::connect("sqlite::memory:")
+        .await
+        .expect("connect in-memory sqlite");
+    router(AppState::with_wait_cap_and_grace(storage, cap, grace))
+}
+
 /// Like `test_router`, but also hands back a clone of the `Storage` so a test
 /// can read the audit log or arrange a precondition state (`idle`/`stale`/
 /// `archived`) that has no 6b HTTP path — those are sweeper-driven (6c), so the
@@ -4122,4 +4135,74 @@ async fn wait_drains_unread_through_a_real_consensus_close() {
     // ...and only then reports the terminal status.
     let (_, done) = wait(&app, &room_id, "repo-a", "opus47", "/a").await;
     assert_eq!(done["status"].as_str(), Some("closed"), "got {done}");
+}
+
+/// Read a participant's `poll_live` flag from the room status by repo.
+async fn poll_live_of(app: &axum::Router, room_id: &str, repo: &str) -> bool {
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/rooms/{room_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let body = body_json(app.clone().oneshot(req).await.unwrap().into_body()).await;
+    let p = body["participants"]
+        .as_array()
+        .expect("participants array")
+        .iter()
+        .find(|p| p["repo"].as_str() == Some(repo))
+        .unwrap_or_else(|| panic!("participant {repo} not in status: {body}"));
+    p["poll_live"]
+        .as_bool()
+        .unwrap_or_else(|| panic!("poll_live missing for {repo}: {p}"))
+}
+
+/// The keystone regression: a participant currently parked on a long-poll reads
+/// `poll_live: true`; once that connection is dropped (process death / TCP reset,
+/// modeled here by aborting the handler future), `poll_live` flips to `false`
+/// within the grace window — instead of the old `last_poll_at` timestamp lying
+/// "fresh" for the full 15-minute ghost window.
+#[tokio::test]
+async fn poll_live_is_true_while_parked_and_false_after_the_connection_drops() {
+    // Long cap so the wait genuinely parks; short grace so the drop→false flip is
+    // observable without a long sleep.
+    let app = test_router_with_cap_and_grace(
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_millis(150),
+    )
+    .await;
+    let room_id = open_room_id(&app, "poll live truth").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    join(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+
+    // B parks on an empty room; A never waits.
+    let waiter = {
+        let app = app.clone();
+        let room_id = room_id.clone();
+        tokio::spawn(async move { wait(&app, &room_id, "repo-b", "sonnet46", "/work/b").await })
+    };
+
+    // Let B reach the park, then observe the truth: B is live, A (never parked)
+    // is not.
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    assert!(
+        poll_live_of(&app, &room_id, "repo-b").await,
+        "a parked long-poll must read poll_live: true"
+    );
+    assert!(
+        !poll_live_of(&app, &room_id, "repo-a").await,
+        "a participant with no parked poll must read poll_live: false"
+    );
+
+    // The connection dies: aborting the task drops the handler future, which
+    // drops the ParkGuard — exactly what Axum does when a client disconnects.
+    waiter.abort();
+    let _ = waiter.await;
+
+    // Within grace it may still read live (covers a healthy re-poll gap); past
+    // grace it must read dead — the corpse no longer lies "fresh".
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    assert!(
+        !poll_live_of(&app, &room_id, "repo-b").await,
+        "a dropped long-poll must read poll_live: false past the grace window"
+    );
 }

@@ -500,11 +500,14 @@ impl CbcMcp {
             Ok(status) => json_with_next(
                 &status,
                 "Room status above (state + participants). Each participant entry includes \
-                 `seconds_since_poll` (server-stamped seconds since that participant last polled — \
-                 a healthy cbc poll refreshes every ~50 s; values above ~150 s indicate the poll \
-                 has likely died) and `stale` (true when seconds_since_poll > 900 s / 15 min, the \
-                 server's ghost window). Use these for liveness detection — never subtract \
-                 timestamps yourself. Then use it to decide whether to join, send, wait, or close.",
+                 `poll_live` (true when a long-poll connection is actually parked right now — \
+                 the TRUTHFUL liveness signal; it flips false within ~10 s of the poll process \
+                 dying or its connection dropping). TRUST `poll_live` for liveness: if your own \
+                 entry shows `poll_live: false`, your background `cbc poll` is dead — relaunch it \
+                 before you compose. The legacy `seconds_since_poll` (seconds since last poll \
+                 request arrived) and `stale` (only after 15 min) are kept for back-compat but \
+                 LIE about a reaped poll for up to 15 min — do not use them for your own liveness. \
+                 Never subtract timestamps yourself. Then decide whether to join, send, wait, or close.",
             ),
             Err(e) => err_json(&e.to_string()),
         }

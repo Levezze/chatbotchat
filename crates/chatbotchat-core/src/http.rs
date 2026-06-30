@@ -3,6 +3,7 @@ use crate::ids;
 use crate::lifecycle::{self, LifecycleEvent};
 use crate::message::{Message, MessageType, Severity};
 use crate::participant::Participant;
+use crate::presence::Presence;
 use crate::room::{Room, RoomConfig, RoomState};
 use crate::storage::{ExtendOutcome, RoomSummaryRow, Storage, StorageError};
 use crate::waiter::{backoff_secs, wait_for_message, wait_for_message_until, Hub, WaitOutcome};
@@ -18,7 +19,7 @@ use chatbotchat_protocol::{
     SendMessageResponse, SignalRequest, SignalResponse, WaitRequest, WaitResponse, WaitStatus,
 };
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -32,6 +33,11 @@ const DEFAULT_WAIT_CAP: Duration = Duration::from_secs(600);
 pub struct AppState {
     storage: Storage,
     hub: Arc<Hub>,
+    /// Truthful poll-liveness: tracks which participant handles have a long-poll
+    /// connection parked *right now*. Unlike `last_poll_at` (a timestamp stamped
+    /// at request arrival that never invalidates on disconnect), a dropped
+    /// connection clears here, so `poll_live` reflects a real connection.
+    presence: Arc<Presence>,
     /// Server-side cap for a single `wait` long-poll.
     wait_cap: Duration,
 }
@@ -41,6 +47,7 @@ impl AppState {
         AppState {
             storage,
             hub: Arc::new(Hub::new()),
+            presence: Arc::new(Presence::new()),
             wait_cap: DEFAULT_WAIT_CAP,
         }
     }
@@ -51,6 +58,23 @@ impl AppState {
         AppState {
             storage,
             hub: Arc::new(Hub::new()),
+            presence: Arc::new(Presence::new()),
+            wait_cap,
+        }
+    }
+
+    /// Construct with an explicit long-poll cap *and* presence grace window.
+    /// Lets tests assert the drop→`poll_live: false` transition without waiting
+    /// the full default grace.
+    pub fn with_wait_cap_and_grace(
+        storage: Storage,
+        wait_cap: Duration,
+        grace: Duration,
+    ) -> Self {
+        AppState {
+            storage,
+            hub: Arc::new(Hub::new()),
+            presence: Arc::new(Presence::with_grace(grace)),
             wait_cap,
         }
     }
@@ -159,7 +183,12 @@ async fn get_room(
         .await?
         .ok_or(ApiError::NotFound)?;
     let participants = state.storage.list_participants(&id).await?;
-    Ok(Json(room_to_status(&room, &participants, now)?))
+    Ok(Json(room_to_status(
+        &room,
+        &participants,
+        now,
+        &state.presence,
+    )?))
 }
 
 /// Query params for `GET /rooms`. `state` deserializes from the same snake_case
@@ -223,6 +252,7 @@ async fn transcript(
         hard_cap_count,
         soft_cap_consecutive,
         now,
+        &state.presence,
     )?))
 }
 
@@ -1145,6 +1175,15 @@ async fn wait_room(
         .touch_last_poll(&caller.handle, OffsetDateTime::now_utc())
         .await?;
 
+    // Truthful liveness: register this connection as a parked poll for the whole
+    // handler. `_park` is dropped on EVERY exit below — message return, timeout,
+    // the immediate `awaiting_counterpart`/terminal-drain returns, AND the
+    // framework cancelling this future when the client disconnects — so
+    // `poll_live` reflects a real in-flight connection, not the never-invalidated
+    // `last_poll_at` timestamp. While held, `active > 0` keeps even a full 50s
+    // park reading live; the grace window only smooths the brief between-poll gap.
+    let _park = state.presence.enter(&caller.handle);
+
     // State entry gate: a paused/closed/archived room never long-polls, but it
     // must still DRAIN. A zero-cap claim delivers any already-unread message
     // (one per call) before reporting the terminal status — otherwise closing or
@@ -1618,7 +1657,11 @@ fn rand_sess_candidates() -> impl Iterator<Item = String> {
     })
 }
 
-fn participant_view(p: &Participant, now: OffsetDateTime) -> Result<ParticipantView, ApiError> {
+fn participant_view(
+    p: &Participant,
+    now: OffsetDateTime,
+    presence: &Presence,
+) -> Result<ParticipantView, ApiError> {
     let elapsed = now - p.last_poll_at;
     let seconds_since_poll = elapsed.whole_seconds().max(0);
     let stale = elapsed > lifecycle::GHOST_AFTER;
@@ -1633,6 +1676,7 @@ fn participant_view(p: &Participant, now: OffsetDateTime) -> Result<ParticipantV
             .map_err(|e| ApiError::Internal(e.to_string()))?,
         seconds_since_poll,
         stale,
+        poll_live: presence.is_live(&p.handle, Instant::now()),
         nickname: p.nickname.clone(),
     })
 }
@@ -1649,10 +1693,11 @@ fn room_to_status(
     room: &Room,
     participants: &[Participant],
     now: OffsetDateTime,
+    presence: &Presence,
 ) -> Result<RoomStatus, ApiError> {
     let participants = participants
         .iter()
-        .map(|p| participant_view(p, now))
+        .map(|p| participant_view(p, now, presence))
         .collect::<Result<Vec<_>, ApiError>>()?;
 
     Ok(RoomStatus {
@@ -1692,10 +1737,11 @@ fn room_to_transcript(
     hard_cap_count: i64,
     soft_cap_consecutive: i64,
     now: OffsetDateTime,
+    presence: &Presence,
 ) -> Result<RoomTranscript, ApiError> {
     let participants = participants
         .iter()
-        .map(|p| participant_view(p, now))
+        .map(|p| participant_view(p, now, presence))
         .collect::<Result<Vec<_>, ApiError>>()?;
     let messages = messages
         .iter()
