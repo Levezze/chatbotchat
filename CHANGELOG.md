@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.5](https://github.com/Levezze/chatbotchat/compare/v0.14.4...v0.14.5) (2026-06-30)
+
+
+### Bug Fixes
+
+* **cbc:** truthful poll_live sensor + non-blocking Stop-hook advisory (stop overnight deafness/thrash) ([#101](https://github.com/Levezze/chatbotchat/issues/101)) ([8f92bd4](https://github.com/Levezze/chatbotchat/commit/8f92bd43f0f267706333430f993e92b918107a1a))
+
 ## [0.14.4](https://github.com/Levezze/chatbotchat/compare/v0.14.3...v0.14.4) (2026-06-30)
 
 
