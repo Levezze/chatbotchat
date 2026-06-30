@@ -22,6 +22,16 @@ use std::time::{Duration, Instant};
 /// `MIN_REPOLL_SLEEP_SECS`), so this grace smooths the gap between consecutive
 /// parks without masking a real death longer than this. ~90× tighter than the
 /// 15-minute `GHOST_AFTER` window the timestamp path uses.
+///
+/// Deliberately does NOT cover the longest *legitimate* between-park gap: when
+/// the server hands the client a backoff (`waiting_user`/busy `retry_after`, up
+/// to ~60s) a healthy-but-quiet poll sleeps that long with no park, so its
+/// `poll_live` reads false. That false-DEADNESS is intentional and is handled by
+/// the consumer, NOT by widening this constant: `poll_live` is a SELF "confirm
+/// the process, relaunch only if absent" trigger, and counterpart escalation
+/// stays on `seconds_since_poll >= 150` (which already excludes the ≤60s gap).
+/// Do NOT raise this toward 60s to "fix" the flicker — that re-introduces a
+/// multi-second lie on a *real* death, the exact bug this registry removes.
 pub const DEFAULT_GRACE: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
@@ -56,7 +66,8 @@ impl Presence {
     /// for the duration of the park; dropping it (return, timeout, or the
     /// handler future being cancelled on disconnect) records the release.
     pub fn enter(self: &Arc<Self>, handle: &str) -> ParkGuard {
-        let mut map = self.inner.lock().expect("presence mutex");
+        // Poison-recovering lock (see `release` for why we never propagate it).
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let st = map.entry(handle.to_string()).or_insert(ParkState {
             active: 0,
             last_release: None,
@@ -73,7 +84,8 @@ impl Presence {
     /// grace with no active park, the entry is forgotten (lazy GC) and the
     /// handle reads dead.
     pub fn is_live(&self, handle: &str, now: Instant) -> bool {
-        let mut map = self.inner.lock().expect("presence mutex");
+        // Poison-recovering lock (see `release` for why we never propagate it).
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         match map.get(handle) {
             None => false,
             Some(st) if st.active > 0 => true,
@@ -90,7 +102,12 @@ impl Presence {
     }
 
     fn release(&self, handle: &str) {
-        let mut map = self.inner.lock().expect("presence mutex");
+        // Recover rather than propagate a poisoned lock: these critical sections
+        // only touch a HashMap + integer counters (no user code can panic under
+        // the guard), and `release` runs inside `ParkGuard::drop` — a panic there
+        // during unwinding would escalate to a process `abort()` of the whole
+        // daemon. Liveness bookkeeping must never take the daemon down.
+        let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(st) = map.get_mut(handle) {
             st.active = st.active.saturating_sub(1);
             st.last_release = Some(Instant::now());
