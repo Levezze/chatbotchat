@@ -66,8 +66,16 @@ impl Presence {
     /// for the duration of the park; dropping it (return, timeout, or the
     /// handler future being cancelled on disconnect) records the release.
     pub fn enter(self: &Arc<Self>, handle: &str) -> ParkGuard {
+        let now = Instant::now();
         // Poison-recovering lock (see `release` for why we never propagate it).
         let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        // Opportunistic whole-map GC. `is_live` only forgets the handle it is
+        // queried for, so a handle that parks once and is never read again would
+        // otherwise pin a dead `active: 0` entry forever — unbounded growth on an
+        // always-on daemon across many ephemeral rooms. Sweeping here (O(n) once
+        // per park, n tiny) keeps the map bounded by the count of *currently*
+        // live-or-recently-released handles.
+        Self::retain_live(&mut map, self.grace, now);
         let st = map.entry(handle.to_string()).or_insert(ParkState {
             active: 0,
             last_release: None,
@@ -77,6 +85,18 @@ impl Presence {
             presence: Arc::clone(self),
             handle: handle.to_string(),
         }
+    }
+
+    /// Drop entries with no active park that are past `grace` as of `now`. An
+    /// active park, or a release within grace, is retained. Pure on the passed
+    /// map so both `enter` (under its own lock) and tests can drive it.
+    fn retain_live(map: &mut HashMap<String, ParkState>, grace: Duration, now: Instant) {
+        map.retain(|_, st| {
+            st.active > 0
+                || st
+                    .last_release
+                    .is_some_and(|t| now.saturating_duration_since(t) <= grace)
+        });
     }
 
     /// Is there a live parked poll for `handle` as of `now`? True while a park is
@@ -186,6 +206,48 @@ mod tests {
         drop(g2);
         // Both released, past the 1 ms grace ⇒ dead.
         assert!(!p.is_live("h1", Instant::now() + Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn sweep_drops_unqueried_past_grace_entry() {
+        // A handle that parks once and is NEVER read via `is_live` would pin a
+        // dead `active: 0` entry forever without a whole-map sweep — the growth
+        // the lazy per-handle GC misses. `retain_live` (run by `enter`) drops it.
+        let p = Arc::new(Presence::with_grace(Duration::from_secs(10)));
+        let t0 = Instant::now();
+        {
+            let _g = p.enter("stale"); // released; active=0, last_release≈t0
+        }
+        {
+            let mut map = p.inner.lock().unwrap();
+            Presence::retain_live(&mut map, p.grace, t0 + Duration::from_secs(11));
+            assert!(
+                !map.contains_key("stale"),
+                "an un-queried, past-grace handle must be swept so the map stays bounded"
+            );
+        }
+    }
+
+    #[test]
+    fn sweep_keeps_active_and_within_grace_entries() {
+        let p = Arc::new(Presence::with_grace(Duration::from_secs(10)));
+        let t0 = Instant::now();
+        let _live = p.enter("live"); // active=1
+        {
+            let _g = p.enter("recent"); // active=0, last_release≈t0
+        }
+        {
+            let mut map = p.inner.lock().unwrap();
+            Presence::retain_live(&mut map, p.grace, t0 + Duration::from_secs(5));
+            assert!(
+                map.contains_key("live"),
+                "an active park must survive the sweep"
+            );
+            assert!(
+                map.contains_key("recent"),
+                "a release within grace must survive the sweep"
+            );
+        }
     }
 
     #[test]
