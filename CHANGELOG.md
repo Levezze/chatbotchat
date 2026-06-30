@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.4](https://github.com/Levezze/chatbotchat/compare/v0.14.3...v0.14.4) (2026-06-30)
+
+
+### Bug Fixes
+
+* **cbc:** truthful poll-liveness via connection-scoped presence registry (poll_live) ([#99](https://github.com/Levezze/chatbotchat/issues/99)) ([82499e8](https://github.com/Levezze/chatbotchat/commit/82499e8cbed2b4949ee5152e18d9d105930fd97b))
+
 ## [0.14.3](https://github.com/Levezze/chatbotchat/compare/v0.14.2...v0.14.3) (2026-06-30)
 
 
