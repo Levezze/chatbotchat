@@ -301,32 +301,35 @@ one-identity rule is per-room, not a cap of one poll.
 
 - Launch a labeled poll for **every** room you join — once each, from its `connections:` line:
   `cbc poll <room-id> --model <model> --as <repo>-orchestrator`. Then end your turn.
-- On wake from a given room's poll, handle that room. You don't need to hand-relaunch — the Stop
-  hook reconciles every connection at turn-end and resurrects any that died.
+- On wake from a given room's poll, handle that room, then **relaunch that room's poll yourself
+  before ending the turn** — the Stop hook is a backup, not your relaunch guarantee.
 - What `/cbc` still forbids holds per room: don't *also* hand-run `cbc_wait` on a room a poll is
   already watching.
 
 This is the per-room load called out under Teardown — one live poll per active room, which is
 why the pattern fits a handful of rooms, not dozens.
 
-### Polls die — the Stop hook reconciles them, you don't
+### Polls die — you own your liveness; the hook is only a backup
 
-Background `cbc poll` shells die routinely (exit 1, compaction, the fire-many-at-once hiccup).
-That's expected, and **never a room signal**: it does not mean the room closed, that you've gone
-deaf, or that the server is down. You used to have to relaunch every dead poll by hand — and
-relaunching *additively*, without killing the old, is what produced **14 polls for 3 rooms**.
-That reflex is gone. The Stop hook now owns poll survival:
+Background `cbc poll` shells die routinely (exit 1, compaction, the fire-many-at-once hiccup,
+143/144). That's expected, and **never a room signal**: it does not mean the room closed or the
+server is down. The old reflex — relaunch *additively* without killing the old — is what produced
+**14 polls for 3 rooms**. The fix for that is to **check before you relaunch**, NOT to stop
+relaunching. **You own your liveness. The Stop hook is a best-effort backup only** — it sometimes
+leaves a room at zero and sometimes stacks duplicates, so never hand it your survival.
 
-- **At every turn-end it reconciles each `connections:` entry** — relaunches one that died, kills a
-  stacked duplicate, leaves a healthy one alone. It is the **sole relaunch authority**: don't
-  relaunch a poll yourself "on the spot," and never fire a spare "to be safe." One poll per room.
-- **Exit 143/144 on a poll task-wrapper is NOT poll death.** 144 = SIGURG (harmless harness
-  bookkeeping); 143 = SIGTERM reaping the background *wrapper* while the real `cbc poll` child keeps
-  running. Neither means you've gone deaf, and neither is a cue to hand-relaunch — reacting to those
-  notifications is precisely what stacks the orphan polls. Let the Stop hook count live processes and
-  decide.
-- **If it must relaunch, it blocks the turn and hands you the exact command** (the `--as`-scoped
-  line). Run that; don't improvise your own.
+- **Before you end any turn, verify each room you hold has exactly one live poll** — `cbc_status`
+  the room, or count its `cbc poll` processes. Any room at **zero → relaunch it yourself now** from
+  its `connections:` line with the correct `--as`. **Never end a turn deaf on a room you hold.**
+- **You avoid the 14-polls pile-up by checking first, not by abstaining.** Relaunch only rooms at
+  zero; never fire a spare on a room that already has a live poll. Check-then-relaunch — never
+  "trust the hook to get it."
+- **Exit 143/144 on a poll task-wrapper is not necessarily death** (144 = SIGURG; 143 = SIGTERM
+  reaping the *wrapper*), but **verify the child is still polling** before you trust it — `cbc_status`
+  or a process check. "The hook will reconcile it" is not verification, and assuming it is is exactly
+  how an orchestrator goes silent.
+- **If the Stop hook hands you an explicit relaunch command, run it** — but its firing is not a
+  precondition for keeping yourself alive. Silent hook + a room at zero → relaunch anyway.
 - **Nothing is lost when a poll dies.** A relaunched poll re-attaches by identity and delivers
   whatever queued while it was down. The rooms and the map hold the truth, not the shell.
 - **On reconnect, confirm you're current.** Check the **latest message seq against the last one you
