@@ -4156,6 +4156,22 @@ async fn poll_live_of(app: &axum::Router, room_id: &str, repo: &str) -> bool {
         .unwrap_or_else(|| panic!("poll_live missing for {repo}: {p}"))
 }
 
+/// Poll the room status until `repo` reads `poll_live: true`, or panic after ~2s.
+/// Replaces a single fixed pre-sleep before the "became true" assertion: on a
+/// loaded runner the handler may not have reached the park inside a fixed window,
+/// so a real-but-not-yet-true read would flake. Retrying removes the race without
+/// loosening the assertion (the cap is 10s, so a genuine non-park still fails).
+async fn await_poll_live(app: &axum::Router, room_id: &str, repo: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !poll_live_of(app, room_id, repo).await {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "poll_live for {repo} never became true within 2s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 /// The keystone regression: a participant currently parked on a long-poll reads
 /// `poll_live: true`; once that connection is dropped (process death / TCP reset,
 /// modeled here by aborting the handler future), `poll_live` flips to `false`
@@ -4181,13 +4197,10 @@ async fn poll_live_is_true_while_parked_and_false_after_the_connection_drops() {
         tokio::spawn(async move { wait(&app, &room_id, "repo-b", "sonnet46", "/work/b").await })
     };
 
-    // Let B reach the park, then observe the truth: B is live, A (never parked)
-    // is not.
-    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-    assert!(
-        poll_live_of(&app, &room_id, "repo-b").await,
-        "a parked long-poll must read poll_live: true"
-    );
+    // Wait for B to reach the park (poll-until-live, not a fixed sleep that could
+    // fire before the handler parks on a loaded runner), then observe the truth:
+    // B is live, A (never parked) is not.
+    await_poll_live(&app, &room_id, "repo-b").await;
     assert!(
         !poll_live_of(&app, &room_id, "repo-a").await,
         "a participant with no parked poll must read poll_live: false"
@@ -4251,12 +4264,9 @@ async fn poll_live_reflects_a_real_tcp_client_disconnect() {
     stream.write_all(req.as_bytes()).await.expect("write req");
     stream.flush().await.expect("flush");
 
-    // Let the handler reach the park, then confirm the real connection is live.
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    assert!(
-        poll_live_of(&app, &room_id, "repo-b").await,
-        "a wait parked over a real TCP connection must read poll_live: true"
-    );
+    // Wait for the handler to reach the park (poll-until-live, not a fixed sleep),
+    // then confirm the real connection is live.
+    await_poll_live(&app, &room_id, "repo-b").await;
 
     // The client dies: closing the socket is exactly a reaped `cbc poll`.
     drop(stream);

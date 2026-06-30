@@ -326,9 +326,14 @@ pub enum ReconcileAction {
     /// live process table at kill time (see `kill_surplus_polls`), so no count
     /// is carried here — a planned count would only go stale before the kill.
     KillExtras,
-    /// Zero polls and none launched this turn — block turn-end and force the
-    /// model to relaunch (only a model-launched poll can wake the session).
-    BlockAndRelaunch,
+    /// Zero polls and none launched this turn — surface a NON-blocking advisory
+    /// to relaunch. Deliberately does NOT block turn-end: under the timer-driven
+    /// liveness model (the `/loop` heartbeat) the agent owns its own liveness and
+    /// re-polls every beat, so a momentarily-absent poll is normal (bounded beat
+    /// polls exit by design). A forced block here is both unnecessary and the
+    /// engine of the overnight relaunch-thrash loop (block → relaunch → SIGTERM →
+    /// block …). The hook is a BACKUP hint, not the relaunch authority.
+    AdviseRelaunch,
 }
 
 /// The pure reconcile decision.  `n` = live polls matching this connection's
@@ -339,13 +344,13 @@ pub fn reconcile_action(n: usize, launched_this_turn: bool) -> ReconcileAction {
     match n {
         1 => ReconcileAction::Ok,
         0 if launched_this_turn => ReconcileAction::Ok,
-        0 => ReconcileAction::BlockAndRelaunch,
+        0 => ReconcileAction::AdviseRelaunch,
         _ => ReconcileAction::KillExtras,
     }
 }
 
 /// The exact relaunch / declared poll command for a connection.  This is both
-/// what the reconcile injects on `BlockAndRelaunch` and the canonical form a
+/// what the reconcile surfaces on `AdviseRelaunch` and the canonical form a
 /// running poll is matched against — one source of truth.
 pub fn poll_command(room_id: &str, model: &str, identity: Option<&str>) -> String {
     match identity {
@@ -437,7 +442,7 @@ pub struct KillOrder {
 }
 
 /// The reconcile plan for one Stop event: surplus kills to perform now, and the
-/// relaunch commands to inject if the turn must be blocked.
+/// relaunch commands to surface as a non-blocking advisory.
 #[derive(Debug, PartialEq, Eq, Clone, Default)]
 pub struct StopPlan {
     pub kills: Vec<KillOrder>,
@@ -462,7 +467,7 @@ pub fn plan_stop(
                 room_id: c.room_id.clone(),
                 identity: c.identity.clone(),
             }),
-            ReconcileAction::BlockAndRelaunch => {
+            ReconcileAction::AdviseRelaunch => {
                 plan.relaunch.push(poll_command(&c.room_id, &c.model, id))
             }
         }
@@ -551,30 +556,36 @@ pub fn scan_declared(cbc_dir: &Path) -> Vec<DeclaredConnection> {
     out
 }
 
-/// The Stop-hook block JSON that forces the model to relaunch dead polls.
+/// The Stop-hook advisory JSON — a NON-blocking nudge to relaunch absent polls.
 ///
-/// The Stop event's blocking contract is a TOP-LEVEL `{"decision":"block",
-/// "reason":<text>}` — `reason` is the field fed back to the model when it is
-/// blocked from ending its turn, so the SOLE-relaunch-authority directive plus
-/// the exact commands ride there (the model relaunches here and ONLY here; a
-/// poll exit is never an independent relaunch trigger). `hookSpecificOutput.
-/// additionalContext` is the NON-blocking continue path and is deliberately not
-/// used here: nesting `decision` under it (the prior shape) left the block inert
-/// because the harness never read it. See code.claude.com/docs/en/hooks.md.
-fn stop_block_json(relaunch: &[String]) -> String {
-    let mut reason = String::from(
-        "⚠ CBC RECONCILE — one or more declared rooms have NO live poll and none was launched \
-         this turn. You are deaf on those rooms. Before yielding, relaunch each as a background \
-         task (run_in_background) — this hook is the SOLE relaunch authority; do NOT relaunch \
-         polls on your own from a poll-exit notification:",
+/// Deliberately NOT a top-level `{"decision":"block"}`: blocking turn-end was the
+/// engine of the overnight relaunch-thrash loop (block → forced relaunch →
+/// harness SIGTERM in seconds → next Stop sees zero → block again, all night).
+/// It is also incompatible with the timer-driven liveness model: a `/loop`
+/// heartbeat uses BOUNDED beat polls (`--max-polls 1`) that exit by design, so
+/// between beats a Stop event legitimately sees zero live polls — a block there
+/// would fire on every turn-end. So the relaunch hint rides
+/// `hookSpecificOutput.additionalContext` (the non-blocking channel): surfaced as
+/// context where the harness supports it, harmlessly inert where it does not, and
+/// never forcing a turn either way. Liveness is owned by the agent's heartbeat;
+/// this hook is a BACKUP hint. See code.claude.com/docs/en/hooks.md.
+fn stop_advise_json(relaunch: &[String]) -> String {
+    let mut ctx = String::from(
+        "CBC liveness (advisory) — one or more declared rooms have NO live poll right now and \
+         none was launched this turn. If you are still working these rooms and are not on a timer \
+         heartbeat, relaunch each as a background task (run_in_background); otherwise your next \
+         heartbeat beat will re-poll. This is a BACKUP hint, not a block — your heartbeat owns \
+         liveness:",
     );
     for cmd in relaunch {
-        reason.push_str("\n  ");
-        reason.push_str(cmd);
+        ctx.push_str("\n  ");
+        ctx.push_str(cmd);
     }
     let payload = serde_json::json!({
-        "decision": "block",
-        "reason": reason,
+        "hookSpecificOutput": {
+            "hookEventName": "Stop",
+            "additionalContext": ctx,
+        }
     });
     payload.to_string()
 }
@@ -585,9 +596,9 @@ fn stop_block_json(relaunch: &[String]) -> String {
 /// declared connections, and for each reconciles its live poll count against
 /// exactly-one.  Surplus polls are killed via `kill_fn` (identity-scoped, safe).
 /// If any room has zero polls and none was launched this turn — and the loop
-/// guard (`stop_hook_active`) is not set — it blocks turn-end and injects the
-/// relaunch commands.  `count_fn` / `launched_fn` are seams over the process
-/// table and the transcript.
+/// guard (`stop_hook_active`) is not set — it surfaces a NON-blocking advisory
+/// (never blocks turn-end) listing the relaunch commands.  `count_fn` /
+/// `launched_fn` are seams over the process table and the transcript.
 pub fn run_stop<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
@@ -629,9 +640,11 @@ pub fn run_stop<R: Read, W: Write>(
         kill_fn(order);
     }
 
-    // Block only when a relaunch is owed AND the loop guard is clear.
+    // Surface a NON-blocking relaunch advisory when one is owed AND the loop
+    // guard is clear. Never blocks turn-end (see `stop_advise_json`): the agent's
+    // timer heartbeat, not this hook, owns liveness.
     if !plan.relaunch.is_empty() && !stop_hook_active {
-        write!(writer, "{}", stop_block_json(&plan.relaunch))?;
+        write!(writer, "{}", stop_advise_json(&plan.relaunch))?;
     }
     Ok(())
 }
@@ -785,11 +798,8 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_zero_not_launched_blocks_and_relaunches() {
-        assert_eq!(
-            reconcile_action(0, false),
-            ReconcileAction::BlockAndRelaunch
-        );
+    fn reconcile_zero_not_launched_advises_relaunch() {
+        assert_eq!(reconcile_action(0, false), ReconcileAction::AdviseRelaunch);
     }
 
     #[test]
@@ -921,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn run_stop_blocks_and_injects_relaunch_for_dead_poll() {
+    fn run_stop_advises_relaunch_for_dead_poll_without_blocking() {
         let dir = tempfile::tempdir().unwrap();
         let cbc = dir.path().join(".cbc");
         std::fs::create_dir_all(&cbc).unwrap();
@@ -944,33 +954,36 @@ mod tests {
         .unwrap();
 
         let text = String::from_utf8(out).unwrap();
-        // The Stop harness reads `decision`/`reason` at the TOP LEVEL of the hook
-        // JSON — a `decision` nested under `hookSpecificOutput` is ignored and the
-        // turn is NOT blocked. Assert the parsed shape, not a substring, so a
-        // regression back to the nested form is caught.
         let v: serde_json::Value =
-            serde_json::from_str(&text).expect("Stop block output must be valid JSON");
-        assert_eq!(
-            v.get("decision").and_then(|d| d.as_str()),
-            Some("block"),
-            "`decision: \"block\"` must be TOP-LEVEL (where Stop reads it), not nested; got:\n{text}"
-        );
-        let reason = v.get("reason").and_then(|r| r.as_str()).unwrap_or("");
+            serde_json::from_str(&text).expect("Stop advisory output must be valid JSON");
+        // KEY REGRESSION GUARD: the Stop hook must NEVER emit a top-level
+        // `decision: block` — blocking turn-end was the engine of the overnight
+        // relaunch-thrash loop and is incompatible with the timer-driven model
+        // (bounded beat polls exit by design → every Stop would see zero).
         assert!(
-            reason.contains("cbc poll room-a-20260625-1000 --model opus --as api"),
-            "the relaunch command must ride in the top-level `reason` (the field fed back to the \
-             model on a Stop block); got reason:\n{reason}"
+            v.get("decision").is_none(),
+            "Stop must not block turn-end; got a `decision` field:\n{text}"
+        );
+        // The relaunch command rides the NON-blocking additionalContext channel.
+        let ctx = v
+            .get("hookSpecificOutput")
+            .and_then(|h| h.get("additionalContext"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("");
+        assert!(
+            ctx.contains("cbc poll room-a-20260625-1000 --model opus --as api"),
+            "the relaunch command must ride the non-blocking additionalContext; got:\n{text}"
         );
         assert!(kills.is_empty());
     }
 
     #[test]
-    fn run_stop_legacy_worker_relaunch_reason_carries_recovered_as() {
+    fn run_stop_legacy_worker_advisory_carries_recovered_as() {
         // Stop-path twin of run_compact_legacy_worker_recovers_identity_…: the
         // ACTUAL bug shape — a LEGACY worker file (no `connections:` block) whose
         // poll-label holds the full `cbc poll … --as <id>` command.  With no live
-        // poll, run_stop must block and the injected relaunch `reason` must carry
-        // the recovered `--as` (else the model relaunches identity-less and 400s).
+        // poll, run_stop surfaces a NON-blocking advisory whose relaunch command
+        // must carry the recovered `--as` (else a relaunch would 400 identity-less).
         let dir = tempfile::tempdir().unwrap();
         let cbc = dir.path().join(".cbc");
         std::fs::create_dir_all(&cbc).unwrap();
@@ -994,24 +1007,27 @@ mod tests {
 
         let text = String::from_utf8(out).unwrap();
         let v: serde_json::Value =
-            serde_json::from_str(&text).expect("Stop block output must be valid JSON");
-        assert_eq!(
-            v.get("decision").and_then(|d| d.as_str()),
-            Some("block"),
-            "a legacy worker with a dead poll must block turn-end; got:\n{text}"
-        );
-        let reason = v.get("reason").and_then(|r| r.as_str()).unwrap_or("");
+            serde_json::from_str(&text).expect("Stop advisory output must be valid JSON");
         assert!(
-            reason.contains(
+            v.get("decision").is_none(),
+            "the Stop hook must not block turn-end; got:\n{text}"
+        );
+        let ctx = v
+            .get("hookSpecificOutput")
+            .and_then(|h| h.get("additionalContext"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("");
+        assert!(
+            ctx.contains(
                 "cbc poll cbc-report-seeds-20260626-0027 --model claude-sonnet-4-6 --as mvp-api-9df0"
             ),
-            "the relaunch command injected on the Stop path must carry the `--as` recovered \
-             from the legacy poll-label (else the relaunch 400s); got reason:\n{reason}"
+            "the advisory relaunch command must carry the `--as` recovered from the legacy \
+             poll-label (else a relaunch 400s); got:\n{ctx}"
         );
     }
 
     #[test]
-    fn run_stop_loop_guard_suppresses_block_when_stop_hook_active() {
+    fn run_stop_loop_guard_suppresses_advisory_when_stop_hook_active() {
         let dir = tempfile::tempdir().unwrap();
         let cbc = dir.path().join(".cbc");
         std::fs::create_dir_all(&cbc).unwrap();
@@ -1099,7 +1115,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_stop_blocks_and_relaunches_dead_poll() {
+    fn plan_stop_advises_relaunch_for_dead_poll() {
         let conns = vec![conn("orch", "room-20260625-1000", Some("me"), "sonnet")];
         let plan = plan_stop(&conns, |_, _| 0, |_, _| false);
         assert!(plan.kills.is_empty());
