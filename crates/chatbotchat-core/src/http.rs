@@ -66,11 +66,7 @@ impl AppState {
     /// Construct with an explicit long-poll cap *and* presence grace window.
     /// Lets tests assert the drop→`poll_live: false` transition without waiting
     /// the full default grace.
-    pub fn with_wait_cap_and_grace(
-        storage: Storage,
-        wait_cap: Duration,
-        grace: Duration,
-    ) -> Self {
+    pub fn with_wait_cap_and_grace(storage: Storage, wait_cap: Duration, grace: Duration) -> Self {
         AppState {
             storage,
             hub: Arc::new(Hub::new()),
