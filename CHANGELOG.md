@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.3](https://github.com/Levezze/chatbotchat/compare/v0.14.2...v0.14.3) (2026-06-30)
+
+
+### Bug Fixes
+
+* **cbc:** skills own poll liveness; demote Stop hook to backup ([#97](https://github.com/Levezze/chatbotchat/issues/97)) ([a1c5097](https://github.com/Levezze/chatbotchat/commit/a1c5097595b28aa2308b6be07800d193db9d47b1))
+
 ## [0.14.2](https://github.com/Levezze/chatbotchat/compare/v0.14.1...v0.14.2) (2026-06-28)
 
 
