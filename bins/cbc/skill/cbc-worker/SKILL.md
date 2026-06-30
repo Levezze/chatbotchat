@@ -29,7 +29,7 @@ at the end.
 ```markdown
 ## Worker charter — read me first, every session
 **I am a worker. I implement one bounded piece; the orchestrator holds the map.**
-- **I own my poll's liveness — I verify it before every turn-end; the Stop hook is only a backup.** Before I end any turn I confirm my declared poll is actually live (`cbc_status` my room, or check for my `cbc poll` process). If it's **dead, I relaunch it myself now** from my `connections:` line with my `--as` — I do **not** end a turn deaf waiting for the hook to maybe do it. The hook is best-effort: it sometimes leaves the poll dead and sometimes stacks duplicates, so it is a safety net, not my guarantee. I avoid the 14-polls-for-3-rooms pile-up by **checking first** — relaunch only if mine is dead, never fire a spare on a live one — NOT by abstaining from relaunch. A `cbc poll` task-wrapper exiting **143** (SIGTERM reap of the wrapper) or **144** (SIGURG — harmless bookkeeping) is *not necessarily* poll death, but I **verify the real poll is still running** before trusting it — "the hook will reconcile it" is not verification, and assuming it is is exactly how I go dark. (Poll reconcile)
+- **I own my poll's liveness — I verify it before every turn-end; the Stop hook is only a backup.** Before I end any turn I confirm my declared poll is actually live (`cbc_status` my room, or check for my `cbc poll` process). If it's **dead, I relaunch it myself now** from my `connections:` line with my `--as` — I do **not** end a turn deaf waiting for the hook to maybe do it. The hook is best-effort: it sometimes leaves the poll dead and sometimes stacks duplicates, so it is a safety net, not my guarantee. I avoid the 14-polls-for-3-rooms pile-up by **checking first** — relaunch only if mine is dead, never fire a spare on a live one — NOT by abstaining from relaunch. A `cbc poll` task-wrapper exiting **143** (SIGTERM reap of the wrapper) or **144** (SIGURG — harmless bookkeeping) is *not necessarily* poll death, but I **verify the real poll is still running** before trusting it — "the hook will reconcile it" is not verification, and assuming it is is exactly how I go dark. **For unattended/overnight runs the turn-end check alone is not enough** — a parked idle session never reaches another turn-end, so a reaped poll leaves me permanently deaf; there I arm a **timer beat** (`/loop`/`ScheduleWakeup`) that drains via `cbc_recap` and refreshes presence each tick (see *Poll survival*). (Poll reconcile)
 - I never propose or suggest closing my report room — the orchestrator owns closure. (Rule 1)
 - I push a status update to the orchestrator on every transition — stale orchestrator
   state is the main source of coordination failure. `phase ≠ last-synced-to-orchestrator`
@@ -397,7 +397,7 @@ When your piece merges:
    file). A closed room's poll left looping burns CPU and tokens (`/cbc` Closing). Then clean up
    your state file (or let `/cbc-clean` do it).
 
-## Your poll is your heartbeat — the hook keeps it beating
+## Your poll is your heartbeat — you keep it beating
 
 The orchestrator watches every worker room using `cbc_status` to read the server-stamped
 `seconds_since_poll` for your participant entry. A healthy poll refreshes this every ~50 s.
@@ -408,9 +408,11 @@ chat manually. This is the exact failure mode that causes orchestrators to stall
 
 **You hand-police the poll — the Stop hook is only a backstop.** Re-arm before yielding *is* a
 ritual you must run: before you end a turn, verify your poll is live and relaunch it yourself if
-it's dead. Do not rely on the hook to block turn-end and relaunch for you — it sometimes doesn't,
-and that silent miss is exactly what darkens you past the ~150 s flag. Launch once, then on any
-drop relaunch the one (check first, so you never stack a spare on a live poll).
+it's dead. The Stop hook no longer blocks turn-end — it only surfaces a **non-blocking advisory**
+listing the relaunch command (forcing a relaunch was the overnight thrash loop, and it is
+incompatible with a timer beat whose bounded polls exit between beats). So the hook will NOT stop
+you from ending a turn deaf; *you* must check. Launch once, then on any drop relaunch the one
+(check first, so you never stack a spare on a live poll).
 
 **To verify, read `poll_live` — not `seconds_since_poll`.** `cbc_status` now returns
 `poll_live` on your participant entry: it is `true` only while a long-poll is actually parked and
@@ -441,20 +443,41 @@ nothing is checking" — that is the wrong model. Your poll *is* your check-in s
 only time you need to reply is when the orchestrator sends you an explicit status
 *message* — re-ground with `cbc_recap` and answer with your current state.
 
-## Poll survival — you verify before yielding; the hooks are backups
+## Poll survival — attended vs unattended (AFK)
 
-There is **no pulse timer to arm** — but there *is* a check you run every turn: before you end it,
-confirm your poll is live and relaunch it yourself if it's dead. (The old self-check `sleep` shell
-is gone — it died on the same compaction it was meant to survive and relaunched additively, the
-14-polls bug. Verify-then-relaunch replaces it — *not* "trust the hook.") Coverage:
+Your liveness model depends on whether a human is watching your turns. The turn-end check below
+only fires *at a turn boundary* — which is enough while you're actively taking turns, and **not
+enough** when you park idle. Pick the model that matches how you're running.
 
-- **Awake but deaf** (you take a turn with a dead poll) — **you** catch it at turn-end and relaunch.
-  The Stop hook is a backstop here, but it sometimes misses; don't depend on it — verify yourself.
-- **Compaction** (everything torn down) — the SessionStart hook relaunches, but still confirm it
-  actually came back before you trust the line.
-- **Idle crash** (poll dies while you sit with no turns and no messages) — the residual gap: a dead
-  poll can't wake you, so nothing fires until your next turn. Bounded; on that next turn, verify and
-  relaunch first thing.
+**Attended (you're taking turns).** Before you end each turn, confirm your poll is live and
+relaunch it yourself if it's dead — `poll_live: false` **and** no `cbc poll` process → relaunch the
+one (check first, never stack). The Stop/SessionStart hooks are backups that sometimes miss; verify
+yourself. This covers *awake-but-deaf* (you catch it at turn-end) and *compaction* (SessionStart
+relaunches — confirm it actually came back). (The old self-check `sleep` shell is gone — it died on
+the same compaction it was meant to survive and relaunched additively, the 14-polls bug.)
+
+**Unattended (AFK / overnight) — arm a timer beat.** The residual gap the attended model cannot
+cover: if your session parks idle and the harness **reaps your background poll** (exit 143, SIGTERM,
+often within seconds), *no further turn-end ever fires* — nothing relaunches, the counterpart's next
+message never re-invokes you, and you go deaf until a human reopens your chat. A parked session has
+no next turn; this is not "bounded." Close it with a **timer-driven heartbeat** — the `/loop` skill
+or `ScheduleWakeup` — that re-fires on a schedule **regardless of whether the prior poll was
+reaped**. Each beat:
+
+  1. **`cbc_recap` your room** — a *lossless, non-consuming* drain. It returns full history and
+     never advances your read cursor, so any message that arrived while you were between beats is
+     still there and still claimable. Nothing is lost; worst case is one beat of latency.
+  2. **A short bounded presence refresh:** `cbc poll <room-id> --model <model> --as <id>
+     --max-polls 1 --poll-cap-secs 50`. One ~50 s park, then it exits and the next beat re-arms.
+     This keeps `last_poll_at`/`poll_live` fresh so the counterpart never false-escalates you as
+     dark at the ~150 s stale threshold (measured: across a beat loop `poll_live` stays `true` and
+     `seconds_since_poll` stays in single digits).
+  3. **Act on anything you drained, then re-arm the beat.**
+
+Because the wake is on a *timer*, a SIGTERM'd poll just means the next beat re-polls — no permanent
+deafness. **Honest limit:** if your *session itself* dies (no beat ever fires again), CBC cannot
+revive you — it is pull-only, there is no server-side wake. Only a human reopening the chat fixes
+that; the timer beat fixes every case short of it.
 
 ## Anti-patterns
 

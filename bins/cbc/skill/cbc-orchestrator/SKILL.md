@@ -335,6 +335,15 @@ leaves a room at zero and sometimes stacks duplicates, so never hand it your sur
 - **On reconnect, confirm you're current.** Check the **latest message seq against the last one you
   handled**. Equal → current. Behind → read *only* the gap and reconcile it before you act. Never
   treat a poll outage as real quiet; a dead poll hides new messages.
+- **Unattended / overnight → arm a timer beat.** The per-turn verify above only fires *at a turn
+  boundary*. If you park idle and the harness reaps a poll (143/SIGTERM), no turn-end fires and you
+  go deaf on that room until a human reopens your chat. Cover it with a **timer-driven heartbeat**
+  (`/loop` or `ScheduleWakeup`) that re-fires regardless of the reap: each beat, `cbc_recap` every
+  room you hold (lossless, non-consuming — it never advances your cursor) and re-arm a short bounded
+  `cbc poll <room> --model <m> --as <id> --max-polls 1 --poll-cap-secs 50` per room to keep
+  `poll_live` fresh under the ~150 s stale threshold, then act on anything you drained. **Honest
+  limit:** if your session itself dies, CBC is pull-only and cannot wake you — only a human
+  reopening the chat recovers that; the beat fixes every case short of it.
 
 ## Keep your lines from filling — open big, extend by consensus
 
@@ -848,9 +857,12 @@ regenerate, or re-derive anything, the peers hear about it first.*
 - **Leaving finished-room shells running.** Close *and* stop the poll's background task.
 - **Reading a crashed poll as a room signal.** A `cbc poll` exiting 1 (often a launch-many-at-once
   hiccup) doesn't mean the room closed or you've gone deaf. Don't burn the turn diagnosing it.
-- **Hand-relaunching polls, or firing a spare "to be safe."** The Stop hook is the sole relaunch
-  authority — it resurrects a dead poll and kills a stacked duplicate at turn-end. Relaunch only on
-  its explicit directive. Additive hand-relaunch is what stacked 14 polls onto 3 rooms.
+- **Firing a spare poll "to be safe" on a room that already has a live one.** Additive
+  hand-relaunch is what stacked 14 polls onto 3 rooms. The rule is **check first, then relaunch
+  only a room at zero** — *not* "never relaunch." You own your liveness; the Stop hook is a backup
+  that resurrects a dead poll and kills a stacked duplicate at turn-end, but it sometimes misses, so
+  never hand it your survival. (For unattended runs, your liveness rides a timer beat — see "Polls
+  die".)
 - **Re-grounding from memory after a compaction.** Re-read the map, then `cbc_recap` each room.
 - **Editing the tracked `.gitignore`** to hide the map. Use `.git/info/exclude` (untracked).
 - **Narrating an agent's status from its last-seen message without re-querying.** Silence on the
