@@ -397,6 +397,16 @@ pub struct ParticipantView {
     /// (currently 15 min).  A ghost cannot receive messages and does not count
     /// toward close/extend quorum.
     pub stale: bool,
+    /// TRUTHFUL liveness: `true` only when this participant has a long-poll
+    /// connection parked *right now* (or released within a short grace window).
+    /// Unlike `seconds_since_poll`/`stale` — derived from a timestamp stamped at
+    /// request arrival that is NEVER invalidated when the connection drops, so a
+    /// dead poll reads "fresh" for up to 15 min — this clears within ~10 s of the
+    /// poll process dying. Trust THIS for "is my poll alive?"; `poll_live: false`
+    /// means relaunch. `#[serde(default)]` ⇒ a pre-field server serializes
+    /// `false` (treated as not-live, the safe default).
+    #[serde(default)]
+    pub poll_live: bool,
     /// Optional friendly display label; `None` renders by handle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nickname: Option<String>,

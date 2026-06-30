@@ -23,6 +23,19 @@ async fn test_router_with_cap(cap: std::time::Duration) -> axum::Router {
     router(AppState::with_wait_cap(storage, cap))
 }
 
+/// A router with both an explicit long-poll cap and a short presence grace, so a
+/// test can observe the `poll_live` truth flip from a dropped connection without
+/// waiting the full default grace window.
+async fn test_router_with_cap_and_grace(
+    cap: std::time::Duration,
+    grace: std::time::Duration,
+) -> axum::Router {
+    let storage = Storage::connect("sqlite::memory:")
+        .await
+        .expect("connect in-memory sqlite");
+    router(AppState::with_wait_cap_and_grace(storage, cap, grace))
+}
+
 /// Like `test_router`, but also hands back a clone of the `Storage` so a test
 /// can read the audit log or arrange a precondition state (`idle`/`stale`/
 /// `archived`) that has no 6b HTTP path — those are sweeper-driven (6c), so the
@@ -4122,4 +4135,138 @@ async fn wait_drains_unread_through_a_real_consensus_close() {
     // ...and only then reports the terminal status.
     let (_, done) = wait(&app, &room_id, "repo-a", "opus47", "/a").await;
     assert_eq!(done["status"].as_str(), Some("closed"), "got {done}");
+}
+
+/// Read a participant's `poll_live` flag from the room status by repo.
+async fn poll_live_of(app: &axum::Router, room_id: &str, repo: &str) -> bool {
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/rooms/{room_id}"))
+        .body(Body::empty())
+        .unwrap();
+    let body = body_json(app.clone().oneshot(req).await.unwrap().into_body()).await;
+    let p = body["participants"]
+        .as_array()
+        .expect("participants array")
+        .iter()
+        .find(|p| p["repo"].as_str() == Some(repo))
+        .unwrap_or_else(|| panic!("participant {repo} not in status: {body}"));
+    p["poll_live"]
+        .as_bool()
+        .unwrap_or_else(|| panic!("poll_live missing for {repo}: {p}"))
+}
+
+/// The keystone regression: a participant currently parked on a long-poll reads
+/// `poll_live: true`; once that connection is dropped (process death / TCP reset,
+/// modeled here by aborting the handler future), `poll_live` flips to `false`
+/// within the grace window — instead of the old `last_poll_at` timestamp lying
+/// "fresh" for the full 15-minute ghost window.
+#[tokio::test]
+async fn poll_live_is_true_while_parked_and_false_after_the_connection_drops() {
+    // Long cap so the wait genuinely parks; short grace so the drop→false flip is
+    // observable without a long sleep.
+    let app = test_router_with_cap_and_grace(
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_millis(150),
+    )
+    .await;
+    let room_id = open_room_id(&app, "poll live truth").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    join(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+
+    // B parks on an empty room; A never waits.
+    let waiter = {
+        let app = app.clone();
+        let room_id = room_id.clone();
+        tokio::spawn(async move { wait(&app, &room_id, "repo-b", "sonnet46", "/work/b").await })
+    };
+
+    // Let B reach the park, then observe the truth: B is live, A (never parked)
+    // is not.
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    assert!(
+        poll_live_of(&app, &room_id, "repo-b").await,
+        "a parked long-poll must read poll_live: true"
+    );
+    assert!(
+        !poll_live_of(&app, &room_id, "repo-a").await,
+        "a participant with no parked poll must read poll_live: false"
+    );
+
+    // The connection dies: aborting the task drops the handler future, which
+    // drops the ParkGuard — exactly what Axum does when a client disconnects.
+    waiter.abort();
+    let _ = waiter.await;
+
+    // Within grace it may still read live (covers a healthy re-poll gap); past
+    // grace it must read dead — the corpse no longer lies "fresh".
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    assert!(
+        !poll_live_of(&app, &room_id, "repo-b").await,
+        "a dropped long-poll must read poll_live: false past the grace window"
+    );
+}
+
+/// The load-bearing assumption of the whole fix, proven over a *real* TCP socket:
+/// when a client disconnects mid-park, hyper cancels the in-flight handler future,
+/// which drops the `ParkGuard`. The `oneshot`/`abort()` test above drops the future
+/// directly and so can't prove hyper actually cancels on socket EOF — this one
+/// closes a real connection and asserts the guard releases. If RAII-on-cancel were
+/// insufficient, this is where it would surface (the wait would keep parking to its
+/// cap and `poll_live` would stay true), and explicit disconnect detection would be
+/// required.
+#[tokio::test]
+async fn poll_live_reflects_a_real_tcp_client_disconnect() {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::{TcpListener, TcpStream};
+
+    // One router instance, shared by the served socket and the in-process status
+    // reads — both see the same `Arc<Presence>`.
+    let storage = Storage::connect("sqlite::memory:")
+        .await
+        .expect("connect in-memory sqlite");
+    let app = router(AppState::with_wait_cap_and_grace(
+        storage,
+        std::time::Duration::from_secs(10), // long cap → the wait genuinely parks
+        std::time::Duration::from_millis(150), // short grace → fast false flip
+    ));
+
+    let room_id = open_room_id(&app, "tcp disconnect").await;
+    join(&app, &room_id, "repo-a", "opus47", "/work/a").await;
+    join(&app, &room_id, "repo-b", "sonnet46", "/work/b").await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let served = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, served).await.expect("serve");
+    });
+
+    // A real client opens a connection and parks a wait for repo-b.
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    let req = format!(
+        "GET /rooms/{room_id}/wait?repo=repo-b&model=sonnet46&cwd=/work/b HTTP/1.1\r\n\
+         Host: localhost\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).await.expect("write req");
+    stream.flush().await.expect("flush");
+
+    // Let the handler reach the park, then confirm the real connection is live.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(
+        poll_live_of(&app, &room_id, "repo-b").await,
+        "a wait parked over a real TCP connection must read poll_live: true"
+    );
+
+    // The client dies: closing the socket is exactly a reaped `cbc poll`.
+    drop(stream);
+
+    // hyper must cancel the parked handler future on EOF → ParkGuard drops.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        !poll_live_of(&app, &room_id, "repo-b").await,
+        "a real client disconnect must drop the guard → poll_live: false past grace"
+    );
+
+    server.abort();
 }

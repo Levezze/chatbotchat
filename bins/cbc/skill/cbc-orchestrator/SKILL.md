@@ -747,7 +747,10 @@ real message, (b) the user restarts a worker, or (c) the user manually invokes
 A worker whose `seconds_since_poll ≥ 150` (or `stale: true`) has let its poll die. Tell
 the user by name: *"worker chatbotchat-worker-auth last polled 6m ago — poll dead; I can't
 reach it. Reopen its chat / relaunch it?"* You cannot repair it — CBC is pull-only. The
-human is the only actor who can reopen a dead worker's chat.
+human is the only actor who can reopen a dead worker's chat. (Do **not** escalate on a
+counterpart's `poll_live: false` — that is a SELF signal a worker uses on its own entry;
+from here you can't tell a dead poll from one mid-backoff, and `seconds_since_poll ≥ 150`
+already excludes the legitimate ≤60 s backoff gap.)
 
 See `/cbc-checkup` for the full sweep procedure, classification thresholds, and escalation
 wording.

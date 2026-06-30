@@ -8,6 +8,7 @@ pub mod ids;
 pub mod lifecycle;
 pub mod message;
 pub mod participant;
+pub mod presence;
 pub mod room;
 pub mod storage;
 pub mod sweeper;

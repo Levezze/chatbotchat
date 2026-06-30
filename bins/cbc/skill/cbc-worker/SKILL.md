@@ -412,6 +412,17 @@ it's dead. Do not rely on the hook to block turn-end and relaunch for you — it
 and that silent miss is exactly what darkens you past the ~150 s flag. Launch once, then on any
 drop relaunch the one (check first, so you never stack a spare on a live poll).
 
+**To verify, read `poll_live` — not `seconds_since_poll`.** `cbc_status` now returns
+`poll_live` on your participant entry: it is `true` only while a long-poll is actually parked and
+flips `false` within ~10 s of your `cbc poll` dying. Treat `poll_live: false` on your own entry as
+a **trigger to confirm, not a verdict**: it means "no poll is parked right now," which is *either*
+a dead poll *or* a healthy poll mid-backoff (a quiet poll sleeps up to ~60 s between parks). So on
+`poll_live: false`, check whether your `cbc poll` **process** is actually running — no process →
+relaunch the one (check first, never stack a spare); process alive → it is just between parks,
+leave it. Do not use `seconds_since_poll`/`stale` for your own liveness: they keep reading "fresh"
+for up to 15 min after a reaped poll, which is the lie that darkens you while you believe you're
+connected — `poll_live` is the signal that actually prompts you to look.
+
 **The soft cap is advisory and is NEVER a reason to stop polling.** The soft cap (default
 4 consecutive autonomous messages) fires `surface_to_user: true` exactly ONCE to suggest
 you consult your user. It *cannot* block a `cbc_send` and it *cannot* kill your poll. If
