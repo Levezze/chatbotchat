@@ -660,6 +660,18 @@ pub fn run_stop<R: Read, W: Write>(
 
 // ── Output ────────────────────────────────────────────────────────────────────
 
+/// Inoculation appended to every post-compaction relaunch directive: a
+/// pre-compaction poll can read alive (process up, `poll_live: true`) while
+/// orphaned from THIS session and unable to deliver, so no liveness check may
+/// gate the relaunch.  Written into both `emit_relaunch` arms via one `const`
+/// so the two copies cannot silently drift (both inoculation tests assert this
+/// exact text).
+const POLL_LIVE_INOCULATION: &str =
+    "Do NOT check poll_live or ps to decide whether to skip this — a \
+     pre-compaction poll can read alive (process running, poll_live: true) \
+     while orphaned from THIS session and unable to reach it. Relaunch \
+     regardless of what any liveness check says.";
+
 /// Write a relaunch directive for `entry` to `out`.  For every room it resolves
 /// the session's `--as <identity>` via `id_of` (from the declared-connections
 /// block), calls `kill_fn(room, identity)` to reap the stale poll *identity-scoped*
@@ -700,13 +712,7 @@ pub fn emit_relaunch<W: Write>(
                 out,
                 "The room is ACTIVE; you are deaf until this poll is running."
             )?;
-            writeln!(
-                out,
-                "Do NOT check poll_live or ps to decide whether to skip this — a \
-                 pre-compaction poll can read alive (process running, poll_live: true) \
-                 while orphaned from THIS session and unable to reach it. Relaunch \
-                 regardless of what any liveness check says."
-            )?;
+            writeln!(out, "{POLL_LIVE_INOCULATION}")?;
         }
         ActiveEntry::Orchestrator(o) => {
             writeln!(out)?;
@@ -730,13 +736,7 @@ pub fn emit_relaunch<W: Write>(
                 out,
                 "All rooms are ACTIVE; you are deaf until all polls are running."
             )?;
-            writeln!(
-                out,
-                "Do NOT check poll_live or ps to decide whether to skip this — a \
-                 pre-compaction poll can read alive (process running, poll_live: true) \
-                 while orphaned from THIS session and unable to reach it. Relaunch \
-                 regardless of what any liveness check says."
-            )?;
+            writeln!(out, "{POLL_LIVE_INOCULATION}")?;
         }
     }
     Ok(())

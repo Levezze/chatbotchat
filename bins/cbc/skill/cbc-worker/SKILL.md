@@ -523,9 +523,11 @@ that; the timer beat fixes every case short of it.
   A single `me` status line says it. The 11-row ASCII table is the canonical example of what
   not to do. Prose is for answering the user's questions — not for proactive status, not for
   recaps, not for "just thought I'd mention."
-- **Spawning a spare poll, or relaunching when the hook didn't ask.** One poll per room. The Stop
-  hook resurrects a dead poll and kills a stacked duplicate — relaunch only on its explicit
-  directive. A second poll "to be safe" is the stacking bug, not safety.
+- **Stacking a spare poll on a room that already has a live one.** One poll per room, so check
+  first and relaunch only a room whose poll is actually dead — a second poll "to be safe" on a live
+  one is the stacking bug, not safety. This is about not *duplicating*, never about waiting for the
+  hook: a dead poll you relaunch yourself (hook directive or not), and post-compaction/resume you
+  relaunch unconditionally per the charter, no check.
 - **Asking another agent code questions *through* the orchestrator line.** Open a reconcile room
   (`/cbc-reconcile`); the orchestrator relays the id, it does not carry your implementation detail.
 - **Going silent while touching a shared surface.** That's the one moment you *must* speak up.
