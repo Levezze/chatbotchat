@@ -190,6 +190,15 @@ fn flag_value(source: &str, flag: &str) -> Option<String> {
         .position(|t| *t == flag)
         .and_then(|i| toks.get(i + 1))
         .filter(|v| !v.starts_with("--"))
+        // Real-world `poll-label` values are often descriptive prose, not the
+        // canonical command line — e.g. `(bg task X, --as <id>) -- relaunched…`.
+        // With no space before the closing paren, whitespace-splitting leaves
+        // it stuck to the value. Trim trailing characters that can't appear in
+        // an identity so punctuation from the surrounding prose never leaks
+        // into the recovered value (a corrupted identity means the hook's kill
+        // never matches the real poll and the relaunch mints yet another one).
+        .map(|s| s.trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_'))
+        .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
 }
 
@@ -691,6 +700,13 @@ pub fn emit_relaunch<W: Write>(
                 out,
                 "The room is ACTIVE; you are deaf until this poll is running."
             )?;
+            writeln!(
+                out,
+                "Do NOT check poll_live or ps to decide whether to skip this — a \
+                 pre-compaction poll can read alive (process running, poll_live: true) \
+                 while orphaned from THIS session and unable to reach it. Relaunch \
+                 regardless of what any liveness check says."
+            )?;
         }
         ActiveEntry::Orchestrator(o) => {
             writeln!(out)?;
@@ -713,6 +729,13 @@ pub fn emit_relaunch<W: Write>(
             writeln!(
                 out,
                 "All rooms are ACTIVE; you are deaf until all polls are running."
+            )?;
+            writeln!(
+                out,
+                "Do NOT check poll_live or ps to decide whether to skip this — a \
+                 pre-compaction poll can read alive (process running, poll_live: true) \
+                 while orphaned from THIS session and unable to reach it. Relaunch \
+                 regardless of what any liveness check says."
             )?;
         }
     }
@@ -1535,6 +1558,33 @@ model: claude-sonnet-4-6
         );
     }
 
+    #[test]
+    fn declared_connections_strips_trailing_punctuation_from_real_world_poll_label() {
+        // A real production state file's `poll-label` is not the canonical
+        // `cbc poll <room> --as <id> --model <m>` line the skill originally
+        // taught — agents write a descriptive comment instead:
+        // `cbc poll (bg task <taskid>, --as <id>) -- <prose>`. With no space
+        // before the closing paren, whitespace-splitting yields `<id>)` as one
+        // token. Without stripping, the recovered identity is corrupted, so the
+        // hook's own kill/relaunch never matches the real running poll's
+        // `--as <id>` (no paren) — a second, independent churn source from the
+        // one already fixed for random-hex minting.
+        let content = "\
+## Status
+status: ACTIVE
+room-id: cbc-report-mvp-engine-chemistry-panel-casing-orchestrator-20260629-1742
+poll-label: cbc poll (bg task bsjmeuspl, --as mvp-engine-opus48-9ed8) -- relaunched again post-compaction
+model: opus48
+";
+        let conns = declared_connections(content);
+        assert_eq!(conns.len(), 1);
+        assert_eq!(
+            conns[0].identity.as_deref(),
+            Some("mvp-engine-opus48-9ed8"),
+            "trailing punctuation from the parenthetical label must not leak into the identity"
+        );
+    }
+
     // ── parse_orchestrator ────────────────────────────────────────────────────
 
     #[test]
@@ -1730,6 +1780,56 @@ agents:
             killed,
             vec!["room-a-20260625-1100", "room-b-20260625-1105"],
             "kill_fn must be called once per room"
+        );
+    }
+
+    #[test]
+    fn emit_relaunch_worker_inoculates_against_trusting_poll_live() {
+        // A live incident: an agent read `poll_live: true` on its own pre-
+        // compaction poll (still parked, orphaned from the new session) and
+        // concluded "no relaunch needed" — overriding this very directive. The
+        // directive text must pre-empt that override explicitly, not just say
+        // "relaunch."
+        let entry = ActiveEntry::Worker(WorkerEntry {
+            room_id: "feat-room-20260625-1000".to_string(),
+            poll_label: "repo-worker-feat".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
+            identity: None,
+        });
+        let mut out = Vec::new();
+        let mut killed = Vec::new();
+        emit_relaunch(&entry, &mut out, &|_| None, &mut |id, _identity| {
+            killed.push(id.to_string())
+        })
+        .unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("Do NOT check poll_live or ps to decide whether to skip this"),
+            "directive must inoculate against trusting a self-liveness check; got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn emit_relaunch_orchestrator_inoculates_against_trusting_poll_live() {
+        let entry = ActiveEntry::Orchestrator(OrchestratorEntry {
+            model: "claude-opus-4-8".to_string(),
+            rooms: vec![(
+                "repo-worker-feat".to_string(),
+                "room-a-20260625-1100".to_string(),
+            )],
+        });
+        let mut out = Vec::new();
+        let mut killed = Vec::new();
+        emit_relaunch(&entry, &mut out, &|_| None, &mut |id, _identity| {
+            killed.push(id.to_string())
+        })
+        .unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("Do NOT check poll_live or ps to decide whether to skip this"),
+            "directive must inoculate against trusting a self-liveness check; got:\n{text}"
         );
     }
 
