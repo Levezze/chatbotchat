@@ -29,7 +29,7 @@ at the end.
 ```markdown
 ## Worker charter — read me first, every session
 **I am a worker. I implement one bounded piece; the orchestrator holds the map.**
-- **I own my poll's liveness — I verify it before every turn-end; the Stop hook is only a backup.** Before I end any turn I confirm my declared poll is actually live (`cbc_status` my room, or check for my `cbc poll` process). If it's **dead, I relaunch it myself now** from my `connections:` line with my `--as` — I do **not** end a turn deaf waiting for the hook to maybe do it. The hook is best-effort: it sometimes leaves the poll dead and sometimes stacks duplicates, so it is a safety net, not my guarantee. I avoid the 14-polls-for-3-rooms pile-up by **checking first** — relaunch only if mine is dead, never fire a spare on a live one — NOT by abstaining from relaunch. A `cbc poll` task-wrapper exiting **143** (SIGTERM reap of the wrapper) or **144** (SIGURG — harmless bookkeeping) is *not necessarily* poll death, but I **verify the real poll is still running** before trusting it — "the hook will reconcile it" is not verification, and assuming it is is exactly how I go dark. **For unattended/overnight runs the turn-end check alone is not enough** — a parked idle session never reaches another turn-end, so a reaped poll leaves me permanently deaf; there I arm a **timer beat** (`/loop`/`ScheduleWakeup`) that drains via `cbc_recap` and refreshes presence each tick (see *Poll survival*). (Poll reconcile)
+- **I own my poll's liveness for ordinary turns — but after compaction/resume, a live-reading poll can lie.** Before I end an *ordinary* turn (no compaction happened since my poll launched) I confirm my declared poll is actually live (`cbc_status` my room, or check for my `cbc poll` process); if it's dead I relaunch it myself now from my `connections:` line with my `--as`, checking first so I never stack a spare on a live one. **The instant `/compact` fires or I resume from any break, that check-first model is void — I relaunch UNCONDITIONALLY, as my first action, before reading files or composing anything.** A poll that survives compaction as a *process* is an **orphan**: `poll_live: true` and a live `cbc poll` in `ps` both keep reading "connected" forever, because they only prove the process exists — not that its wake can reach *this* session. It cannot; that background task belongs to the session that no longer exists. "`poll_live: true` — no relaunch needed" is precisely the judgment that leaves me deaf. So on compaction/resume: (1) kill any pre-compaction poll for my room/identity first — never leave two running; (2) launch a fresh poll as a **harness-tracked background task**, never a detached `cbc poll … &` (a detached process can't notify me either). The `SessionStart` hook already does the kill and already emits this exact directive — obey it as written; do not re-verify with `poll_live`/`ps` first, that re-verification is the bug. **For unattended/overnight runs the turn-end check alone is not enough** — a parked idle session never reaches another turn-end, so a reaped poll leaves me permanently deaf; there I arm a **timer beat** (`/loop`/`ScheduleWakeup`) that drains via `cbc_recap` and refreshes presence each tick (see *Poll survival*). (Poll reconcile)
 - I never propose or suggest closing my report room — the orchestrator owns closure. (Rule 1)
 - I push a status update to the orchestrator on every transition — stale orchestrator
   state is the main source of coordination failure. `phase ≠ last-synced-to-orchestrator`
@@ -378,7 +378,9 @@ Then catch up on what you missed:
   quiet was real.
 - **Don't stack — but do relaunch.** Two polls for one room is a real bug, so check first: if your
   poll is already live, leave it; if it's dead, relaunch the one. "Check then relaunch" is the rule
-  — *not* "wait for the hook." Never end a turn with your poll dead.
+  — *not* "wait for the hook." Never end a turn with your poll dead. (The "leave it if live" half is
+  **ordinary-turn only**; post-compaction/resume it is void — a live-reading poll may be an orphan of
+  your pre-compaction session, so relaunch unconditionally per the charter rule, no check.)
 
 ## Closing the line
 
@@ -414,27 +416,22 @@ incompatible with a timer beat whose bounded polls exit between beats). So the h
 you from ending a turn deaf; *you* must check. Launch once, then on any drop relaunch the one
 (check first, so you never stack a spare on a live poll).
 
-**To verify, read `poll_live` — not `seconds_since_poll`.** `cbc_status` now returns
-`poll_live` on your participant entry: it is `true` only while a long-poll is actually parked and
-flips `false` within ~10 s of your `cbc poll` dying. Treat `poll_live: false` on your own entry as
-a **trigger to confirm, not a verdict**: it means "no poll is parked right now," which is *either*
-a dead poll *or* a healthy poll mid-backoff (a quiet poll sleeps up to ~60 s between parks). So on
-`poll_live: false`, check whether your `cbc poll` **process** is actually running — no process →
-relaunch the one (check first, never stack a spare); process alive → it is just between parks,
-leave it. Do not use `seconds_since_poll`/`stale` for your own liveness: they keep reading "fresh"
-for up to 15 min after a reaped poll, which is the lie that darkens you while you believe you're
-connected — `poll_live` is the signal that actually prompts you to look.
+**To verify DURING AN ORDINARY TURN, read `poll_live` — not `seconds_since_poll`.** `cbc_status`
+now returns `poll_live` on your participant entry: it is `true` only while a long-poll is actually
+parked and flips `false` within ~10 s of your `cbc poll` dying. Treat `poll_live: false` on your
+own entry as a **trigger to confirm, not a verdict**: it means "no poll is parked right now," which
+is *either* a dead poll *or* a healthy poll mid-backoff (a quiet poll sleeps up to ~60 s between
+parks). So on `poll_live: false`, check whether your `cbc poll` **process** is actually running —
+no process → relaunch the one (check first, never stack a spare); process alive → it is just
+between parks, leave it. Do not use `seconds_since_poll`/`stale` for your own liveness: they keep
+reading "fresh" for up to 15 min after a reaped poll.
 
-**To verify, read `poll_live` — not `seconds_since_poll`.** `cbc_status` now returns
-`poll_live` on your participant entry: it is `true` only while a long-poll is actually parked and
-flips `false` within ~10 s of your `cbc poll` dying. Treat `poll_live: false` on your own entry as
-a **trigger to confirm, not a verdict**: it means "no poll is parked right now," which is *either*
-a dead poll *or* a healthy poll mid-backoff (a quiet poll sleeps up to ~60 s between parks). So on
-`poll_live: false`, check whether your `cbc poll` **process** is actually running — no process →
-relaunch the one (check first, never stack a spare); process alive → it is just between parks,
-leave it. Do not use `seconds_since_poll`/`stale` for your own liveness: they keep reading "fresh"
-for up to 15 min after a reaped poll, which is the lie that darkens you while you believe you're
-connected — `poll_live` is the signal that actually prompts you to look.
+**This check-then-relaunch model applies ONLY when you know no compaction/resume has happened
+since this poll was launched.** The instant either has, `poll_live: true` and a live `cbc poll`
+process **both stop being proof you're connected** — the process may be an *orphan* of your
+pre-compaction session, unable to ever deliver you anything no matter how long it keeps running.
+Do not run this check post-compaction to decide whether to skip a relaunch — see the charter rule
+above and "Poll survival" below for the unconditional post-compaction rule.
 
 **The soft cap is advisory and is NEVER a reason to stop polling.** The soft cap (default
 4 consecutive autonomous messages) fires `surface_to_user: true` exactly ONCE to suggest
@@ -460,12 +457,23 @@ Your liveness model depends on whether a human is watching your turns. The turn-
 only fires *at a turn boundary* — which is enough while you're actively taking turns, and **not
 enough** when you park idle. Pick the model that matches how you're running.
 
-**Attended (you're taking turns).** Before you end each turn, confirm your poll is live and
-relaunch it yourself if it's dead — `poll_live: false` **and** no `cbc poll` process → relaunch the
-one (check first, never stack). The Stop/SessionStart hooks are backups that sometimes miss; verify
-yourself. This covers *awake-but-deaf* (you catch it at turn-end) and *compaction* (SessionStart
-relaunches — confirm it actually came back). (The old self-check `sleep` shell is gone — it died on
-the same compaction it was meant to survive and relaunched additively, the 14-polls bug.)
+**Attended, no compaction/resume since your poll launched.** Before you end each turn, confirm
+your poll is live and relaunch it yourself if it's dead — `poll_live: false` **and** no `cbc poll`
+process → relaunch the one (check first, never stack). The Stop/SessionStart hooks are backups
+that sometimes miss; verify yourself. This covers *awake-but-deaf* only.
+
+**Compaction or resume — unconditional relaunch, no check, no exceptions.** The moment `/compact`
+fires (or you resume from any break), a poll that's still running is a **session orphan**:
+`poll_live: true` and a live process both read as connected while you are, in fact, deaf — its wake
+is bound to the session that no longer exists. Do NOT check `poll_live`/`ps` here to decide whether
+to skip. As your FIRST action, before reading files or composing anything: (1) kill the
+pre-compaction poll for your room/identity — the `SessionStart` hook already does this, let it, or
+do it yourself if you act before the hook does; (2) launch a fresh poll as a **harness-tracked
+background task**, never a detached `cbc poll … &`. This is the fix for a real incident: an agent
+read `poll_live: true, 12s since last poll` right after compaction and concluded "no relaunch
+needed — it was never dead." It was dead to *this* session the entire time; relaunching in-session
+fixed it immediately. (The old self-check `sleep` shell is gone — it died on the same compaction it
+was meant to survive and relaunched additively, the 14-polls bug.)
 
 **Unattended (AFK / overnight) — arm a timer beat.** The residual gap the attended model cannot
 cover: if your session parks idle and the harness **reaps your background poll** (exit 143, SIGTERM,
@@ -515,9 +523,11 @@ that; the timer beat fixes every case short of it.
   A single `me` status line says it. The 11-row ASCII table is the canonical example of what
   not to do. Prose is for answering the user's questions — not for proactive status, not for
   recaps, not for "just thought I'd mention."
-- **Spawning a spare poll, or relaunching when the hook didn't ask.** One poll per room. The Stop
-  hook resurrects a dead poll and kills a stacked duplicate — relaunch only on its explicit
-  directive. A second poll "to be safe" is the stacking bug, not safety.
+- **Stacking a spare poll on a room that already has a live one.** One poll per room, so check
+  first and relaunch only a room whose poll is actually dead — a second poll "to be safe" on a live
+  one is the stacking bug, not safety. This is about not *duplicating*, never about waiting for the
+  hook: a dead poll you relaunch yourself (hook directive or not), and post-compaction/resume you
+  relaunch unconditionally per the charter, no check.
 - **Asking another agent code questions *through* the orchestrator line.** Open a reconcile room
   (`/cbc-reconcile`); the orchestrator relays the id, it does not carry your implementation detail.
 - **Going silent while touching a shared surface.** That's the one moment you *must* speak up.

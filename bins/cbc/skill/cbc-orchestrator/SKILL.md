@@ -318,12 +318,25 @@ server is down. The old reflex — relaunch *additively* without killing the old
 relaunching. **You own your liveness. The Stop hook is a best-effort backup only** — it sometimes
 leaves a room at zero and sometimes stacks duplicates, so never hand it your survival.
 
-- **Before you end any turn, verify each room you hold has exactly one live poll** — `cbc_status`
-  the room, or count its `cbc poll` processes. Any room at **zero → relaunch it yourself now** from
-  its `connections:` line with the correct `--as`. **Never end a turn deaf on a room you hold.**
+- **Before you end an ordinary turn (no compaction/resume since a room's poll launched), verify
+  each room you hold has exactly one live poll** — `cbc_status` the room, or count its `cbc poll`
+  processes. Any room at **zero → relaunch it yourself now** from its `connections:` line with the
+  correct `--as`. **Never end a turn deaf on a room you hold.**
 - **You avoid the 14-polls pile-up by checking first, not by abstaining.** Relaunch only rooms at
   zero; never fire a spare on a room that already has a live poll. Check-then-relaunch — never
   "trust the hook to get it."
+- **Compaction or resume voids the check-first rule — relaunch every room unconditionally, no
+  exceptions.** A poll that survives `/compact` as a *process* is a **session orphan**: `poll_live:
+  true` and a live `cbc poll` in `ps`/`cbc_status` both keep reading "connected," but its wake is
+  bound to the session that no longer exists — it can never reach you. "The room shows a live poll,
+  no relaunch needed" is exactly the judgment that leaves you deaf on every room you hold (a real
+  incident: an agent read `poll_live: true, 12s since last poll` right after compaction and
+  concluded nothing needed relaunching — it was deaf on that room the whole time; relaunching
+  in-session fixed it immediately). So the instant you resume from a compaction or any break: for
+  EVERY room in your registry, (1) kill the pre-compaction poll for that room/identity first — the
+  `SessionStart` hook already does this, obey its directive as written rather than re-verifying with
+  `poll_live`/`ps` — then (2) launch a fresh poll as a **harness-tracked background task**, never a
+  detached `cbc poll … &`.
 - **Exit 143/144 on a poll task-wrapper is not necessarily death** (144 = SIGURG; 143 = SIGTERM
   reaping the *wrapper*), but **verify the child is still polling** before you trust it — `cbc_status`
   or a process check. "The hook will reconcile it" is not verification, and assuming it is is exactly
