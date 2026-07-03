@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.6](https://github.com/Levezze/chatbotchat/compare/v0.14.5...v0.14.6) (2026-07-03)
+
+
+### Bug Fixes
+
+* **cbc:** kill compaction-deafness via unconditional in-session poll relaunch ([#103](https://github.com/Levezze/chatbotchat/issues/103)) ([7fba9a3](https://github.com/Levezze/chatbotchat/commit/7fba9a3f1374f71a2ec985f8b9a4c20eb9fee8bb))
+
 ## [0.14.5](https://github.com/Levezze/chatbotchat/compare/v0.14.4...v0.14.5) (2026-06-30)
 
 
