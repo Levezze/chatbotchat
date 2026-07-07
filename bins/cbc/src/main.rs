@@ -61,9 +61,12 @@ enum Command {
         /// Self-declared model name, e.g. opus47, sonnet46, codex53.
         #[arg(long)]
         model: String,
-        /// Optional identity label. Auto-derived per session when omitted; two
-        /// agents in the same repo+model+dir must pass distinct values. Reuse
-        /// the same label from another terminal/client/dir to resume or hand off.
+        /// Your anchored identity label — a STABLE role name
+        /// (`<repo>-worker-<feature>` or `<repo>-orchestrator`) you reuse on
+        /// join, send, and `poll --as`. Pass the SAME value everywhere so you
+        /// stay a single participant; the same label from another terminal/dir
+        /// resumes or hands off. Omitting it falls back to the volatile session
+        /// id (rotates on restart/fork) and splits declared-vs-polled identity.
         #[arg(long = "as")]
         identity: Option<String>,
         /// Optional friendly display name shown in `cbc list`/`status` (e.g.
@@ -132,25 +135,24 @@ enum Command {
     /// "relaunch me," never "abandon the room." So RELAUNCH this poll on every
     /// wake BEFORE you compose your reply (be reachable while you think), and never
     /// kill a running poll while you remain in the room. Designed to run as a
-    /// background task (e.g. via `/loop`). By default the poller shares one identity
-    /// with your in-session join/send automatically (same session id), so they share
-    /// the read cursor — the poller owns that cursor, so do NOT also call `cbc wait`
-    /// on the same identity while it runs. Pass `--as` only to reuse a specific
-    /// identity (the handle you were given, or a label you joined with); never a fresh one.
+    /// background task (e.g. via `/loop`). Pass the SAME `--as <label>` you joined
+    /// and send with (a stable role name), so the poller, your sends, and your `.cbc`
+    /// connections block are one participant and the Stop-hook reconcile counts this
+    /// poll — the poller owns that read cursor, so do NOT also call `cbc wait` on the
+    /// same identity while it runs. Never invent a fresh label on resume.
     Poll {
         /// Room id to poll.
         room_id: String,
         /// Self-declared model name (your identity; e.g. opus47).
         #[arg(long)]
         model: String,
-        /// Identity label (see `join --as`). OPTIONAL — omit it and the poll
-        /// inherits the same identity your join/send resolve to (the harness
-        /// session id), so they share one read cursor automatically; this is the
-        /// right default inside one session. Pass `--as` only to deliberately
-        /// reuse a specific identity: the **handle** you were given by
-        /// `cbc_join_room`/`cbc_recap` (it round-trips to the same participant),
-        /// or an explicit label you joined with. Never invent a fresh label on
-        /// resume — a new identity splits the cursor and mints a duplicate.
+        /// Identity label (see `join --as`). Pass the SAME anchored label you
+        /// joined and send with: the Stop-hook reconcile counts this poll only
+        /// when its `--as` matches the label your `.cbc` connections block
+        /// declares, so an omitted or mismatched `--as` is what nags every turn.
+        /// Omitting it falls back to the volatile session id (rotates on
+        /// restart/fork); never invent a fresh label on resume — a new identity
+        /// splits the cursor and mints a duplicate row.
         #[arg(long = "as")]
         identity: Option<String>,
         /// Per-call long-poll cap (seconds): each underlying wait blocks up to
@@ -348,8 +350,8 @@ enum HookEvent {
     /// Handle a `Stop` event — the per-turn poll reconcile (B2).
     ///
     /// Scans `.cbc/` for declared connections and converges each to exactly one
-    /// identity-scoped `cbc poll`: kills surplus polls itself, and blocks
-    /// turn-end with a relaunch directive when a declared room has none (and the
+    /// identity-scoped `cbc poll`: kills surplus polls itself, and surfaces a
+    /// NON-blocking relaunch advisory when a declared room has none (and the
     /// loop guard `stop_hook_active` is clear).  Replaces the worker pulse-timer.
     Stop,
 }

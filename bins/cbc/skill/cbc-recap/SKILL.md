@@ -42,7 +42,7 @@ loop from scratch.
 4. **Now you can `/compact` — that's the point.** With the stop-and-status request already out,
    the truth lives in the rooms and the map, not your context. While the answers come back, the
    user can compact you (or `/clear` and resume): you'll lose the polluted in-head picture but
-   **not** the rooms (your polls re-attach by session identity) and **not** the map on disk.
+   **not** the rooms (your polls re-attach by your anchored `--as` label) and **not** the map on disk.
    *Tell the user this is a safe moment to compact* if their context is heavy.
 5. **Rebuild from scratch — from the rooms, never from memory.** Once the fresh statuses are in
    (and after any compaction), `cbc_recap` every room **you hold** — your report and peer lines —

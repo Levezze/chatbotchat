@@ -336,12 +336,12 @@ pub enum ReconcileAction {
     /// is carried here — a planned count would only go stale before the kill.
     KillExtras,
     /// Zero polls and none launched this turn — surface a NON-blocking advisory
-    /// to relaunch. Deliberately does NOT block turn-end: under the timer-driven
-    /// liveness model (the `/loop` heartbeat) the agent owns its own liveness and
-    /// re-polls every beat, so a momentarily-absent poll is normal (bounded beat
-    /// polls exit by design). A forced block here is both unnecessary and the
-    /// engine of the overnight relaunch-thrash loop (block → relaunch → SIGTERM →
-    /// block …). The hook is a BACKUP hint, not the relaunch authority.
+    /// to relaunch. A held room should ALWAYS have one standing poll running, so
+    /// zero means it genuinely died (a timer beat is a backstop that re-arms it,
+    /// never a substitute). Deliberately does NOT block turn-end: a forced block
+    /// was the engine of the overnight relaunch-thrash loop (block → relaunch →
+    /// SIGTERM → block …). The hook is a BACKUP hint that catches a dead standing
+    /// poll, not the relaunch authority.
     AdviseRelaunch,
 }
 
@@ -569,22 +569,21 @@ pub fn scan_declared(cbc_dir: &Path) -> Vec<DeclaredConnection> {
 ///
 /// Deliberately NOT a top-level `{"decision":"block"}`: blocking turn-end was the
 /// engine of the overnight relaunch-thrash loop (block → forced relaunch →
-/// harness SIGTERM in seconds → next Stop sees zero → block again, all night).
-/// It is also incompatible with the timer-driven liveness model: a `/loop`
-/// heartbeat uses BOUNDED beat polls (`--max-polls 1`) that exit by design, so
-/// between beats a Stop event legitimately sees zero live polls — a block there
-/// would fire on every turn-end. So the relaunch hint rides
-/// `hookSpecificOutput.additionalContext` (the non-blocking channel): surfaced as
-/// context where the harness supports it, harmlessly inert where it does not, and
-/// never forcing a turn either way. Liveness is owned by the agent's heartbeat;
-/// this hook is a BACKUP hint. See code.claude.com/docs/en/hooks.md.
+/// harness SIGTERM in seconds → next Stop sees zero → block again, all night). So
+/// the relaunch hint rides `hookSpecificOutput.additionalContext` (the
+/// non-blocking channel): surfaced as context where the harness supports it,
+/// harmlessly inert where it does not, and never forcing a turn either way.
+/// Liveness is owned by the always-running standing poll (one per held room); a
+/// timer beat is only a backstop that re-arms a dead one, never a substitute. This
+/// hook is a BACKUP hint that catches a standing poll that actually died. See
+/// code.claude.com/docs/en/hooks.md.
 fn stop_advise_json(relaunch: &[String]) -> String {
     let mut ctx = String::from(
         "CBC liveness (advisory) — one or more declared rooms have NO live poll right now and \
-         none was launched this turn. If you are still working these rooms and are not on a timer \
-         heartbeat, relaunch each as a background task (run_in_background); otherwise your next \
-         heartbeat beat will re-poll. This is a BACKUP hint, not a block — your heartbeat owns \
-         liveness:",
+         none was launched this turn. A held room must ALWAYS have one standing `cbc poll` \
+         running; if you still hold these rooms, relaunch each as a background task now \
+         (run_in_background). A timer beat is only a backstop that re-arms a dead standing poll, \
+         never a substitute for it. This is a hint, not a block:",
     );
     for cmd in relaunch {
         ctx.push_str("\n  ");
@@ -650,8 +649,9 @@ pub fn run_stop<R: Read, W: Write>(
     }
 
     // Surface a NON-blocking relaunch advisory when one is owed AND the loop
-    // guard is clear. Never blocks turn-end (see `stop_advise_json`): the agent's
-    // timer heartbeat, not this hook, owns liveness.
+    // guard is clear. Never blocks turn-end (see `stop_advise_json`): a forced
+    // block was the overnight relaunch-thrash engine, and the standing poll — not
+    // a timer beat, and not this hook — owns liveness (the beat is only a backstop).
     if !plan.relaunch.is_empty() && !stop_hook_active {
         write!(writer, "{}", stop_advise_json(&plan.relaunch))?;
     }
@@ -1046,6 +1046,46 @@ mod tests {
             ),
             "the advisory relaunch command must carry the `--as` recovered from the legacy \
              poll-label (else a relaunch 400s); got:\n{ctx}"
+        );
+    }
+
+    #[test]
+    fn stop_advisory_mandates_a_standing_poll_not_a_heartbeat() {
+        // Defect #3: the advisory must frame a STANDING poll as the always-on
+        // default — not tell the agent a timer heartbeat owns liveness, which
+        // was the wording that authorized going deaf between beats.
+        let dir = tempfile::tempdir().unwrap();
+        let cbc = dir.path().join(".cbc");
+        std::fs::create_dir_all(&cbc).unwrap();
+        std::fs::write(
+            cbc.join("api-instructions-20260625.md"),
+            "status: ACTIVE\nconnections:\n  orch: room-a-20260625-1000 --as api --model opus\n",
+        )
+        .unwrap();
+        let input = stop_input(dir.path(), false);
+        let mut out = Vec::new();
+        run_stop(
+            &mut input.as_bytes(),
+            &mut out,
+            &mut |_, _| 0,
+            &mut |_, _| false,
+            &mut |_| {},
+        )
+        .unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let ctx = v
+            .get("hookSpecificOutput")
+            .and_then(|h| h.get("additionalContext"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("");
+        assert!(
+            ctx.contains("standing"),
+            "advisory must mandate a standing poll; got:\n{ctx}"
+        );
+        assert!(
+            !ctx.contains("owns liveness"),
+            "advisory must not say a heartbeat owns liveness; got:\n{ctx}"
         );
     }
 

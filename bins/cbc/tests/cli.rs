@@ -1027,14 +1027,14 @@ fn extend_is_consensus_then_both_agents_agree_over_cli() {
 
 #[test]
 fn poll_without_as_inherits_the_ambient_identity() {
-    // `cbc poll` owns the read cursor, so it must share one identity with the
-    // agent's join/send. `--as` is OPTIONAL: omitted, the poll resolves identity
-    // through the same precedence as join (here the `CBC_INSTANCE` rung, the
-    // env-var analog of a harness session id). Forcing `--as` was the churn
-    // footgun — the only label an agent had to pass was its non-round-tripping
-    // handle, which minted a duplicate. Here join and a no-`--as` poll share the
-    // instance via the ambient env, so the poll resumes the same participant and
-    // is delivered the counterpart's message.
+    // This test pins the WIRE precedence, not the recommended agent practice:
+    // with NO `--as`, the poll resolves identity through the same precedence as
+    // join (here the `CBC_INSTANCE` rung, the env-var analog of a harness session
+    // id), so a no-`--as` poll and the join share one instance and one cursor.
+    // (Agents SHOULD still pass a stable anchored `--as` label — the churn footgun
+    // was passing the minted, non-round-tripping HANDLE as `--as`, not passing a
+    // label at all.) Here join and a no-`--as` poll share the instance via the
+    // ambient env, so the poll resumes the same participant and gets the message.
     let base = spawn_daemon();
     let room_id = open_room(&base, "cli poll no-as");
     // The poller's participant joins under the ambient instance "shared".

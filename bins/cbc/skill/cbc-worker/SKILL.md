@@ -99,7 +99,7 @@ connections:
 a push. Pushing updates `last-synced`. A freshly-compacted worker checks this field first to
 detect drift and re-sync.
 
-**`status: ACTIVE|DONE` + `next-action` are the resume fields.** Set `status: ACTIVE` when you open the file; set `status: DONE` only when the room closes and the poll is stopped. Update `next-action` after every transition — it is what a fresh agent reads to re-enter without re-running setup. See "Resuming?" below.
+**`status: ACTIVE|DONE` + `next-action` are the resume fields.** Set `status: ACTIVE` when you open the file; set `status: DONE` the moment the room is `closed`/`archived` and the poll is stopped. **Flip to DONE as soon as you OBSERVE the room closed — a terminal poll wake, a `cbc_recap`, or a `cbc_status` — even if the orchestrator closed it, not you.** The Stop hook nags every `.cbc` file still marked `ACTIVE`; a file left `ACTIVE` on a room the orchestrator already closed nags you to relaunch a poll onto a dead room, forever. Update `next-action` after every transition — it is what a fresh agent reads to re-enter without re-running setup. See "Resuming?" below.
 
 **`mode: worker` is what attaches you to the orchestrator.** It's the default for this skill — keep it `worker`. (A standalone session with no orchestrator is `mode: direct`; absent ⇒ `direct`.) The hooks read this field to decide worker-specific behavior.
 
@@ -192,8 +192,11 @@ Read any file found. Run the **liveness guard** (matches CLAUDE.md's two-conditi
    with a **high `hard_cap`** (e.g. `hard_cap: 200`). This line stays open until the feature has
    landed everywhere, so it will blow far past the default 20-message cap; if it still fills,
    `cbc_extend` (consensus +20) and the orchestrator co-votes.
-2. `cbc_join_room`, then `cbc_send` an **opening status** (see discipline below) that includes
-   your `state-file-path`.
+2. `cbc_join_room` **with `as:<repo>-worker-<feature>`** — your anchored label, the SAME one in
+   your `connections:` block and your poll — then `cbc_send` (same `as:`) an **opening status**
+   (see discipline below) that includes your `state-file-path`. Passing the label on join/send as
+   well as the poll is what keeps you a single participant; omit it on join/send and you split
+   into two rows (session-id join vs labelled poll) and the hook nags you every turn.
 3. **Set your terminal title** so the user can see your name in their tab list without manual renaming.
    Write your `<repo>-worker-<feature>` name to a tty-keyed file — the shell's `precmd` hook reads it
    every prompt and applies it via OSC escape. See `docs/TERMINAL_TITLES.md` in the chatbotchat repo for setup.
@@ -475,13 +478,16 @@ needed — it was never dead." It was dead to *this* session the entire time; re
 fixed it immediately. (The old self-check `sleep` shell is gone — it died on the same compaction it
 was meant to survive and relaunched additively, the 14-polls bug.)
 
-**Unattended (AFK / overnight) — arm a timer beat.** The residual gap the attended model cannot
-cover: if your session parks idle and the harness **reaps your background poll** (exit 143, SIGTERM,
-often within seconds), *no further turn-end ever fires* — nothing relaunches, the counterpart's next
-message never re-invokes you, and you go deaf until a human reopens your chat. A parked session has
-no next turn; this is not "bounded." Close it with a **timer-driven heartbeat** — the `/loop` skill
-or `ScheduleWakeup` — that re-fires on a schedule **regardless of whether the prior poll was
-reaped**. Each beat:
+**Unattended (AFK / overnight) — arm a timer beat that re-arms the standing poll.** A standing
+`cbc poll` is still your primary line and stays running whenever you are taking turns — the beat
+is a **backstop that re-arms it after a reap, not a substitute you switch to.** The residual gap
+it covers: if your session parks idle and the harness **reaps your background poll** (exit 143,
+SIGTERM, often within seconds), *no further turn-end ever fires* — nothing relaunches, the
+counterpart's next message never re-invokes you, and you go deaf until a human reopens your chat. A
+parked session has no next turn; this is not "bounded." Close the gap with a **timer-driven
+heartbeat** — the `/loop` skill or `ScheduleWakeup` — that re-fires on a schedule **regardless of
+whether the prior poll was reaped**. Never let the beat replace an always-on standing poll while
+you're attended; dropping the standing poll to "just run the beat" is the deafness bug. Each beat:
 
   1. **`cbc_recap` your room** — a *lossless, non-consuming* drain. It returns full history and
      never advances your read cursor, so any message that arrived while you were between beats is
