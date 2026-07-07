@@ -406,6 +406,137 @@ async fn mcp_join_room_is_idempotent_within_a_session() {
     client.cancel().await.ok();
 }
 
+/// The anchor mechanism at the MCP boundary: a `cbc_join_room(as: "<label>")`
+/// keys the participant on `<label>`, and a re-join with the SAME `as:` label
+/// RESUMES that one participant (collapses to a single row, no ghost) — while a
+/// DIFFERENT `as:` label mints a second, distinct participant. This is the exact
+/// claim the identity-anchor fix rests on ("declared==polled, one stable row per
+/// agent"), proven where the guidance change lives — the MCP `as:` layer. The
+/// sibling `mcp_join_room_is_idempotent_within_a_session` covers the no-label
+/// (session-derived) path; `same_model_distinct_as_are_separate_participants...`
+/// (cli.rs) covers the CLI `--as` path across a fresh process.
+#[tokio::test]
+async fn mcp_join_room_anchors_one_row_per_as_label() {
+    let base = spawn_daemon().await;
+
+    let transport =
+        TokioChildProcess::new(Command::new(env!("CARGO_BIN_EXE_cbc")).configure(|cmd| {
+            cmd.arg("mcp").env("CBC_SERVER", &base);
+        }))
+        .expect("spawn cbc mcp");
+    let client = ().serve(transport).await.expect("connect mcp client");
+
+    let opened = client
+        .call_tool(
+            CallToolRequestParams::new("cbc_open_room").with_arguments(
+                serde_json::json!({ "subject": "anchor label" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("open room");
+    let opened_rendered = serde_json::to_string(&opened).expect("serialize");
+    let start = opened_rendered.find("cbc-anchor-label-").expect("room id");
+    let room_id: String = opened_rendered[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+
+    let join_as = |label: &'static str| {
+        let client = &client;
+        let room = room_id.clone();
+        async move {
+            let result = client
+                .call_tool(
+                    CallToolRequestParams::new("cbc_join_room").with_arguments(
+                        serde_json::json!({ "room_id": room, "model": "opus47", "as": label })
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    ),
+                )
+                .await
+                .expect("call cbc_join_room");
+            serde_json::to_string(&result).expect("serialize join")
+        }
+    };
+
+    // The displayed handle is a server-minted `<repo>-opus47-<4hex>`, NOT the
+    // label — so distinct labels are told apart by distinct handles.
+    let extract_handle = |rendered: &str| -> String {
+        let marker = "-opus47-";
+        let pos = rendered.find(marker).expect("handle marker");
+        let left = rendered[..pos]
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+        let right: String = rendered[pos + marker.len()..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
+        format!("{left}{marker}{right}")
+    };
+    let resumed = |rendered: &str| -> bool {
+        rendered.contains("\\\"resumed\\\":true") || rendered.contains("\"resumed\":true")
+    };
+
+    // First join under the anchor label mints the participant (not a resume).
+    let first = join_as("cbc-worker-anchor").await;
+    let anchor = extract_handle(&first);
+    assert!(
+        !resumed(&first),
+        "first join under a fresh label is a mint, not a resume; got {first}"
+    );
+
+    // Re-join under the SAME anchor label resumes that one participant — the
+    // anti-ghost guarantee the fix depends on across restart/fork/clear.
+    let again = join_as("cbc-worker-anchor").await;
+    assert_eq!(
+        anchor,
+        extract_handle(&again),
+        "re-join with the same `as:` label must resume one handle; got {again}"
+    );
+    assert!(
+        resumed(&again),
+        "re-join with the same `as:` label must report resumed=true; got {again}"
+    );
+
+    // A DIFFERENT anchor label is a second, distinct participant (a real second
+    // agent must stay visible — the label is per-role, not per-cwd).
+    let other = join_as("cbc-orchestrator").await;
+    let other_handle = extract_handle(&other);
+    assert_ne!(
+        anchor, other_handle,
+        "a distinct `as:` label must mint a distinct handle; got {anchor} / {other_handle}"
+    );
+
+    // status lists exactly the two anchored identities.
+    let status = client
+        .call_tool(
+            CallToolRequestParams::new("cbc_status").with_arguments(
+                serde_json::json!({ "room_id": room_id })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("call cbc_status");
+    let status_rendered = serde_json::to_string(&status).expect("serialize status");
+    assert!(
+        status_rendered.contains(&anchor) && status_rendered.contains(&other_handle),
+        "status must list both anchored identities; got {status_rendered}"
+    );
+
+    client.cancel().await.ok();
+}
+
 #[tokio::test]
 async fn mcp_recap_is_advertised_and_returns_message_bodies() {
     let base = spawn_daemon().await;

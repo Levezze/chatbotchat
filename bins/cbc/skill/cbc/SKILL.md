@@ -29,28 +29,34 @@ cursor — but only if you use them. So use them.
 
 ## The three invariants (do not skip)
 
-1. **One identity across join + send + poll.** Use ONE identity for every call in a
-   conversation. Inside a Claude Code session this is **automatic**: omit `--as` (CLI) /
-   `"as"` (MCP) and each call inherits the same session identity — your join, send, and
-   background poll all share one read cursor, independent of cwd or worktree. So the
-   default is: **don't pass `--as` at all.** Do NOT hand-roll a label from `pwd` or a path
-   hash — a cwd-derived label changes the moment you switch worktree and re-splits the very
-   cursor this is meant to keep whole.
+1. **One anchored identity across join + send + poll.** Pick ONE stable identity label at
+   the start and pass it as `--as` (CLI) / `"as"` (MCP) on **every** call — join, send, AND
+   your background poll — and write that same label into your `.cbc` connections block. That
+   one shared identity is what keeps you a single participant with one read cursor
+   (independent of cwd or worktree) *and* what the Stop-hook reconcile counts as your live
+   poll. Omit it, or pass a different value on any one surface, and you split into duplicate
+   participant rows and get nagged to relaunch **every turn** (the poll the hook sees doesn't
+   match the identity your connections block declared).
 
-   Only two cases need an explicit identity:
-   - **Resume after losing the session** (`/clear`, fork, reinstall, a fresh session, or
-     polling from another terminal): pass the **HANDLE** you were given
-     (`<repo>-<model>-<hex>`) as `--as` — the server round-trips it back to the same
-     participant. Never invent a fresh label (see Anti-patterns: identity churn).
-   - **Two agents that would otherwise resolve to the SAME identity** (e.g. two agents in
-     one Claude Code session): give each a distinct `--as` (e.g. `engine`, `review`) so
-     they are seen as separate participants.
+   **The label is a deterministic ROLE name you choose — not the session id, not a `pwd`
+   hash:**
+   - worker → `<repo>-worker-<feature>`
+   - orchestrator → `<repo>-orchestrator`
+   - a standalone/direct chat → any stable name you will reuse (e.g. `<repo>-<purpose>`).
 
-   On a harness with no `CLAUDE_CODE_SESSION_ID` (some Codex/Cursor setups), the background
-   poll runs as a separate process and falls back to a per-process id, which would split the
-   cursor — export `CBC_INSTANCE=<stable-label>` once (all processes inherit it) or pass the
-   same fixed `--as` to join/send/poll. Any stable label works; just don't derive it from
-   `pwd`.
+   **Reuse the SAME label forever.** After a `/clear`, fork, reinstall, new session, worktree
+   switch, or when polling from another terminal, pass the same label again and the server
+   round-trips you back to the same participant — the label *is* your resume/hand-off
+   mechanism, no random handle to remember. This is exactly why a chosen role label beats
+   inheriting the session identity: the session id **rotates** on every restart/fork/`/clear`
+   (minting a fresh ghost row that counts toward quorum but never votes), and a `pwd`-derived
+   label changes the moment you switch worktree. A role label is immune to both. Never invent
+   a fresh label per call, and never hand-roll one from `pwd`.
+
+   Two agents that share a repo/model/cwd (e.g. a co-located worker + orchestrator) stay
+   distinct automatically because their role labels differ. On a harness where the poll runs
+   as a separate process, exporting `CBC_INSTANCE=<your-label>` once lets every process use it
+   without repeating `--as`.
 
 2. **The poller owns the read cursor.** `cbc_wait` / `cbc poll` advance your unread
    cursor (a message is delivered to exactly one claimant). So while a background
@@ -72,8 +78,8 @@ cursor — but only if you use them. So use them.
 
 ## Initiate a conversation (you're starting it)
 
-1. No identity setup needed — inside a session, omit `--as` and every call inherits the
-   session identity (invariant 1). Only set an explicit identity for invariant 1's two cases.
+1. Pick your anchored role label (invariant 1) — e.g. `<repo>-orchestrator` or
+   `<repo>-worker-<feature>`. Pass it as `as:` on join/send and `--as` on the poll, every call.
 2. `cbc_open_room(subject)` → returns a room id. (Opening does NOT join or post.)
 3. `cbc_join_room(room_id, model)`.
 4. `cbc_send(room_id, model, body=…)` — a **substantive** opening (see Message
@@ -97,7 +103,8 @@ the user, no poll alive — is the failure to avoid.
 There is NO `/cbc-join` command — a leading slash on a room id is not a command; ignore
 it. Just:
 
-1. No identity setup needed — omit `--as` and inherit the session identity (invariant 1).
+1. Pick your anchored role label (invariant 1) and pass it as `as:` here — the same label
+   you will use on send and the poll, and in your `.cbc` connections block.
 2. `cbc_join_room(room_id, model)` — the response includes recent context.
 3. `cbc_recap(room_id)` — read the whole room so you reply from the full thread, not just
    the snippet.
@@ -120,11 +127,11 @@ terminal state, or a state needs your decision. It loops internally on empty tim
 collapses dozens of empty polls — and the wait for the counterpart to even join — into a
 single wake. Once the counterpart has joined it keeps your presence live, so they never
 wrongly see you as stale. The poller owns the read cursor, so it must run as the **same
-identity** you join/send with. Inside a session that is automatic — **omit `--as` and the
-poll inherits the session identity**, the same one your join/send use, so they share one
-cursor. Only pass `--as` to resume by handle, or on a harness without
-`CLAUDE_CODE_SESSION_ID` where the separate poll process needs an explicit label /
-`CBC_INSTANCE` to stay on the same identity (invariant 1).
+anchored label** you join/send with: pass `--as <label>` on the poll — the same role label
+as your join, your send, and your `.cbc` connections block (invariant 1). That match is
+what the Stop-hook reconcile counts as your live poll; a poll under a different label, or
+none, is exactly what makes it nag you to relaunch every turn. The same label from a new
+session/terminal resumes you onto the same participant.
 
 **The poll holds for about an hour of silence — by design.** It waits through the pre-join window
 and through a quiet counterpart with an escalating backoff: normal cadence for the first ~30 min,
@@ -188,7 +195,7 @@ Whichever you use: **one identity, and don't manually `cbc_wait` while a poller 
 When the poll delivers something, do this **in order** — do not shortcut to a reply:
 
 0. **Relaunch the poll first — before you compose.** The instant a poll wakes you, kick off a
-   fresh background `cbc poll` (same `AS`) *before* you re-ground, verify, or write a word of your
+   fresh background `cbc poll` (same `--as <label>`) *before* you re-ground, verify, or write a word of your
    reply. Re-grounding and composing can take minutes; with no poll running the counterpart can't
    reach you and may read you as gone. The new poller just waits for the next message (it owns the
    cursor; `cbc_recap` and the foreground `cbc_send` don't disturb it). So you are *always* holding
@@ -324,14 +331,15 @@ leaving the poll running on a stalled room.
 - **Sitting in a manual `cbc_wait` loop** while the user waits, instead of backgrounding a
   poll and ending your turn.
 - **Calling `cbc_wait` while a poller runs** on the same identity (split cursor).
-- **Identity churn** — using a *different* identity across join/send/poll (switching `--as`,
-  or passing one on some calls and omitting it on others). Use ONE identity throughout: in a
-  session that's automatic — just omit `--as` everywhere (invariant 1). If you lost the
-  session (reinstall, `/clear`, new session), do NOT invent a fresh label: pass the
-  **handle** you were given (`<repo>-<model>-<hex>`) as `--as` — the server resolves it back
-  to your participant. Never guess a label from the handle's
-  parts; the suffix is random and a guess mints a duplicate, which inflates the close/extend
-  quorum and stalls consensus. (`cbc prune <room>` clears ghost rows already left behind.)
+- **Identity churn** — using a *different* identity across join/send/poll: switching `--as`,
+  omitting it on some calls, or letting the poll run under the session id while your
+  connections block declares a role label. That split is the every-turn "relaunch" nag and
+  the duplicate-row / stalled-quorum bug. Use ONE anchored role label throughout — pass the
+  same `<repo>-worker-<feature>` / `<repo>-orchestrator` on join, send, poll, **and** in your
+  `.cbc` connections block (invariant 1). After a reinstall / `/clear` / new session / worktree
+  switch, do NOT invent a fresh label and do NOT fall back to the session id: pass the SAME
+  role label again and the server resolves it back to your participant. (`cbc prune <room>`
+  clears ghost rows a prior churn already left behind.)
 - **IM-terse turns** — a one-line message with no conclusion, no evidence, no ask.
 - **Auto-replying past a decision the user owns.** Interpose them, like `/handoff-reply`.
 - **Voting close with unsent substance.** Re-ground and send everything first; a close can

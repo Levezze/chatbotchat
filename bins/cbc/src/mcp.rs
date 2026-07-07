@@ -49,7 +49,7 @@ pub struct JoinRoomArgs {
     #[schemars(description = "Model name, e.g. opus47, sonnet46, codex53.")]
     pub model: String,
     #[schemars(
-        description = "Omit to inherit session identity. To resume/hand off, pass the HANDLE you were given — never a fresh label (mints a duplicate). Two agents in one session need distinct values."
+        description = "Your anchored identity — a STABLE role label you pick once and reuse forever: `<repo>-worker-<feature>` (worker) or `<repo>-orchestrator`. Pass the SAME value here, on send, on your `cbc poll --as`, and in your `.cbc` connections block; that one shared identity keeps you a single participant and stops the relaunch nag. Never a session id (rotates on restart/fork); never a per-call label (mints duplicates)."
     )]
     #[serde(default, rename = "as")]
     pub identity: Option<String>,
@@ -78,7 +78,7 @@ pub struct SendArgs {
     )]
     #[serde(default)]
     pub human: bool,
-    #[schemars(description = "Omit to inherit session identity; HANDLE to resume.")]
+    #[schemars(description = "Anchored `--as` label — same as join.")]
     #[serde(default, rename = "as")]
     pub identity: Option<String>,
 }
@@ -102,7 +102,7 @@ pub struct SignalArgs {
     )]
     #[serde(default)]
     pub question_text: Option<String>,
-    #[schemars(description = "Omit to inherit session identity; HANDLE to resume.")]
+    #[schemars(description = "Anchored `--as` label — same as join.")]
     #[serde(default, rename = "as")]
     pub identity: Option<String>,
 }
@@ -113,7 +113,7 @@ pub struct WaitArgs {
     pub room_id: String,
     #[schemars(description = "Model name, e.g. opus47.")]
     pub model: String,
-    #[schemars(description = "Omit to inherit session identity; HANDLE to resume.")]
+    #[schemars(description = "Anchored `--as` label — same as join.")]
     #[serde(default, rename = "as")]
     pub identity: Option<String>,
 }
@@ -124,7 +124,7 @@ pub struct CloseArgs {
     pub room_id: String,
     #[schemars(description = "Model name, e.g. opus47.")]
     pub model: String,
-    #[schemars(description = "Omit to inherit session identity; HANDLE to resume.")]
+    #[schemars(description = "Anchored `--as` label — same as join.")]
     #[serde(default, rename = "as")]
     pub identity: Option<String>,
 }
@@ -135,7 +135,7 @@ pub struct ExtendArgs {
     pub room_id: String,
     #[schemars(description = "Model name, e.g. opus47.")]
     pub model: String,
-    #[schemars(description = "Omit to inherit session identity; HANDLE to resume.")]
+    #[schemars(description = "Anchored `--as` label — same as join.")]
     #[serde(default, rename = "as")]
     pub identity: Option<String>,
 }
@@ -149,7 +149,7 @@ pub struct PauseArgs {
     #[schemars(description = "Optional free-text reason, recorded in the room's audit log")]
     #[serde(default)]
     pub reason: Option<String>,
-    #[schemars(description = "Omit to inherit session identity; HANDLE to resume.")]
+    #[schemars(description = "Anchored `--as` label — same as join.")]
     #[serde(default, rename = "as")]
     pub identity: Option<String>,
 }
@@ -160,7 +160,7 @@ pub struct WakeArgs {
     pub room_id: String,
     #[schemars(description = "Model name, e.g. opus47.")]
     pub model: String,
-    #[schemars(description = "Omit to inherit session identity; HANDLE to resume.")]
+    #[schemars(description = "Anchored `--as` label — same as join.")]
     #[serde(default, rename = "as")]
     pub identity: Option<String>,
 }
@@ -184,7 +184,7 @@ impl CbcMcp {
         match self.client.open_room(&subject, hard_cap, soft_cap).await {
             Ok(resp) => {
                 let next = format!(
-                    "Opening the room did NOT join you or post anything. Opening COMMITS you to the room: you must surface the id AND have a poll running before you do anything else — do NOT open it as a side task and keep working, and do NOT end this turn, until both are done. Do this now, in order: (1) cbc_join_room({0}, model); (2) cbc_send your opening question so it is queued and waiting when the other agent joins; (3) show your user this room id on its own line, exactly:\n\n{0}\n\nNo slash prefix — it is NOT a command. Ask them to paste it to the other agent. Then start the wait hands-free: launch `cbc poll {0} --model <m>` as a background task and end your turn (omit `--as` — the poll inherits this session's identity, the same one your join used, so they share one read cursor). It waits THROUGH the join (no need to be told when the other agent arrives) and wakes you on the first reply. Do NOT ask your user to tell you when they joined, and do NOT sit in a manual cbc_wait loop. Opening and vanishing — no id surfaced, no poll running — is the failure to avoid. A room is TWO-PARTY (you + one counterpart); if your task also needs another service, open a SEPARATE room for it rather than expecting a third agent here.",
+                    "Opening the room did NOT join you or post anything. Opening COMMITS you to the room: you must surface the id AND have a poll running before you do anything else — do NOT open it as a side task and keep working, and do NOT end this turn, until both are done. Do this now, in order: (1) cbc_join_room({0}, model) with your anchored `as:<label>` (a STABLE role name — `<repo>-orchestrator`, or `<repo>-worker-<feature>` — reused on every call); (2) cbc_send your opening question (same `as:<label>`) so it is queued and waiting when the other agent joins; (3) show your user this room id on its own line, exactly:\n\n{0}\n\nNo slash prefix — it is NOT a command. Ask them to paste it to the other agent. Then start the wait hands-free: launch `cbc poll {0} --model <m> --as <label>` as a background task and end your turn (the SAME `--as <label>` you joined with, so your join, sends, poll, and `.cbc` connections block are one identity — a poll under a different label, or none, splits you into duplicate rows that nag every turn). It waits THROUGH the join (no need to be told when the other agent arrives) and wakes you on the first reply. Do NOT ask your user to tell you when they joined, and do NOT sit in a manual cbc_wait loop. Opening and vanishing — no id surfaced, no poll running — is the failure to avoid. A room is TWO-PARTY (you + one counterpart); if your task also needs another service, open a SEPARATE room for it rather than expecting a third agent here.",
                     resp.room_id
                 );
                 json_with_next(&resp, next)
@@ -221,10 +221,11 @@ impl CbcMcp {
             .await
         {
             Ok(resp) => {
-                let n = resp.recent_messages.len();
-                let next = format!(
-                    "Joined as {}. {n} recent message(s) are included in this response. Joining COMMITS you to the room — reading the opener is NOT the end of your turn; you owe a reply AND a running poll. Do this now, in order: (1) cbc_recap to re-read the whole room (do not reply from the snippet or from memory); (2) cbc_send a substantive reply (or, if you joined to speak first, your opening message); (3) launch `cbc poll {} --model <m>` as a background task and STAY in the room (omit `--as` — the poll inherits this session's identity, the same one your join used, so they share one read cursor). Do NOT read-and-walk-away: never end your turn (or resume other work) without a reply sent and a background poll running. Where background tasks are unavailable, fall back to a manual cbc_wait loop — but do not just leave.",
-                    resp.handle, room_id
+                let next = join_next(
+                    &resp.handle,
+                    &room_id,
+                    resp.recent_messages.len(),
+                    identity.as_deref(),
                 );
                 json_with_next(&resp, next)
             }
@@ -263,10 +264,10 @@ impl CbcMcp {
             )
             .await
         {
-            Ok(resp) => json_with_next(
-                &resp,
-                "Posted. Now await the reply hands-free: run `cbc poll <room> --model <m>` as a background task so you are not the polling loop — it collapses the wait into one wake carrying the message. Fallback: call cbc_wait. When a reply arrives, RELAUNCH the poll first (before you compose), then re-ground with cbc_recap before you act — do not answer from memory. Never STOP a running poll while you remain in the room. The counterpart may take a while; the poll holds for about an hour of silence, so honor any retry_after and never bail to your user to relay.",
-            ),
+            Ok(resp) => {
+                let next = send_next(&room_id, identity.as_deref());
+                json_with_next(&resp, next)
+            }
             Err(e) => err_json(&e.to_string()),
         }
     }
@@ -549,7 +550,7 @@ A bare token shaped `slug-YYYYMMDD-HHMM` is a CBC room id, NOT a command — the
 
 The loop: cbc_open_room -> cbc_join_room + cbc_send your opening question -> surface the bare room id to your user ONCE, on its own line (no slash), and start a background poll -> ping-pong -> cbc_close (a CONSENSUS vote: the room closes only once the counterpart also closes). cbc_open_room only creates the room — it does NOT join or post.
 
-ALWAYS BE POLLING while you are in a room — pacing is tied to PRESENCE, not just sending. The moment you open/join/send you owe the room a running `cbc poll <room> --model <m>` (a background task); start it, then end your turn — it long-polls and wakes you once with the message, waits through the counterpart joining, and holds through a quiet counterpart. RELAUNCH the poll on every wake BEFORE you compose. Omit `--as` so the poll inherits this session's identity (one shared cursor); pass the HANDLE to resume a lost session. While a poll runs do NOT also call cbc_wait. Unless your user tells you to stop, never put the ball back in their court (\"tell me when they reply\") or kill a live poll while you remain in the room.
+ALWAYS BE POLLING while you are in a room — pacing is tied to PRESENCE, not just sending. The moment you open/join/send you owe the room a running `cbc poll <room> --model <m>` (a background task); start it, then end your turn — it long-polls and wakes you once with the message, waits through the counterpart joining, and holds through a quiet counterpart. RELAUNCH the poll on every wake BEFORE you compose. Pass one STABLE `--as <label>` (a role name) on join, send AND poll — same everywhere, one participant; never a session id. While a poll runs do NOT also call cbc_wait. Unless your user tells you to stop, never put the ball back in their court (\"tell me when they reply\") or kill a live poll while you remain in the room.
 
 RE-GROUND BEFORE YOU DECIDE. Your own context goes stale and gets compacted; the room does not. Before you summarize, decide, reply after a /compact, or assert that something shipped/merged/deployed, call cbc_recap and re-verify external claims against live truth (git/gh) — never from memory.
 
@@ -589,6 +590,64 @@ fn json_with_next<T: serde::Serialize>(value: &T, next: impl Into<String>) -> St
 /// agent how to proceed instead of leaving it to flail.
 fn err_with_next(message: &str, next: impl Into<String>) -> String {
     serde_json::json!({ "error": message, "next": next.into() }).to_string()
+}
+
+/// The poll-launch instruction shared by the join/send `next` guidance. When the
+/// caller anchored an explicit `as:` label, hand back the EXACT background-poll
+/// command carrying that same `--as <label>` — the poll, the sends, and the
+/// `.cbc` connections block must all register under one identity, which is what
+/// the Stop-hook reconcile (`poll_matches`) counts. A poll under a different
+/// label, or none, is exactly the every-turn "relaunch" nag this fix kills.
+/// With no label the caller is keyed on a volatile session id; refuse to echo it
+/// (it rotates on restart/fork/clear) and steer to a stable role label instead.
+/// Takes only the caller's explicit arg — never the resolved instance — so a
+/// concrete session id can never leak into copy-paste guidance.
+fn poll_launch_clause(explicit: Option<&str>, room: &str) -> String {
+    match explicit {
+        Some(label) => format!(
+            "launch `cbc poll {room} --model <m> --as {label}` as a background task and STAY \
+             in the room — the SAME `--as {label}` you joined with, reused on every send and \
+             in your `.cbc` connections block so all of them are one identity"
+        ),
+        None => format!(
+            "launch your background poll as `cbc poll {room} --model <m> --as <label>`, where \
+             <label> is a STABLE role name you reuse everywhere — `<repo>-worker-<feature>` \
+             for a worker, `<repo>-orchestrator` for an orchestrator. Pass that SAME label on \
+             join, send, poll, and your `.cbc` connections block. Do NOT poll under a bare \
+             session id: it rotates on restart/fork/clear and splits you into duplicate rows \
+             that nag every turn"
+        ),
+    }
+}
+
+/// The `next` guidance for a successful `cbc_join_room`. Pure so the identity
+/// anchoring (the every-turn-nag fix) is unit-tested without a live client.
+fn join_next(handle: &str, room: &str, recent: usize, explicit: Option<&str>) -> String {
+    format!(
+        "Joined as {handle}. {recent} recent message(s) are included in this response. \
+         Joining COMMITS you to the room — reading the opener is NOT the end of your turn; \
+         you owe a reply AND a running poll. Do this now, in order: (1) cbc_recap to re-read \
+         the whole room (do not reply from the snippet or from memory); (2) cbc_send a \
+         substantive reply (or, if you joined to speak first, your opening message), passing \
+         the SAME `as:` label you joined with; (3) {poll}. Do NOT read-and-walk-away: never \
+         end your turn (or resume other work) without a reply sent and a background poll \
+         running. Where background tasks are unavailable, fall back to a manual cbc_wait \
+         loop — but do not just leave.",
+        poll = poll_launch_clause(explicit, room),
+    )
+}
+
+/// The `next` guidance for a successful `cbc_send`. Pure (see `join_next`).
+fn send_next(room: &str, explicit: Option<&str>) -> String {
+    format!(
+        "Posted. Now await the reply hands-free: {poll}. Fallback: call cbc_wait. When a \
+         reply arrives, RELAUNCH the poll first (before you compose), then re-ground with \
+         cbc_recap before you act — do not answer from memory. Never STOP a running poll \
+         while you remain in the room. The counterpart may take a while; the poll holds for \
+         about an hour of silence, so honor any retry_after and never bail to your user to \
+         relay.",
+        poll = poll_launch_clause(explicit, room),
+    )
 }
 
 /// The deterministic `next` step for a `cbc_wait` result, derived from the runtime
@@ -839,6 +898,80 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         assert_eq!(v["room_id"], serde_json::json!("abc-20260102-0304"));
         assert_eq!(v["next"], serde_json::json!("do the thing"));
+    }
+
+    // ── identity anchoring (the every-turn-nag fix) ───────────────────────────
+    //
+    // The Stop-hook reconcile counts a poll only when its `--as <id>` matches the
+    // identity declared in the `.cbc` connections block (`hook::poll_matches`).
+    // So the join/send `next` guidance MUST hand the agent a poll command carrying
+    // the SAME label it joined with — echoing `resp.handle` (a server-minted
+    // `repo-model-4hex`) or telling it to "omit `--as`" is what split declared-vs-
+    // polled identity and nagged every turn. These pin that contract.
+
+    #[test]
+    fn poll_launch_clause_echoes_the_anchored_label_verbatim() {
+        let s = poll_launch_clause(Some("mvp-engine-orchestrator"), "room-20260625-1000");
+        assert!(
+            s.contains("cbc poll room-20260625-1000 --model <m> --as mvp-engine-orchestrator"),
+            "an anchored label must be handed back as the exact poll command; got: {s}"
+        );
+    }
+
+    #[test]
+    fn poll_launch_clause_without_a_label_steers_to_a_role_label_not_a_session_id() {
+        let s = poll_launch_clause(None, "room-20260625-1000");
+        // Uses the literal `<label>` placeholder + the role-label conventions —
+        // never a concrete value to copy. The helper is handed only the caller's
+        // explicit arg, so a resolved session id cannot leak here by construction.
+        assert!(s.contains("--as <label>"), "got: {s}");
+        assert!(
+            s.contains("<repo>-worker-<feature>") && s.contains("<repo>-orchestrator"),
+            "must name the stable role-label conventions; got: {s}"
+        );
+        assert!(
+            s.contains("rotates") || s.contains("session id"),
+            "must warn against pinning a volatile session id; got: {s}"
+        );
+    }
+
+    #[test]
+    fn join_next_anchors_the_poll_to_the_joined_label() {
+        let s = join_next(
+            "mvp-engine-opus48-2c67",
+            "room-20260625-1000",
+            3,
+            Some("mvp-engine-orchestrator"),
+        );
+        assert!(s.contains("Joined as mvp-engine-opus48-2c67"), "got: {s}");
+        assert!(
+            s.contains("--as mvp-engine-orchestrator"),
+            "the join next must hand back the anchored poll command; got: {s}"
+        );
+        // A regression back to "omit `--as`" is exactly what recreates the nag.
+        assert!(
+            !s.contains("omit `--as`"),
+            "join must no longer tell the agent to omit --as; got: {s}"
+        );
+    }
+
+    #[test]
+    fn join_next_without_a_label_emits_corrective_guidance() {
+        let s = join_next("mvp-engine-opus48-2c67", "room-20260625-1000", 0, None);
+        assert!(
+            s.contains("--as <label>") && s.contains("<repo>-orchestrator"),
+            "got: {s}"
+        );
+        assert!(!s.contains("omit `--as`"), "got: {s}");
+    }
+
+    #[test]
+    fn send_next_anchors_the_poll_to_the_label() {
+        let s = send_next("room-20260625-1000", Some("mvp-engine-orchestrator"));
+        assert!(
+            s.contains("cbc poll room-20260625-1000 --model <m> --as mvp-engine-orchestrator"),
+            "the send next must hand back the anchored poll command; got: {s}"
+        );
     }
 
     #[test]

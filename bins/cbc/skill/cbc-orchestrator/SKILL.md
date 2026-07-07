@@ -25,8 +25,9 @@ only the orchestrator *role* on top. When this skill and `/cbc` seem to differ o
 
 2. **You do not open worker rooms.** It is one-to-many: you don't know how many agents are
    running. Each worker opens a room *to you* (via `/cbc-worker`) and the **user pastes you
-   the room id**. You `cbc_join_room` → `cbc_recap` → start a background poll for each. You
-   never `cbc_open_room` for a worker. (Opening peer-orchestrator rooms is different — that is
+   the room id**. You `cbc_join_room` **with `as:<repo>-orchestrator`** (your one anchored label,
+   the SAME on every room's join, send, poll, and `connections:` line) → `cbc_recap` → start a
+   background poll `--as <repo>-orchestrator` for each. You never `cbc_open_room` for a worker. (Opening peer-orchestrator rooms is different — that is
    `/cbc-peer`, which you also load.)
 
 3. **You never spawn implementation agents.** Workers are separate Claude Code sessions the
@@ -348,15 +349,19 @@ leaves a room at zero and sometimes stacks duplicates, so never hand it your sur
 - **On reconnect, confirm you're current.** Check the **latest message seq against the last one you
   handled**. Equal → current. Behind → read *only* the gap and reconcile it before you act. Never
   treat a poll outage as real quiet; a dead poll hides new messages.
-- **Unattended / overnight → arm a timer beat.** The per-turn verify above only fires *at a turn
-  boundary*. If you park idle and the harness reaps a poll (143/SIGTERM), no turn-end fires and you
-  go deaf on that room until a human reopens your chat. Cover it with a **timer-driven heartbeat**
-  (`/loop` or `ScheduleWakeup`) that re-fires regardless of the reap: each beat, `cbc_recap` every
-  room you hold (lossless, non-consuming — it never advances your cursor) and re-arm a short bounded
-  `cbc poll <room> --model <m> --as <id> --max-polls 1 --poll-cap-secs 50` per room to keep
-  `poll_live` fresh under the ~150 s stale threshold, then act on anything you drained. **Honest
-  limit:** if your session itself dies, CBC is pull-only and cannot wake you — only a human
-  reopening the chat recovers that; the beat fixes every case short of it.
+- **Unattended / overnight → arm a timer beat that re-arms the standing polls.** A standing poll
+  per room is still your primary line and stays running whenever you're taking turns; the beat is a
+  **backstop that re-arms a reaped poll, never a substitute you switch to.** The per-turn verify
+  above only fires *at a turn boundary*: if you park idle and the harness reaps a poll (143/SIGTERM),
+  no turn-end fires and you go deaf on that room until a human reopens your chat. Cover *that gap*
+  with a **timer-driven heartbeat** (`/loop` or `ScheduleWakeup`) that re-fires regardless of the
+  reap: each beat, `cbc_recap` every room you hold (lossless, non-consuming — it never advances your
+  cursor) and re-arm a short bounded `cbc poll <room> --model <m> --as <repo>-orchestrator
+  --max-polls 1 --poll-cap-secs 50` per room to keep `poll_live` fresh under the ~150 s stale
+  threshold, then act on anything you drained. **Dropping your standing polls to "just run the beat"
+  is the deafness bug — the beat re-arms them, it does not replace them.** **Honest limit:** if your
+  session itself dies, CBC is pull-only and cannot wake you — only a human reopening the chat
+  recovers that; the beat fixes every case short of it.
 
 ## Keep your lines from filling — open big, extend by consensus
 
@@ -467,9 +472,12 @@ report line and every peer line). Format is parsed literally: `  <name>: <room-i
 every line** (you are one session) and is what scopes the reconcile to *your* polls so it never
 counts or kills a worker's poll of the same shared room. You **launch each poll from its
 connections line**: `cbc poll <room-id> --model <model> --as <repo>-orchestrator`. Add a
-connections entry the moment you join a room; remove it when that room closes. (The `agents:`
-registry below is the human-facing board with liveness markers; `connections:` is what the hook
-reads — keep an entry in `connections:` for every room you actually poll.)
+connections entry the moment you join a room; **remove it the moment you OBSERVE that room
+`closed`/`archived`** — a terminal poll wake, a `cbc_recap`, or a `cbc_status`, whether you or the
+counterpart closed it. A stale `connections:` entry for a closed room makes the Stop hook nag you
+to relaunch a poll onto a dead room every turn. (The `agents:` registry below is the human-facing
+board with liveness markers; `connections:` is what the hook reads — keep an entry in
+`connections:` for every room you actually poll, and only those.)
 
 The `agents:` block is the **name registry** — the name is the key; the handle is a parenthetical
 cross-reference, never the label. Each entry ends with a **liveness marker** (`✓` / `quiet` /
@@ -874,8 +882,9 @@ regenerate, or re-derive anything, the peers hear about it first.*
   hand-relaunch is what stacked 14 polls onto 3 rooms. The rule is **check first, then relaunch
   only a room at zero** — *not* "never relaunch." You own your liveness; the Stop hook is a backup
   that resurrects a dead poll and kills a stacked duplicate at turn-end, but it sometimes misses, so
-  never hand it your survival. (For unattended runs, your liveness rides a timer beat — see "Polls
-  die".)
+  never hand it your survival. A standing poll per room is the always-on default; for unattended
+  runs a timer beat **re-arms** a reaped standing poll — a backstop, never a replacement you switch
+  to (dropping the standing polls to run only a beat is the deafness bug; see "Polls die").
 - **Re-grounding from memory after a compaction.** Re-read the map, then `cbc_recap` each room.
 - **Editing the tracked `.gitignore`** to hide the map. Use `.git/info/exclude` (untracked).
 - **Narrating an agent's status from its last-seen message without re-querying.** Silence on the
