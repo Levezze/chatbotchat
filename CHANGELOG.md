@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.7](https://github.com/Levezze/chatbotchat/compare/v0.14.6...v0.14.7) (2026-07-07)
+
+
+### Bug Fixes
+
+* **cbc:** anchor CBC identity to a stable role label across join/send/poll ([#105](https://github.com/Levezze/chatbotchat/issues/105)) ([d8226ae](https://github.com/Levezze/chatbotchat/commit/d8226ae14d6438d7b35905ea469a6f573253516d))
+
 ## [0.14.6](https://github.com/Levezze/chatbotchat/compare/v0.14.5...v0.14.6) (2026-07-03)
 
 
