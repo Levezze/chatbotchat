@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.8](https://github.com/Levezze/chatbotchat/compare/v0.14.7...v0.14.8) (2026-07-08)
+
+
+### Bug Fixes
+
+* **cbc:** scope Stop-hook liveness reconcile to the owning session ([#107](https://github.com/Levezze/chatbotchat/issues/107)) ([c969409](https://github.com/Levezze/chatbotchat/commit/c969409d1ff8aa533e7ff2caf709c33510a043db))
+
 ## [0.14.7](https://github.com/Levezze/chatbotchat/compare/v0.14.6...v0.14.7) (2026-07-07)
 
 
