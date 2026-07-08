@@ -73,6 +73,7 @@ A missing `.cbc/` dir is NOT a reason to fall back — create it. Use `/tmp/cbc-
 
 ## Status
 status: ACTIVE | DONE
+session-id: <the value of $CLAUDE_CODE_SESSION_ID — stamp on create, RE-stamp on every resume>
 mode: worker
 next-action: <terse one-liner — what a resumed agent should do first>
 phase: <planning|implementing|PR-open|in-review|applying-fixes|merging|piece-merged|blocked|waiting-on-orchestrator|waiting-on-user>
@@ -99,9 +100,11 @@ connections:
 a push. Pushing updates `last-synced`. A freshly-compacted worker checks this field first to
 detect drift and re-sync.
 
-**`status: ACTIVE|DONE` + `next-action` are the resume fields.** Set `status: ACTIVE` when you open the file; set `status: DONE` the moment the room is `closed`/`archived` and the poll is stopped. **Flip to DONE as soon as you OBSERVE the room closed — a terminal poll wake, a `cbc_recap`, or a `cbc_status` — even if the orchestrator closed it, not you.** The Stop hook nags every `.cbc` file still marked `ACTIVE`; a file left `ACTIVE` on a room the orchestrator already closed nags you to relaunch a poll onto a dead room, forever. Update `next-action` after every transition — it is what a fresh agent reads to re-enter without re-running setup. See "Resuming?" below.
+**`status: ACTIVE|DONE` + `next-action` are the resume fields.** Set `status: ACTIVE` when you open the file; set `status: DONE` the moment the room is `closed`/`archived` and the poll is stopped. **Flip to DONE as soon as you OBSERVE the room closed — a terminal poll wake, a `cbc_recap`, or a `cbc_status` — even if the orchestrator closed it, not you.** The Stop hook nags every file stamped with YOUR session id that is still marked `ACTIVE`; a file left `ACTIVE` on a room the orchestrator already closed nags you to relaunch a poll onto a dead room, forever. Update `next-action` after every transition — it is what a fresh agent reads to re-enter without re-running setup. See "Resuming?" below.
 
 **`mode: worker` is what attaches you to the orchestrator.** It's the default for this skill — keep it `worker`. (A standalone session with no orchestrator is `mode: direct`; absent ⇒ `direct`.) The hooks read this field to decide worker-specific behavior.
+
+**`session-id:` scopes the Stop hook to YOUR session — stamp it or lose your liveness backup.** Several agents (an orchestrator and its workers) share one repo-root `.cbc/`; the Stop hook reconciles ONLY the files stamped with the session id its payload carries, so it never nags you about a co-located session's rooms (and never nags them about yours). Write the literal value of `$CLAUDE_CODE_SESSION_ID` (`echo $CLAUDE_CODE_SESSION_ID`) when you create the file. The id ROTATES on every restart/resume/`/clear` — **re-stamping it is a mandatory resume step** (see "Resuming?"); a stale or missing stamp means the Stop hook silently skips your file (no cross-nag ever, but no dead-poll backup for you either).
 
 **The `connections:` block is the single source of truth the Stop hook reconciles your poll against.** One line per room you must hold open — for a worker that's exactly one, your orchestrator line. Format is load-bearing and parsed literally:
 
@@ -179,10 +182,11 @@ Read any file found. Run the **liveness guard** (matches CLAUDE.md's two-conditi
    connections:
      orchestrator: <room-id> --as <repo>-worker-<feature> --model <model>
    ```
-   A file with no `connections:` block is exactly what makes the Stop hook strip your `--as` on relaunch and 400 ("not a participant"). **Ignore any `SessionStart` relaunch directive that fired before you added the block** — it was generated from the pre-block file and may be unscoped (no `--as`), so obeying it relaunches identity-less and 400s. Once the block exists, launch the poll yourself from your new `connections:` line: `cbc poll <room-id> --model <model> --as <repo>-worker-<feature>`. (On a *later* resume — block already present — the `SessionStart` hook's directive is correctly `--as`-scoped, so obey it as your first action then.) Launch it **once** — don't add a second "to be safe"; the Stop hook reconciles to exactly one.
-2. **Re-stamp your terminal title** — your tty may have changed after a Cursor reload. Re-run the name-file write from "Open the line" step 3 so your tab reverts to your agent name.
-3. **`cbc_recap` your room** to catch up on messages that arrived while the poll was dead — especially any holds or sequencing changes from the orchestrator. Do not act on in-flight state before you've read what you missed.
-4. **Then check `phase ≠ last-synced-to-orchestrator`** — if they differ, push the missed update now. This step is last, not first: pushing before you've read a hold violates the "Implementing through a hold" anti-pattern.
+   A file with no `connections:` block is exactly what makes the Stop hook strip your `--as` on relaunch and 400 ("not a participant"). **Ignore any `SessionStart` relaunch directive that fired before you added the block** — it was generated from the pre-block file and may be unscoped (no `--as`), so obeying it relaunches identity-less and 400s. Once the block exists, launch the poll yourself from your new `connections:` line: `cbc poll <room-id> --model <model> --as <repo>-worker-<feature>`. (On a *later* resume — block already present — the `SessionStart` hook's directive is correctly `--as`-scoped, so obey it as your first action then.) **Obey ONLY directives whose room id appears in YOUR OWN file's `connections:` block.** In a shared `.cbc/`, SessionStart cannot tell whose files are whose (the session id rotates at exactly that boundary), so it also emits relaunch commands for CO-LOCATED sessions' rooms under THEIR identities — obeying one of those poaches their room: your poll steals messages meant for their session. A directive for a room not in your block is not yours; skip it. Launch yours **once** — don't add a second "to be safe"; the Stop hook reconciles to exactly one.
+2. **Re-stamp `session-id:`** — this session's id is NEW (it rotates on every restart/resume/`/clear`). Write the current `$CLAUDE_CODE_SESSION_ID` (`echo $CLAUDE_CODE_SESSION_ID`) over the stale value (add the field under `status:` if the file predates it). Until you do, the Stop hook skips your file: it can't prove the file is yours, so you have no dead-poll backup.
+3. **Re-stamp your terminal title** — your tty may have changed after a Cursor reload. Re-run the name-file write from "Open the line" step 3 so your tab reverts to your agent name.
+4. **`cbc_recap` your room** to catch up on messages that arrived while the poll was dead — especially any holds or sequencing changes from the orchestrator. Do not act on in-flight state before you've read what you missed.
+5. **Then check `phase ≠ last-synced-to-orchestrator`** — if they differ, push the missed update now. This step is last, not first: pushing before you've read a hold violates the "Implementing through a hold" anti-pattern.
 
 **If the guard fails** (branch gone, room closed, `status: DONE`, or no file found): write `status: DONE` into the file (if one was found), then proceed fresh from "Open the line."
 

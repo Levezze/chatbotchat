@@ -50,9 +50,11 @@ loop from scratch.
    rooms your agents opened among themselves you never joined, so they aren't yours to re-ground;
    their outcome reaches you as status on the report lines.) Do **not** trust any pre-compact recollection.
    Verify external claims (merged / deployed / contract is now X) against `git`/`gh` as always.
-   Overwrite the map with current truth (create one if there isn't yet). Set `status: ACTIVE` and
-   update `next-action` in the map to reflect where you are after the rebuild — this is the resume
-   signal if another compaction follows before you finish re-grounding.
+   Overwrite the map with current truth (create one if there isn't yet). Set `status: ACTIVE`,
+   re-stamp `session-id:` with the current `$CLAUDE_CODE_SESSION_ID` (a rebuilt map that drops
+   the stamp is skipped by the Stop hook — no dead-poll backup), and update `next-action` in the
+   map to reflect where you are after the rebuild — this is the resume signal if another
+   compaction follows before you finish re-grounding.
 
    **`cbc_recap` is not fresh status.** It re-reads the *existing* thread — if an agent sent
    nothing since the step-2 hold, recap surfaces the *same stale message*, which is not fresh
