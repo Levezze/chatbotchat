@@ -1249,9 +1249,7 @@ mod tests {
 
         let text = String::from_utf8(out).unwrap();
         assert!(
-            text.contains(
-                "cbc poll room-mine-20260708-1756 --model opus --as engine-worker-mine"
-            ),
+            text.contains("cbc poll room-mine-20260708-1756 --model opus --as engine-worker-mine"),
             "scoping must not eat the advisory for the session's OWN dead poll; got:\n{text}"
         );
         assert!(
