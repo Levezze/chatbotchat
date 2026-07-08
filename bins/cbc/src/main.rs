@@ -499,6 +499,18 @@ async fn main() -> anyhow::Result<()> {
             let repo = context::detect_repo();
             let cwd = context::detect_cwd();
             let instance = context::detect_instance(identity.as_deref());
+            // Loop-mode liveness breadcrumb: drop it NOW, before the first wait —
+            // in `/loop` auto-mode the harness SIGTERM-reaps this background poll at
+            // turn-end (exit 143) mid-park, so it is never process-visible to the
+            // Stop reconcile. The fresh marker under `<cwd>/.cbc` tells the Stop hook
+            // a beat is keeping this room alive, so it must not nag to relaunch.
+            // Keyed on the raw `--as` identity (what the declared connection carries),
+            // so the hook's read side finds the same file. Best-effort; never fails.
+            hook::touch_poll_alive(
+                std::path::Path::new(&cwd).join(".cbc").as_path(),
+                &room_id,
+                identity.as_deref(),
+            );
             // Clamp the cap to [1, 590] (mirrors the MCP cbc_wait clamp): a 0 cap
             // makes the server return instantly with no retry_after, which would
             // otherwise spin the loop; 590 stays under the server's 600s cap.
@@ -733,6 +745,15 @@ async fn main() -> anyhow::Result<()> {
                     // leaves the room deaf — blocking and relaunching (idempotently)
                     // is correct there, not skipping.
                     &mut |_room, _identity| false,
+                    // Loop-mode liveness the process table cannot see: a bounded
+                    // beat poll is SIGTERM-reaped at turn-end, so it never shows in
+                    // the count — but it touched its marker under the payload's
+                    // `.cbc` (passed in as `cbc_dir`), so a fresh marker means the
+                    // beat is keeping the room alive. Suppress the nag then; a
+                    // stale/absent marker falls through to the normal advisory.
+                    &mut |cbc_dir: &std::path::Path, room: &str, identity: Option<&str>| {
+                        hook::recently_polled(cbc_dir, room, identity, hook::POLL_ALIVE_WINDOW)
+                    },
                     &mut |order: &hook::KillOrder| {
                         kill_surplus_polls(&order.room_id, order.identity.as_deref())
                     },

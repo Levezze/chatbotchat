@@ -20,6 +20,7 @@ use anyhow::Context as _;
 use serde_json::Value;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 // ── Parsed state ─────────────────────────────────────────────────────────────
 
@@ -362,13 +363,17 @@ pub enum ReconcileAction {
 }
 
 /// The pure reconcile decision.  `n` = live polls matching this connection's
-/// `{room, identity}`; `launched_this_turn` = the transcript shows a matching
-/// `cbc poll` launch in the turn that just ended (race window: a brand-new poll
-/// isn't process-visible yet).
-pub fn reconcile_action(n: usize, launched_this_turn: bool) -> ReconcileAction {
+/// `{room, identity}`; `poll_hint` = a matching poll exists or is imminent even
+/// though the process table shows none.  Two sources feed it (OR'd by the
+/// caller): a poll launched in the just-ended turn (race window — a brand-new
+/// poll isn't process-visible yet), OR a bounded beat poll that refreshed this
+/// connection's liveness marker within the window (loop-mode: the beat is
+/// SIGTERM-reaped at turn-end, so it is never process-visible, but it IS keeping
+/// the room alive — nagging would only thrash it).
+pub fn reconcile_action(n: usize, poll_hint: bool) -> ReconcileAction {
     match n {
         1 => ReconcileAction::Ok,
-        0 if launched_this_turn => ReconcileAction::Ok,
+        0 if poll_hint => ReconcileAction::Ok,
         0 => ReconcileAction::AdviseRelaunch,
         _ => ReconcileAction::KillExtras,
     }
@@ -381,6 +386,93 @@ pub fn poll_command(room_id: &str, model: &str, identity: Option<&str>) -> Strin
     match identity {
         Some(id) => format!("cbc poll {room_id} --model {model} --as {id}"),
         None => format!("cbc poll {room_id} --model {model}"),
+    }
+}
+
+// ── Loop-mode liveness marker ───────────────────────────────────────────────────
+//
+// In `/loop` auto-mode the harness SIGTERM-reaps `run_in_background` `cbc poll`
+// processes at turn-end (exit 143), so a bounded beat poll is NEVER visible in the
+// process table the Stop reconcile scans — `count` sees 0 even while the beat is
+// faithfully keeping the room alive. Without a second liveness signal the Stop hook
+// nags → relaunch → reap → nag (the loop-mode thrash storm). So `cbc poll` drops a
+// filesystem breadcrumb the moment it starts (before it can be reaped), and the Stop
+// hook treats a fresh breadcrumb as "a beat is covering this room — do not nag."
+// This is deliberately LOCAL (no daemon round-trip): the Stop hook must never block
+// or hang turn-end, so it reads an mtime, not the network.
+
+/// Loop-mode liveness window: a `{room, identity}` whose beat poll touched its
+/// marker within this window counts as live, so the Stop hook suppresses the
+/// relaunch nag. Mirrors `core::lifecycle::GHOST_AFTER` (15m) — the server's own
+/// "still live, not a ghost" threshold — so the hook and the daemon agree on when
+/// a participant has genuinely gone quiet. A dead beat lets the marker age past
+/// this, and the nag self-heals.
+pub const POLL_ALIVE_WINDOW: Duration = Duration::from_secs(15 * 60);
+
+/// Filesystem-safe marker key for one `{room, identity}`. Scoped exactly like
+/// [`poll_matches`] (room + `--as` identity) so the write side (`cbc poll`) and
+/// the read side (the Stop hook) always agree on the same file. Room ids and
+/// handles are slug-like, but any non-`[A-Za-z0-9._-]` byte is mapped to `_` so a
+/// surprise character can never escape the `.poll-alive` dir or collide with a
+/// path separator.
+fn poll_alive_key(room: &str, identity: Option<&str>) -> String {
+    let raw = match identity {
+        Some(id) => format!("{room}__{id}"),
+        None => format!("{room}__"),
+    };
+    raw.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Path of the loop-mode liveness marker for `{room, identity}` under
+/// `<cbc_dir>/.poll-alive/`. `cbc poll` touches it; the Stop hook stats its mtime.
+pub fn poll_alive_marker(cbc_dir: &Path, room: &str, identity: Option<&str>) -> PathBuf {
+    cbc_dir
+        .join(".poll-alive")
+        .join(poll_alive_key(room, identity))
+}
+
+/// Best-effort touch of the loop-mode liveness marker, called by `cbc poll` when
+/// it starts (before the harness can reap it). Every error is swallowed — a poll
+/// must never fail over a liveness breadcrumb, and a missed touch merely means the
+/// Stop hook may nag once until the next beat.
+pub fn touch_poll_alive(cbc_dir: &Path, room: &str, identity: Option<&str>) {
+    let dir = cbc_dir.join(".poll-alive");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    // Truncate-write refreshes the mtime even when the marker already exists.
+    let _ = std::fs::write(poll_alive_marker(cbc_dir, room, identity), b"");
+}
+
+/// True iff `{room, identity}`'s liveness marker exists and its mtime is within
+/// `window` of now — i.e. a beat poll ran recently enough to own liveness. An
+/// absent, unreadable, or stale marker returns `false`: the Stop hook fails toward
+/// the relaunch nag (self-healing), never toward silent deafness. A future mtime
+/// (clock skew) is treated as fresh.
+pub fn recently_polled(
+    cbc_dir: &Path,
+    room: &str,
+    identity: Option<&str>,
+    window: Duration,
+) -> bool {
+    let path = poll_alive_marker(cbc_dir, room, identity);
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return false;
+    };
+    let Ok(mtime) = meta.modified() else {
+        return false;
+    };
+    match SystemTime::now().duration_since(mtime) {
+        Ok(elapsed) => elapsed <= window,
+        Err(_) => true,
     }
 }
 
@@ -476,17 +568,22 @@ pub struct StopPlan {
 
 /// Pure reconcile planner over the declared connections.  `count` returns the
 /// number of live identity-scoped polls for `{room, identity}`; `launched`
-/// returns whether a matching poll was launched in the just-ended turn.
+/// returns whether a matching poll was launched in the just-ended turn;
+/// `recently_polled` returns whether a bounded beat poll refreshed this
+/// connection's liveness marker within the window (loop-mode liveness the
+/// process table cannot see).  Either hint alone suppresses the nag.
 pub fn plan_stop(
     conns: &[DeclaredConnection],
     mut count: impl FnMut(&str, Option<&str>) -> usize,
     mut launched: impl FnMut(&str, Option<&str>) -> bool,
+    mut recently_polled: impl FnMut(&str, Option<&str>) -> bool,
 ) -> StopPlan {
     let mut plan = StopPlan::default();
     for c in conns {
         let id = c.identity.as_deref();
         let n = count(&c.room_id, id);
-        match reconcile_action(n, launched(&c.room_id, id)) {
+        let poll_hint = launched(&c.room_id, id) || recently_polled(&c.room_id, id);
+        match reconcile_action(n, poll_hint) {
             ReconcileAction::Ok => {}
             ReconcileAction::KillExtras => plan.kills.push(KillOrder {
                 room_id: c.room_id.clone(),
@@ -628,12 +725,16 @@ fn stop_advise_json(relaunch: &[String]) -> String {
 /// If any room has zero polls and none was launched this turn — and the loop
 /// guard (`stop_hook_active`) is not set — it surfaces a NON-blocking advisory
 /// (never blocks turn-end) listing the relaunch commands.  `count_fn` /
-/// `launched_fn` are seams over the process table and the transcript.
+/// `launched_fn` / `recently_polled_fn` are seams over the process table, the
+/// transcript, and the per-connection liveness marker.  `recently_polled_fn`
+/// receives the SAME payload-resolved `.cbc` dir that [`scan_declared`] used, so
+/// the marker read can never drift from the file scan.
 pub fn run_stop<R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
     count_fn: &mut dyn FnMut(&str, Option<&str>) -> usize,
     launched_fn: &mut dyn FnMut(&str, Option<&str>) -> bool,
+    recently_polled_fn: &mut dyn FnMut(&Path, &str, Option<&str>) -> bool,
     kill_fn: &mut dyn FnMut(&KillOrder),
 ) -> anyhow::Result<()> {
     let mut raw = String::new();
@@ -661,7 +762,8 @@ pub fn run_stop<R: Read, W: Write>(
         .and_then(|s| s.as_str())
         .filter(|s| !s.is_empty());
 
-    let conns = scan_declared(&cwd.join(".cbc"), session_id);
+    let cbc_dir = cwd.join(".cbc");
+    let conns = scan_declared(&cbc_dir, session_id);
     if conns.is_empty() {
         return Ok(());
     }
@@ -670,6 +772,7 @@ pub fn run_stop<R: Read, W: Write>(
         &conns,
         |room, id| count_fn(room, id),
         |room, id| launched_fn(room, id),
+        |room, id| recently_polled_fn(&cbc_dir, room, id),
     );
 
     // Kill surplus polls ourselves — identity-scoped, so always safe.
@@ -898,6 +1001,84 @@ mod tests {
         );
     }
 
+    // ── loop-mode liveness marker ─────────────────────────────────────────────
+
+    #[test]
+    fn recently_polled_true_for_freshly_touched_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let cbc = dir.path().join(".cbc");
+        std::fs::create_dir_all(&cbc).unwrap();
+        touch_poll_alive(&cbc, "room-x-20260708-1000", Some("worker-a"));
+        // Just touched ⇒ live within any sane window.
+        assert!(recently_polled(
+            &cbc,
+            "room-x-20260708-1000",
+            Some("worker-a"),
+            Duration::from_secs(600)
+        ));
+        // A zero-width window rejects anything with elapsed > 0 — exercises the
+        // stale branch without needing to backdate the file's mtime.
+        assert!(!recently_polled(
+            &cbc,
+            "room-x-20260708-1000",
+            Some("worker-a"),
+            Duration::ZERO
+        ));
+    }
+
+    #[test]
+    fn recently_polled_false_when_marker_absent() {
+        // Never touched ⇒ false, so the Stop hook fails toward the relaunch nag
+        // (self-healing), never toward silent deafness.
+        let dir = tempfile::tempdir().unwrap();
+        let cbc = dir.path().join(".cbc");
+        std::fs::create_dir_all(&cbc).unwrap();
+        assert!(!recently_polled(
+            &cbc,
+            "room-x-20260708-1000",
+            Some("worker-a"),
+            Duration::from_secs(600)
+        ));
+    }
+
+    #[test]
+    fn recently_polled_is_identity_scoped() {
+        // Keyed on {room, --as identity} exactly like poll_matches: a beat for one
+        // identity must NOT suppress the nag for a co-located session's
+        // different-identity poll of the same shared room.
+        let dir = tempfile::tempdir().unwrap();
+        let cbc = dir.path().join(".cbc");
+        std::fs::create_dir_all(&cbc).unwrap();
+        touch_poll_alive(&cbc, "room-shared-20260708-1000", Some("worker-a"));
+        assert!(recently_polled(
+            &cbc,
+            "room-shared-20260708-1000",
+            Some("worker-a"),
+            Duration::from_secs(600)
+        ));
+        assert!(!recently_polled(
+            &cbc,
+            "room-shared-20260708-1000",
+            Some("worker-b"),
+            Duration::from_secs(600)
+        ));
+    }
+
+    #[test]
+    fn poll_alive_marker_sanitizes_and_stays_in_dir() {
+        // A room id / handle with a path separator or space must not escape the
+        // .poll-alive dir or split into subpaths.
+        let cbc = Path::new("/tmp/x/.cbc");
+        let p = poll_alive_marker(cbc, "weird/../room id", Some("id/with/slash"));
+        let fname = p.file_name().unwrap().to_str().unwrap();
+        assert!(
+            !fname.contains('/'),
+            "key must have no path separators: {fname}"
+        );
+        assert!(!fname.contains(' '), "key must have no spaces: {fname}");
+        assert_eq!(p.parent().unwrap(), cbc.join(".poll-alive"));
+    }
+
     // ── poll_matches (B0.5 traps) ─────────────────────────────────────────────
 
     #[test]
@@ -1079,8 +1260,9 @@ mod tests {
         run_stop(
             &mut input.as_bytes(),
             &mut out,
-            &mut |_, _| 0,     // no live poll
-            &mut |_, _| false, // not launched this turn
+            &mut |_, _| 0,        // no live poll
+            &mut |_, _| false,    // not launched this turn
+            &mut |_, _, _| false, // no recent beat poll
             &mut |o| kills.push(o.clone()),
         )
         .unwrap();
@@ -1110,6 +1292,41 @@ mod tests {
     }
 
     #[test]
+    fn run_stop_suppresses_advisory_when_recently_polled() {
+        // End-to-end loop-mode guard: a declared connection with NO live poll
+        // (count 0, not launched) but a FRESH liveness marker (recently_polled_fn
+        // → true) must produce NO relaunch advisory — the bounded beat owns
+        // liveness. Proves run_stop threads the marker seam through to plan_stop;
+        // without the wiring the dead-poll advisory would fire and re-thrash.
+        let dir = tempfile::tempdir().unwrap();
+        let cbc = dir.path().join(".cbc");
+        std::fs::create_dir_all(&cbc).unwrap();
+        std::fs::write(
+            cbc.join("worker-loop-20260708.md"),
+            "status: ACTIVE\nconnections:\n  orch: room-loop-20260708-1000 --as loop-worker --model opus\n",
+        )
+        .unwrap();
+
+        let input = stop_input(dir.path(), false);
+        let mut out = Vec::new();
+        run_stop(
+            &mut input.as_bytes(),
+            &mut out,
+            &mut |_, _| 0,                // reaped beat ⇒ not process-visible
+            &mut |_, _| false,            // not launched this turn
+            &mut |_dir, _room, _id| true, // marker fresh ⇒ a beat is covering it
+            &mut |o| panic!("no kill expected, got {o:?}"),
+        )
+        .unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.is_empty(),
+            "a fresh beat marker must suppress the relaunch advisory entirely; got:\n{text}"
+        );
+    }
+
+    #[test]
     fn run_stop_legacy_worker_advisory_carries_recovered_as() {
         // Stop-path twin of run_compact_legacy_worker_recovers_identity_…: the
         // ACTUAL bug shape — a LEGACY worker file (no `connections:` block) whose
@@ -1131,8 +1348,9 @@ mod tests {
         run_stop(
             &mut input.as_bytes(),
             &mut out,
-            &mut |_, _| 0,     // no live poll
-            &mut |_, _| false, // not launched this turn
+            &mut |_, _| 0,        // no live poll
+            &mut |_, _| false,    // not launched this turn
+            &mut |_, _, _| false, // no recent beat poll
             &mut |o| kills.push(o.clone()),
         )
         .unwrap();
@@ -1193,6 +1411,7 @@ mod tests {
             &mut out,
             &mut |room, _| usize::from(room == "room-mine-20260708-1756"),
             &mut |_, _| false,
+            &mut |_, _, _| false, // no recent beat poll
             &mut |o| panic!("no kill expected, got {o:?}"),
         )
         .unwrap();
@@ -1241,8 +1460,9 @@ mod tests {
         run_stop(
             &mut input.as_bytes(),
             &mut out,
-            &mut |_, _| 0,     // ALL polls dead — including my own
-            &mut |_, _| false, // none launched this turn
+            &mut |_, _| 0,        // ALL polls dead — including my own
+            &mut |_, _| false,    // none launched this turn
+            &mut |_, _, _| false, // no recent beat poll
             &mut |o| panic!("no kill expected, got {o:?}"),
         )
         .unwrap();
@@ -1286,6 +1506,7 @@ mod tests {
             &mut out,
             &mut |_, _| 0,
             &mut |_, _| false,
+            &mut |_, _, _| false, // no recent beat poll
             &mut |o| panic!("no kill expected, got {o:?}"),
         )
         .unwrap();
@@ -1317,6 +1538,7 @@ mod tests {
             &mut out,
             &mut |_, _| 0,
             &mut |_, _| false,
+            &mut |_, _, _| false, // no recent beat poll
             &mut |_| {},
         )
         .unwrap();
@@ -1356,6 +1578,7 @@ mod tests {
             &mut out,
             &mut |_, _| 0,
             &mut |_, _| false,
+            &mut |_, _, _| false, // no recent beat poll
             &mut |o| kills.push(o.clone()),
         )
         .unwrap();
@@ -1386,6 +1609,7 @@ mod tests {
             &mut out,
             &mut |_, _| 3, // surplus
             &mut |_, _| false,
+            &mut |_, _, _| false, // no recent beat poll
             &mut |o| kills.push(o.clone()),
         )
         .unwrap();
@@ -1407,6 +1631,7 @@ mod tests {
             &mut out,
             &mut |_, _| 0,
             &mut |_, _| false,
+            &mut |_, _, _| false, // no recent beat poll
             &mut |o| kills.push(o.clone()),
         )
         .unwrap();
@@ -1428,7 +1653,7 @@ mod tests {
     #[test]
     fn plan_stop_advises_relaunch_for_dead_poll() {
         let conns = vec![conn("orch", "room-20260625-1000", Some("me"), "sonnet")];
-        let plan = plan_stop(&conns, |_, _| 0, |_, _| false);
+        let plan = plan_stop(&conns, |_, _| 0, |_, _| false, |_, _| false);
         assert!(plan.kills.is_empty());
         assert_eq!(
             plan.relaunch,
@@ -1439,14 +1664,14 @@ mod tests {
     #[test]
     fn plan_stop_healthy_poll_no_action() {
         let conns = vec![conn("orch", "room-20260625-1000", Some("me"), "sonnet")];
-        let plan = plan_stop(&conns, |_, _| 1, |_, _| false);
+        let plan = plan_stop(&conns, |_, _| 1, |_, _| false, |_, _| false);
         assert_eq!(plan, StopPlan::default());
     }
 
     #[test]
     fn plan_stop_kills_surplus() {
         let conns = vec![conn("orch", "room-20260625-1000", Some("me"), "sonnet")];
-        let plan = plan_stop(&conns, |_, _| 4, |_, _| false);
+        let plan = plan_stop(&conns, |_, _| 4, |_, _| false, |_, _| false);
         assert!(plan.relaunch.is_empty());
         assert_eq!(
             plan.kills,
@@ -1460,7 +1685,7 @@ mod tests {
     #[test]
     fn plan_stop_race_window_no_block() {
         let conns = vec![conn("orch", "room-20260625-1000", Some("me"), "sonnet")];
-        let plan = plan_stop(&conns, |_, _| 0, |_, _| true);
+        let plan = plan_stop(&conns, |_, _| 0, |_, _| true, |_, _| false);
         assert_eq!(plan, StopPlan::default(), "launched-this-turn ⇒ no block");
     }
 
@@ -1480,12 +1705,44 @@ mod tests {
                 _ => 0,
             },
             |_, _| false,
+            |_, _| false,
         );
         assert_eq!(plan.relaunch.len(), 1);
         assert!(plan.relaunch[0].contains("room-a-20260625-1000"));
         assert_eq!(plan.kills.len(), 1);
         assert_eq!(plan.kills[0].room_id, "room-c-20260625-1000");
         assert_eq!(plan.kills[0].identity.as_deref(), Some("me"));
+    }
+
+    #[test]
+    fn plan_stop_recent_beat_poll_suppresses_relaunch() {
+        // Loop-mode reap: the standing poll was SIGTERM-reaped at turn-end so it
+        // is NOT process-visible (count 0) and nothing launched this turn — yet a
+        // bounded beat poll touched its liveness marker within the window
+        // (recently_polled = true). The beat OWNS liveness here; nagging would
+        // relaunch → reap → nag → thrash (the loop-mode storm #107's
+        // session-scoping did not cover). So: no relaunch advisory owed.
+        let conns = vec![conn("orch", "room-20260708-1000", Some("me"), "opus")];
+        let plan = plan_stop(&conns, |_, _| 0, |_, _| false, |_, _| true);
+        assert_eq!(
+            plan,
+            StopPlan::default(),
+            "a beat poll fresh within the liveness window must suppress the nag"
+        );
+    }
+
+    #[test]
+    fn plan_stop_stale_beat_poll_still_advises() {
+        // Negative twin: a genuinely dead poll (no beat refreshing the marker →
+        // recently_polled = false, count 0) must STILL nag, so a truly-down room
+        // self-heals. Guards against a blanket suppression reintroducing deafness.
+        let conns = vec![conn("orch", "room-20260708-1000", Some("me"), "opus")];
+        let plan = plan_stop(&conns, |_, _| 0, |_, _| false, |_, _| false);
+        assert_eq!(
+            plan.relaunch,
+            vec!["cbc poll room-20260708-1000 --model opus --as me"],
+            "no recent beat + no live poll ⇒ the dead-poll advisory must still fire"
+        );
     }
 
     // ── declared_connections (unified) ────────────────────────────────────────
