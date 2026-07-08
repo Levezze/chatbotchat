@@ -213,6 +213,10 @@ fn is_active(content: &str) -> bool {
 /// state file (the skills write `$CLAUDE_CODE_SESSION_ID` on creation and
 /// re-stamp on every resume, because the id rotates there).  `None` for a
 /// pre-stamp legacy file.
+///
+/// First occurrence wins — a file-format invariant: the templates put the stamp
+/// in the Status header (before any log/prose), so the header stamp always
+/// beats a stale line lingering later in the file.
 fn owner_session(content: &str) -> Option<String> {
     content
         .lines()
@@ -617,9 +621,10 @@ fn stop_advise_json(relaunch: &[String]) -> String {
 
 /// Handle a `Stop` hook event: the per-turn poll reconcile (B2).
 ///
-/// Reads the hook JSON (`cwd`, `stop_hook_active`), scans `<cwd>/.cbc` for
-/// declared connections, and for each reconciles its live poll count against
-/// exactly-one.  Surplus polls are killed via `kill_fn` (identity-scoped, safe).
+/// Reads the hook JSON (`cwd`, `stop_hook_active`, `session_id`), scans
+/// `<cwd>/.cbc` for declared connections — scoped to the files stamped with the
+/// payload's `session_id` (see [`scan_declared`]) — and for each reconciles its
+/// live poll count against exactly-one.  Surplus polls are killed via `kill_fn` (identity-scoped, safe).
 /// If any room has zero polls and none was launched this turn — and the loop
 /// guard (`stop_hook_active`) is not set — it surfaces a NON-blocking advisory
 /// (never blocks turn-end) listing the relaunch commands.  `count_fn` /
@@ -648,7 +653,13 @@ pub fn run_stop<R: Read, W: Write>(
         .and_then(|c| c.as_str())
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let session_id = json.get("session_id").and_then(|s| s.as_str());
+    // Empty ⇒ treated as missing: degrade to the documented include-all
+    // back-compat, never an accidental skip-all that would silently disable the
+    // reconcile for the session's own rooms.
+    let session_id = json
+        .get("session_id")
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty());
 
     let conns = scan_declared(&cwd.join(".cbc"), session_id);
     if conns.is_empty() {
@@ -1194,6 +1205,97 @@ mod tests {
         assert!(
             text.is_empty(),
             "own poll healthy + foreign file not mine ⇒ no advisory owed at all; got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn run_stop_scoped_positive_own_dead_poll_still_advises() {
+        // The other half of the scoping guarantee: filtering must never eat the
+        // LEGITIMATE advisory for the session's own dead poll. Without this, an
+        // over-eager filter (or a payload-key mismatch) that skips everything
+        // would still pass the cross-session negative test — silence satisfies
+        // both. Payload session_id matches the stamp, poll count is 0 ⇒ the
+        // advisory must fire, and for exactly the own room.
+        let dir = tempfile::tempdir().unwrap();
+        let cbc = dir.path().join(".cbc");
+        std::fs::create_dir_all(&cbc).unwrap();
+        std::fs::write(
+            cbc.join("worker-mine-20260708.md"),
+            "status: ACTIVE\nsession-id: sess-mine\nconnections:\n  orch: room-mine-20260708-1756 --as engine-worker-mine --model opus\n",
+        )
+        .unwrap();
+        std::fs::write(
+            cbc.join("worker-other-20260707.md"),
+            "status: ACTIVE\nsession-id: sess-other\nconnections:\n  orch: room-other-20260707-1828 --as engine-worker-fresh --model opus\n",
+        )
+        .unwrap();
+
+        let input = serde_json::json!({
+            "hook_event_name": "Stop",
+            "stop_hook_active": false,
+            "cwd": dir.path().to_str().unwrap(),
+            "session_id": "sess-mine",
+        })
+        .to_string();
+        let mut out = Vec::new();
+        run_stop(
+            &mut input.as_bytes(),
+            &mut out,
+            &mut |_, _| 0,     // ALL polls dead — including my own
+            &mut |_, _| false, // none launched this turn
+            &mut |o| panic!("no kill expected, got {o:?}"),
+        )
+        .unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains(
+                "cbc poll room-mine-20260708-1756 --model opus --as engine-worker-mine"
+            ),
+            "scoping must not eat the advisory for the session's OWN dead poll; got:\n{text}"
+        );
+        assert!(
+            !text.contains("room-other-20260707-1828"),
+            "the foreign room must still be excluded; got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn run_stop_empty_session_id_falls_back_to_include_all() {
+        // A degenerate payload (`"session_id": ""`) must behave like a MISSING
+        // session id — the documented include-all back-compat — not silently
+        // skip every file (which would disable the reconcile for the session's
+        // own rooms with no signal anywhere).
+        let dir = tempfile::tempdir().unwrap();
+        let cbc = dir.path().join(".cbc");
+        std::fs::create_dir_all(&cbc).unwrap();
+        std::fs::write(
+            cbc.join("worker-mine-20260708.md"),
+            "status: ACTIVE\nsession-id: sess-mine\nconnections:\n  orch: room-mine-20260708-1756 --as engine-worker-mine --model opus\n",
+        )
+        .unwrap();
+
+        let input = serde_json::json!({
+            "hook_event_name": "Stop",
+            "stop_hook_active": false,
+            "cwd": dir.path().to_str().unwrap(),
+            "session_id": "",
+        })
+        .to_string();
+        let mut out = Vec::new();
+        run_stop(
+            &mut input.as_bytes(),
+            &mut out,
+            &mut |_, _| 0,
+            &mut |_, _| false,
+            &mut |o| panic!("no kill expected, got {o:?}"),
+        )
+        .unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("room-mine-20260708-1756"),
+            "empty session_id must degrade to include-all, not skip-all; got:\n{text}"
         );
     }
 
