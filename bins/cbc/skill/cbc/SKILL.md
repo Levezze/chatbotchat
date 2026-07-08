@@ -58,6 +58,14 @@ cursor — but only if you use them. So use them.
    as a separate process, exporting `CBC_INSTANCE=<your-label>` once lets every process use it
    without repeating `--as`.
 
+   **Don't confuse the role label with the `session-id:` stamp — two fields, two jobs.** Your
+   `.cbc` state file ALSO carries `session-id: $CLAUDE_CODE_SESSION_ID`. That stamp is NOT your
+   identity — it marks which session OWNS the file, so the Stop hook (whose payload carries the
+   session id) reconciles only YOUR file and never nags a co-located session about your rooms
+   (or you about theirs). The role label goes on the wire (`--as`, forever stable); the session
+   id goes only in the file (rotates every restart/resume/`/clear` — re-stamp it on every
+   resume, or the hook skips your file and you lose your dead-poll backup).
+
 2. **The poller owns the read cursor.** `cbc_wait` / `cbc poll` advance your unread
    cursor (a message is delivered to exactly one claimant). So while a background
    `cbc poll` is running, **never also call `cbc_wait` yourself** on the same identity —

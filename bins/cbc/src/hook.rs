@@ -209,6 +209,18 @@ fn is_active(content: &str) -> bool {
         .any(|l| kv(l.trim(), "status") == Some("ACTIVE"))
 }
 
+/// The `session-id:` stamp identifying the Claude Code session that owns a
+/// state file (the skills write `$CLAUDE_CODE_SESSION_ID` on creation and
+/// re-stamp on every resume, because the id rotates there).  `None` for a
+/// pre-stamp legacy file.
+fn owner_session(content: &str) -> Option<String> {
+    content
+        .lines()
+        .find_map(|l| kv(l.trim(), "session-id"))
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
 /// Parse a `.cbc/worker-*.md` file.  Returns `None` when not `ACTIVE` or when
 /// required fields are absent.
 ///
@@ -527,20 +539,20 @@ pub fn scan_active(cbc_dir: &Path) -> Vec<ActiveEntry> {
 /// yields connections (new `connections:` block or legacy `room-id`/`agents:`)
 /// contributes; non-active or non-CBC files contribute nothing.
 ///
-/// RESIDUAL (cross-session): this reconciles EVERY active file in `<cwd>/.cbc`,
-/// not just the calling session's. The skills mandate a per-worktree `.cbc`
-/// (one session ↔ one dir), so normally these are the session's own files. The
-/// residual fires only when two sessions share one worktree's `.cbc`, or a stale
-/// `ACTIVE` file from a prior session lingers (the CLAUDE.md liveness guard is
-/// what clears those): session A's Stop could then relaunch a poll under file
-/// B's `--as` identity. It is bounded — identity-scoping means the relaunch is
-/// correct whenever A legitimately owns that identity, and the `stop_hook_active`
-/// loop guard caps it at one block — and is the same friendly-fire class as the
-/// legacy room-only fallback in [`poll_matches`]. The clean fix (deferred: it
-/// needs file + hook plumbing and migration of existing files) is to tag each
-/// state file with the owning `session_id` and filter here to the session_id the
-/// Stop payload carries.
-pub fn scan_declared(cbc_dir: &Path) -> Vec<DeclaredConnection> {
+/// SESSION SCOPING: co-located agents (an orchestrator and its workers, whose
+/// shell cwd snaps back to the repo root) all write to ONE shared `.cbc/`, so an
+/// unscoped scan made every session's Stop nag about every OTHER session's rooms
+/// — every turn, under the other session's `--as` identity (the cross-session
+/// nightmare of 2026-07-08). With `session_id` = `Some(sid)` (the Stop payload's
+/// id), only files whose `session-id:` stamp equals `sid` contribute; files
+/// stamped by another session AND unstamped legacy files are skipped — ownership
+/// that can't be proven must never nag (fails CLOSED: the worst case is a lost
+/// backup hint for the file's real owner until it re-stamps on its next resume,
+/// never a cross-nag). With `None` (payload without a session id: non-Claude-Code
+/// harness, or the SessionStart relaunch path where the rotating id is stale by
+/// construction — see `run_session_start`), all active files contribute, exactly
+/// the pre-scoping behavior.
+pub fn scan_declared(cbc_dir: &Path, session_id: Option<&str>) -> Vec<DeclaredConnection> {
     let mut out = Vec::new();
     let iter = match std::fs::read_dir(cbc_dir) {
         Ok(it) => it,
@@ -559,6 +571,11 @@ pub fn scan_declared(cbc_dir: &Path) -> Vec<DeclaredConnection> {
         };
         if !is_active(&content) {
             continue;
+        }
+        if let Some(sid) = session_id {
+            if owner_session(&content).as_deref() != Some(sid) {
+                continue;
+            }
         }
         out.extend(declared_connections(&content));
     }
@@ -631,8 +648,9 @@ pub fn run_stop<R: Read, W: Write>(
         .and_then(|c| c.as_str())
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let session_id = json.get("session_id").and_then(|s| s.as_str());
 
-    let conns = scan_declared(&cwd.join(".cbc"));
+    let conns = scan_declared(&cwd.join(".cbc"), session_id);
     if conns.is_empty() {
         return Ok(());
     }
@@ -791,7 +809,14 @@ pub fn run_session_start<R: Read, W: Write>(
     // the kill and the relaunch command are identity-scoped (B3 friendly-fire fix).
     // Legacy files contribute no identity ⇒ `None` ⇒ room-wide kill + room-only
     // relaunch command (the documented un-migrated residual).
-    let declared = scan_declared(&cbc_dir);
+    //
+    // Session UNSCOPED (`None`) on purpose, unlike the Stop reconcile: the session
+    // id rotates exactly at this resume/compact boundary, so the session's own file
+    // still carries its PRE-resume stamp here — an owner match would skip it and
+    // reintroduce post-compaction deafness (#103). The relaunch directive exists to
+    // prevent deafness; it must never be gated on a key that is stale by
+    // construction at the moment it runs.
+    let declared = scan_declared(&cbc_dir, None);
     let id_of = |room: &str| -> Option<String> {
         declared
             .iter()
@@ -937,11 +962,84 @@ mod tests {
         )
         .unwrap();
 
-        let conns = scan_declared(&cbc);
+        let conns = scan_declared(&cbc, None);
         let rooms: Vec<&str> = conns.iter().map(|c| c.room_id.as_str()).collect();
         assert!(rooms.contains(&"room-a-20260625-1000"));
         assert!(rooms.contains(&"room-b-20260625-1005"));
         assert!(!rooms.contains(&"room-z"), "DONE file excluded");
+    }
+
+    #[test]
+    fn scan_declared_scopes_to_owning_session() {
+        // THE cross-session guard: co-located sessions share one repo-root
+        // `.cbc/`; a session's reconcile must see ONLY the files stamped with
+        // its own session id — never a co-located session's rooms.
+        let dir = tempfile::tempdir().unwrap();
+        let cbc = dir.path().join(".cbc");
+        std::fs::create_dir_all(&cbc).unwrap();
+        std::fs::write(
+            cbc.join("worker-mine-20260708.md"),
+            "status: ACTIVE\nsession-id: sess-aaa\nconnections:\n  orch: room-mine-20260708-1000 --as me --model opus\n",
+        )
+        .unwrap();
+        std::fs::write(
+            cbc.join("worker-theirs-20260708.md"),
+            "status: ACTIVE\nsession-id: sess-bbb\nconnections:\n  orch: room-theirs-20260708-1005 --as them --model opus\n",
+        )
+        .unwrap();
+
+        let conns = scan_declared(&cbc, Some("sess-aaa"));
+        let rooms: Vec<&str> = conns.iter().map(|c| c.room_id.as_str()).collect();
+        assert_eq!(
+            rooms,
+            vec!["room-mine-20260708-1000"],
+            "a session-scoped scan must return only the caller's own rooms"
+        );
+    }
+
+    #[test]
+    fn scan_declared_skips_unstamped_when_session_known() {
+        // An unstamped (legacy) file has unprovable ownership. When the caller
+        // knows its session id, skipping is the only choice that can never
+        // cross-nag — the file's owner re-stamps on its next resume.
+        let dir = tempfile::tempdir().unwrap();
+        let cbc = dir.path().join(".cbc");
+        std::fs::create_dir_all(&cbc).unwrap();
+        std::fs::write(
+            cbc.join("worker-legacy-20260707.md"),
+            "status: ACTIVE\nconnections:\n  orch: room-legacy-20260707-1828 --as fresh --model opus\n",
+        )
+        .unwrap();
+
+        let conns = scan_declared(&cbc, Some("sess-aaa"));
+        assert!(
+            conns.is_empty(),
+            "unstamped files must be skipped when the session is known; got {conns:?}"
+        );
+    }
+
+    #[test]
+    fn scan_declared_includes_all_when_session_unknown() {
+        // No session id in the payload (non-Claude-Code harness, older hook
+        // wiring): scoping is impossible — keep today's include-all behavior.
+        let dir = tempfile::tempdir().unwrap();
+        let cbc = dir.path().join(".cbc");
+        std::fs::create_dir_all(&cbc).unwrap();
+        std::fs::write(
+            cbc.join("worker-stamped-20260708.md"),
+            "status: ACTIVE\nsession-id: sess-bbb\nconnections:\n  orch: room-stamped-20260708-1000 --as them --model opus\n",
+        )
+        .unwrap();
+        std::fs::write(
+            cbc.join("worker-legacy-20260707.md"),
+            "status: ACTIVE\nconnections:\n  orch: room-legacy-20260707-1828 --as fresh --model opus\n",
+        )
+        .unwrap();
+
+        let conns = scan_declared(&cbc, None);
+        let rooms: Vec<&str> = conns.iter().map(|c| c.room_id.as_str()).collect();
+        assert!(rooms.contains(&"room-stamped-20260708-1000"));
+        assert!(rooms.contains(&"room-legacy-20260707-1828"));
     }
 
     fn stop_input(cwd: &Path, stop_hook_active: bool) -> String {
@@ -1046,6 +1144,56 @@ mod tests {
             ),
             "the advisory relaunch command must carry the `--as` recovered from the legacy \
              poll-label (else a relaunch 400s); got:\n{ctx}"
+        );
+    }
+
+    #[test]
+    fn run_stop_does_not_nag_about_another_sessions_room() {
+        // THE cross-session nightmare (live transcript, 2026-07-08): a co-located
+        // session's ACTIVE file made every OTHER session's Stop advise relaunching
+        // that room — every turn, under the other session's identity. The Stop
+        // payload carries session_id; only files stamped with it may reconcile.
+        let dir = tempfile::tempdir().unwrap();
+        let cbc = dir.path().join(".cbc");
+        std::fs::create_dir_all(&cbc).unwrap();
+        // My file — my standing poll is healthy.
+        std::fs::write(
+            cbc.join("worker-vet-exam-20260708.md"),
+            "status: ACTIVE\nsession-id: sess-mine\nconnections:\n  orch: room-mine-20260708-1756 --as engine-worker-vet-exam --model opus\n",
+        )
+        .unwrap();
+        // A co-located session's file — MY session runs no poll for it (count 0).
+        std::fs::write(
+            cbc.join("worker-fresh-20260707.md"),
+            "status: ACTIVE\nsession-id: sess-other\nconnections:\n  orch: room-other-20260707-1828 --as engine-worker-fresh --model opus\n",
+        )
+        .unwrap();
+
+        let input = serde_json::json!({
+            "hook_event_name": "Stop",
+            "stop_hook_active": false,
+            "cwd": dir.path().to_str().unwrap(),
+            "session_id": "sess-mine",
+        })
+        .to_string();
+        let mut out = Vec::new();
+        run_stop(
+            &mut input.as_bytes(),
+            &mut out,
+            &mut |room, _| usize::from(room == "room-mine-20260708-1756"),
+            &mut |_, _| false,
+            &mut |o| panic!("no kill expected, got {o:?}"),
+        )
+        .unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            !text.contains("room-other-20260707-1828"),
+            "Stop must NEVER advise about another session's room; got:\n{text}"
+        );
+        assert!(
+            text.is_empty(),
+            "own poll healthy + foreign file not mine ⇒ no advisory owed at all; got:\n{text}"
         );
     }
 

@@ -193,9 +193,10 @@ Read any file found. Run the **liveness guard** (matches CLAUDE.md's convention)
      <agent-name>: <room-id> --as <repo>-orchestrator --model <model>
    ```
    The hook reads `connections:`, not `agents:` — a map with no `connections:` block makes the Stop hook strip your `--as` on relaunch and 400 ("not a participant") on every room. **Ignore any `SessionStart` relaunch directive that fired before you added the block** — it was generated from the pre-block `agents:` map, which carries no `--as`, so its commands are unscoped and 400 on every room. (Unlike a worker's `poll-label`, the code cannot recover an orchestrator's `--as` from `agents:` — this backfill is the *only* heal path.) Once the block exists, launch each poll yourself from your new `connections:` block: `cbc poll <room-id> --model <model> --as <repo>-orchestrator`, one per room. (On a *later* resume — block already present — the `SessionStart` hook's per-entry directives are correctly `--as`-scoped and de-duplicated, so obey those as your first action then.) Launch one per room — don't double up "to be safe"; the Stop hook reconciles to exactly one.
-2. **Re-stamp your terminal title** — your tty may have changed after a Cursor reload. Re-run the name-file write (see "Your first move" step 0) so your tab reverts to `<repo>-orchestrator`.
-3. **`cbc_recap` each room** to catch up on messages that arrived while polls were dead before you act on anything.
-4. **Then continue from `next-action`.**
+2. **Re-stamp `session-id:`** — this session's id is NEW (it rotates on every restart/resume/`/clear`). Write the current `$CLAUDE_CODE_SESSION_ID` (`echo $CLAUDE_CODE_SESSION_ID`) over the stale value (add the field under `status:` if the map predates it). Until you do, the Stop hook skips your map: it can't prove the map is yours, so your rooms have no dead-poll backup.
+3. **Re-stamp your terminal title** — your tty may have changed after a Cursor reload. Re-run the name-file write (see "Your first move" step 0) so your tab reverts to `<repo>-orchestrator`.
+4. **`cbc_recap` each room** to catch up on messages that arrived while polls were dead before you act on anything.
+5. **Then continue from `next-action`.**
 
 **If the guard fails** (branch gone, `status: DONE`, or no map found): write `status: DONE` into the file (if one was found), then proceed fresh from "Your first move."
 
@@ -448,6 +449,7 @@ Write these fields immediately after the charter block every time you create or 
 
 ```
 status: ACTIVE | DONE
+session-id: <the value of $CLAUDE_CODE_SESSION_ID — stamp on create, RE-stamp on every resume>
 next-action: <terse one-liner — what a resumed orchestrator should do first>
 branch: <branch name in this worktree>
 worktree: <absolute path to this worktree>
@@ -492,6 +494,8 @@ A resumed orchestrator that sees `checkup-level: dormant` knows the timer is not
 should re-arm it (or confirm with the user) before continuing.
 
 `status: ACTIVE` for any session with open rooms. `status: DONE` only when all rooms are closed and all poll shells stopped. Update `next-action` after every significant transition so a post-compaction resume can re-enter without asking the user.
+
+**`session-id:` scopes the Stop hook to YOUR session.** You and your workers share one repo-root `.cbc/`; the Stop hook reconciles ONLY the files stamped with the session id its payload carries — so your map never nags a worker, and a worker's file never nags you. Write the literal value of `$CLAUDE_CODE_SESSION_ID` (`echo $CLAUDE_CODE_SESSION_ID`) when you create the map. The id ROTATES on every restart/resume/`/clear` — re-stamping is a mandatory resume step (see "Resuming?"); with a stale or missing stamp the Stop hook silently skips your map (never a cross-nag, but no dead-poll backup for your rooms either).
 
 #### Session-start hygiene — wipe, compact, or keep
 
