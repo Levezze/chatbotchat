@@ -499,18 +499,25 @@ async fn main() -> anyhow::Result<()> {
             let repo = context::detect_repo();
             let cwd = context::detect_cwd();
             let instance = context::detect_instance(identity.as_deref());
-            // Loop-mode liveness breadcrumb: drop it NOW, before the first wait —
-            // in `/loop` auto-mode the harness SIGTERM-reaps this background poll at
-            // turn-end (exit 143) mid-park, so it is never process-visible to the
-            // Stop reconcile. The fresh marker under `<cwd>/.cbc` tells the Stop hook
-            // a beat is keeping this room alive, so it must not nag to relaunch.
-            // Keyed on the raw `--as` identity (what the declared connection carries),
-            // so the hook's read side finds the same file. Best-effort; never fails.
-            hook::touch_poll_alive(
-                std::path::Path::new(&cwd).join(".cbc").as_path(),
-                &room_id,
-                identity.as_deref(),
-            );
+            // Loop-mode liveness breadcrumb — ONLY for a bounded beat
+            // (`should_mark_alive`): in `/loop` auto-mode the harness SIGTERM-reaps
+            // this background poll at turn-end (exit 143) mid-park, so a beat is
+            // never process-visible to the Stop reconcile. The fresh marker under
+            // `<cwd>/.cbc` tells the Stop hook a beat is keeping this room alive, so
+            // it must not nag to relaunch. An UNBOUNDED standing poll is skipped: it
+            // is process-visible while parked (the count already sees it) and it
+            // exits normally on delivery, so marking it would suppress the very
+            // backup meant to catch it if it then dies un-relaunched (PR #109
+            // review). Keyed on the raw `--as` identity (what the declared
+            // connection carries), so the hook's read side finds the same file.
+            // Best-effort; never fails.
+            if hook::should_mark_alive(max_polls) {
+                hook::touch_poll_alive(
+                    std::path::Path::new(&cwd).join(".cbc").as_path(),
+                    &room_id,
+                    identity.as_deref(),
+                );
+            }
             // Clamp the cap to [1, 590] (mirrors the MCP cbc_wait clamp): a 0 cap
             // makes the server return instantly with no retry_after, which would
             // otherwise spin the loop; 590 stays under the server's 600s cap.

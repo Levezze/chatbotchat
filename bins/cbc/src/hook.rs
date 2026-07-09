@@ -431,6 +431,23 @@ fn poll_alive_key(room: &str, identity: Option<&str>) -> String {
         .collect()
 }
 
+/// Whether a `cbc poll` invocation with this `max_polls` budget should drop a
+/// liveness marker. ONLY a BOUNDED poll — a loop-mode beat (`--max-polls N>0`,
+/// e.g. the skills' `--max-polls 1`) — marks; an UNBOUNDED standing poll
+/// (`--max-polls 0`, the attended default) must NOT.
+///
+/// The distinction is the whole correctness of the feature (PR #109 review —
+/// Codex + code-reviewer, convergent): a standing poll is process-visible while
+/// parked, so the reconcile's `count` already sees it and no marker is needed;
+/// but it also exits normally on a delivered message / give-up, and if it then
+/// dies un-relaunched the Stop hook MUST still nag. Marking it would suppress that
+/// backup for the whole window. Only the bounded beat — which is SIGTERM-reaped at
+/// turn-end and never process-visible — genuinely needs the marker, and a fresh
+/// beat marker is exactly the "a beat is covering this room" signal we want.
+pub fn should_mark_alive(max_polls: u32) -> bool {
+    max_polls != 0
+}
+
 /// Path of the loop-mode liveness marker for `{room, identity}` under
 /// `<cbc_dir>/.poll-alive/`. `cbc poll` touches it; the Stop hook stats its mtime.
 pub fn poll_alive_marker(cbc_dir: &Path, room: &str, identity: Option<&str>) -> PathBuf {
@@ -472,7 +489,11 @@ pub fn recently_polled(
     };
     match SystemTime::now().duration_since(mtime) {
         Ok(elapsed) => elapsed <= window,
-        Err(_) => true,
+        // Future mtime (clock stepped back since the write): fail toward the nag,
+        // NOT toward suppression — uniform with the absent/unreadable branches. A
+        // future-dated marker that suppressed forever would be silent deafness (a
+        // dead beat can never reset it); a spurious nag self-heals on the next beat.
+        Err(_) => false,
     }
 }
 
@@ -1065,6 +1086,21 @@ mod tests {
     }
 
     #[test]
+    fn should_mark_alive_only_for_bounded_beats() {
+        // The whole correctness of the feature (PR #109 review): only a BOUNDED
+        // poll (a loop-mode beat, --max-polls N>0) drops a liveness marker. An
+        // UNBOUNDED standing poll (--max-polls 0, the attended default) must NOT —
+        // it is process-visible while parked, and marking it would suppress the
+        // backup that must fire if it dies un-relaunched.
+        assert!(
+            !should_mark_alive(0),
+            "unbounded standing poll must not mark"
+        );
+        assert!(should_mark_alive(1), "a --max-polls 1 beat marks");
+        assert!(should_mark_alive(5), "any bounded budget marks");
+    }
+
+    #[test]
     fn poll_alive_marker_sanitizes_and_stays_in_dir() {
         // A room id / handle with a path separator or space must not escape the
         // .poll-alive dir or split into subpaths.
@@ -1323,6 +1359,69 @@ mod tests {
         assert!(
             text.is_empty(),
             "a fresh beat marker must suppress the relaunch advisory entirely; got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn run_stop_end_to_end_real_marker_under_payload_cwd() {
+        // Coverage gap (PR #109 review): the stub-closure test above proves the
+        // seam threads through, but NOT that run_stop's payload-resolved `.cbc` dir
+        // + the REAL `recently_polled` + a REAL marker written by `touch_poll_alive`
+        // all agree. This exercises the whole contract end-to-end with no stub: a
+        // real marker under the payload cwd's `.cbc` must suppress; its absence must
+        // still nag. A cwd/key drift or wrong-dir regression fails here.
+        let dir = tempfile::tempdir().unwrap();
+        let cbc = dir.path().join(".cbc");
+        std::fs::create_dir_all(&cbc).unwrap();
+        std::fs::write(
+            cbc.join("worker-e2e-20260708.md"),
+            "status: ACTIVE\nconnections:\n  orch: room-e2e-20260708-1000 --as e2e-worker --model opus\n",
+        )
+        .unwrap();
+
+        // The REAL closure the Stop dispatch uses (reads the marker via the dir
+        // run_stop resolved from the payload cwd).
+        let mut real_recently = |d: &Path, room: &str, id: Option<&str>| {
+            recently_polled(d, room, id, POLL_ALIVE_WINDOW)
+        };
+
+        // (a) No marker yet ⇒ the dead-poll advisory must fire (proves the real
+        //     path nags, so the suppression in (b) is a genuine signal, not silence).
+        let input = stop_input(dir.path(), false);
+        let mut out = Vec::new();
+        run_stop(
+            &mut input.as_bytes(),
+            &mut out,
+            &mut |_, _| 0,
+            &mut |_, _| false,
+            &mut real_recently,
+            &mut |_o| {},
+        )
+        .unwrap();
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("room-e2e-20260708-1000"),
+            "with no marker the real path must still advise relaunch"
+        );
+
+        // (b) A real beat marker under the SAME payload cwd's `.cbc`, keyed on the
+        //     declared identity ⇒ the real path must suppress the advisory.
+        touch_poll_alive(&cbc, "room-e2e-20260708-1000", Some("e2e-worker"));
+        let input = stop_input(dir.path(), false);
+        let mut out = Vec::new();
+        run_stop(
+            &mut input.as_bytes(),
+            &mut out,
+            &mut |_, _| 0,
+            &mut |_, _| false,
+            &mut real_recently,
+            &mut |o| panic!("no kill expected, got {o:?}"),
+        )
+        .unwrap();
+        assert!(
+            String::from_utf8(out).unwrap().is_empty(),
+            "a real marker under the payload cwd must suppress via the real recently_polled"
         );
     }
 
