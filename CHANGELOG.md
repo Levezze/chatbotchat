@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.9](https://github.com/Levezze/chatbotchat/compare/v0.14.8...v0.14.9) (2026-07-09)
+
+
+### Bug Fixes
+
+* **cbc:** stop relaunch nag while a beat poll keeps the room alive (loop-mode reap) ([b0a4c78](https://github.com/Levezze/chatbotchat/commit/b0a4c7893dcd74ee162d958ba7215ccd08084311))
+
 ## [0.14.8](https://github.com/Levezze/chatbotchat/compare/v0.14.7...v0.14.8) (2026-07-08)
 
 
