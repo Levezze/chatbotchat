@@ -589,6 +589,7 @@ pub fn print_outcome(harness: Harness, skills_dir: &Path, name: &str, outcome: &
                 "Replaced the devkit {name} symlink with cbc's bundled skill copy for {who}:\n  {}",
                 file.display()
             );
+            println!("(backed up anything stale the symlink hid as .bak)");
             println!("{restart}");
         }
     }
