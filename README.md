@@ -256,7 +256,9 @@ skills. Narrow it with `--harness claude` / `--harness codex`, or force both wit
 backs up anything stale to `<file>.bak` before refreshing. `cbc install-daemon` runs it
 automatically as its last step, so on macOS you usually don't need it separately — but
 unlike `install-daemon` (launchd, macOS-only), `install-skill` is **cross-platform**
-(Linux/WSL/Windows), since it only writes files under those skills directories.
+(Linux/WSL/Windows), since it only writes files under those skills directories. It finds
+those directories from `$HOME`, so on native Windows — where `HOME` is usually unset —
+point it at them explicitly with `CLAUDE_CONFIG_DIR` / `CODEX_HOME` or `--skills-dir`.
 
 The MCP server is registered per harness and is **not** part of this step — see step 3
 above for Codex's `~/.codex/config.toml` entry. A harness with the skills but no MCP

@@ -214,6 +214,10 @@ fn short_description(name: &str, summary: &str, description: &str) -> String {
     let blurb = format!("Help with {} tasks", display_name(name));
     if char_len(&blurb) < MIN_SHORT {
         format!("Help with {} tasks and workflows", display_name(name))
+    } else if char_len(&blurb) > MAX_SHORT {
+        // A long skill name can push even the fallback past Codex's ceiling, and this rung
+        // has nothing left to fall back to — so it takes the same word-wise cut as the rest.
+        word_prefix(&blurb)
     } else {
         blurb
     }
@@ -329,12 +333,27 @@ fn first_sentence(description: &str) -> String {
     while let Some(offset) = description[searched..].find(". ") {
         let end = searched + offset;
         let head = &description[..end];
-        if !ABBREVIATIONS.iter().any(|abbrev| head.ends_with(abbrev)) {
+        if !ABBREVIATIONS
+            .iter()
+            .any(|abbrev| ends_with_word(head, abbrev))
+        {
             return format!("{}.", head.trim());
         }
         searched = end + ". ".len();
     }
     format!("{}.", description.trim().trim_end_matches('.'))
+}
+
+/// `head` ends with `abbrev` as a whole word. A bare `ends_with` would read "devs" as the
+/// abbreviation "vs" and refuse to end the sentence there, swallowing the paragraph.
+fn ends_with_word(head: &str, abbrev: &str) -> bool {
+    match head.strip_suffix(abbrev) {
+        Some(before) => !before
+            .chars()
+            .next_back()
+            .is_some_and(char::is_alphanumeric),
+        None => false,
+    }
 }
 
 /// `cbc-orchestrator` -> `CBC Orchestrator`. Hyphens become spaces and each word is
@@ -374,7 +393,7 @@ pub enum Outcome {
     AlreadyPresent,
     /// A symlink (the skill dir, devkit-managed, or a file inside it) was found and
     /// `force` was not set, so it was left untouched. Carries the link target.
-    SkippedSymlink(PathBuf),
+    SkippedSymlink { link: PathBuf, target: PathBuf },
     /// A symlink was found and `force` replaced it with a real bundled copy.
     ReplacedSymlink,
 }
@@ -478,7 +497,7 @@ fn install_one(
         }
         TargetState::Symlink { link, target } => {
             if !force {
-                return Ok(Outcome::SkippedSymlink(target));
+                return Ok(Outcome::SkippedSymlink { link, target });
             }
             // Remove the symlink ITSELF (not its target — `remove_file` on a symlink
             // never touches what it points at), then write real dirs + files. `link`
@@ -576,10 +595,10 @@ pub fn print_outcome(harness: Harness, skills_dir: &Path, name: &str, outcome: &
                 file.display()
             );
         }
-        Outcome::SkippedSymlink(target) => {
+        Outcome::SkippedSymlink { link, target } => {
             println!(
                 "A devkit-managed {name} skill is already installed for {who} (left in place):\n  {} -> {}",
-                skill_dir.display(),
+                link.display(),
                 target.display()
             );
             println!("It is a symlink; pass --force to replace it with cbc's bundled copy.");
@@ -686,8 +705,8 @@ mod tests {
 
         let outcome = install_cbc(&skills, false);
         match &outcome {
-            Outcome::SkippedSymlink(t) => {
-                assert_eq!(t, &external_file.parent().unwrap().to_path_buf())
+            Outcome::SkippedSymlink { target, .. } => {
+                assert_eq!(target, &external_file.parent().unwrap().to_path_buf())
             }
             other => panic!("expected SkippedSymlink, got {other:?}"),
         }
@@ -744,7 +763,7 @@ mod tests {
 
         let outcome = install_cbc(&skills, false);
         match &outcome {
-            Outcome::SkippedSymlink(t) => assert_eq!(t, &external_file),
+            Outcome::SkippedSymlink { target, .. } => assert_eq!(target, &external_file),
             other => panic!("expected SkippedSymlink, got {other:?}"),
         }
         // The corruption guard for the inner-file case: the external target is intact.
@@ -906,6 +925,42 @@ mod tests {
         );
     }
 
+    /// The name-derived fallback is the last rung and still ships to Codex, whose generator
+    /// rejects anything over 64 characters. A long skill name must not slip past the ceiling
+    /// the other rungs are all held to.
+    #[test]
+    fn the_name_derived_fallback_stays_inside_codex_bounds() {
+        let name = "cbc-orchestrator-handoff-and-reconciliation-supervisor-toolkit";
+        // Under MIN_SHORT both ways, so neither the summary nor the description rung fires.
+        let body = "---\nname: x\ndescription: Do a thing.\n---\n\nBody.\n";
+        let yaml = codex_metadata(name, body).unwrap();
+
+        let line = yaml
+            .lines()
+            .find(|l| l.trim_start().starts_with("short_description:"))
+            .unwrap();
+        let blurb = line.split_once('"').unwrap().1.trim_end_matches('"');
+        assert!(
+            (MIN_SHORT..=MAX_SHORT).contains(&char_len(blurb)),
+            "fallback blurb is {} chars, outside {MIN_SHORT}..={MAX_SHORT}: {blurb:?}",
+            char_len(blurb)
+        );
+    }
+
+    /// The abbreviation list is matched at the end of the head, so a real word that merely
+    /// ENDS in one of them ("devs" ends in "vs") must not be mistaken for an abbreviation —
+    /// that would swallow the whole paragraph into the summary Codex displays.
+    #[test]
+    fn a_word_that_merely_ends_in_an_abbreviation_still_ends_the_sentence() {
+        let body = "---\nname: demo\ndescription: Practical guidance for devs. Then elaborate at considerable length about everything else.\n---\n\nBody text.\n";
+        let yaml = codex_metadata("demo", body).unwrap();
+
+        assert!(
+            yaml.contains(r#"short_description: "Practical guidance for devs""#),
+            "\"devs\" is a word, not the abbreviation \"vs\": {yaml}"
+        );
+    }
+
     /// A Codex skill dir built by an older cbc (SKILL.md only) is NOT up to date: without
     /// `agents/openai.yaml` Codex never surfaces it as `/cbc`. The upgrade path depends on
     /// classify judging the whole file set, not just the SKILL.md.
@@ -974,8 +1029,8 @@ mod tests {
         let outcome = install_one(Harness::Codex, &skills, cbc_skill(), false).unwrap();
 
         match &outcome {
-            Outcome::SkippedSymlink(t) => {
-                assert_eq!(t, &external_file.parent().unwrap().to_path_buf())
+            Outcome::SkippedSymlink { target, .. } => {
+                assert_eq!(target, &external_file.parent().unwrap().to_path_buf())
             }
             other => panic!("expected SkippedSymlink, got {other:?}"),
         }
@@ -983,6 +1038,24 @@ mod tests {
             read(&external_file),
             "DEVKIT METADATA — must not be touched\n"
         );
+    }
+
+    /// The skip message tells the user which path to inspect. When the symlink is an inner
+    /// one — a linked `agents/` beside a real SKILL.md — naming the skill dir sends them to
+    /// a path that is not a symlink at all.
+    #[test]
+    fn a_skipped_inner_symlink_is_reported_at_the_link_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let (skills, _external_file) = codex_metadata_symlinked(dir.path());
+
+        let outcome = install_one(Harness::Codex, &skills, cbc_skill(), false).unwrap();
+
+        match &outcome {
+            Outcome::SkippedSymlink { link, .. } => {
+                assert_eq!(link, &skills.join("cbc").join("agents"))
+            }
+            other => panic!("expected SkippedSymlink, got {other:?}"),
+        }
     }
 
     #[test]
