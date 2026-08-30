@@ -15,9 +15,19 @@
 //! Two harnesses, two layouts ([`Harness`]). Claude Code discovers a user-scope skill from
 //! `~/.claude/skills/<name>/SKILL.md` alone. Codex reads the same `SKILL.md` from
 //! `~/.codex/skills/<name>/`, but only surfaces it as a `/<name>` command when the skill also
-//! carries `agents/openai.yaml`; without that file the skill dir is inert. That yaml is
-//! *derived* from the skill's own frontmatter ([`codex_metadata`]) rather than checked in
-//! beside it, so a skill and its Codex metadata cannot drift apart.
+//! carries `agents/openai.yaml`; without that file the skill dir is inert. Those two paths are
+//! only the DEFAULTS — both harnesses relocate their configuration home on an env var
+//! (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`) and then read skills from the moved home, so
+//! [`Harness::home`] follows the var. Installing into a hardcoded `~/.claude` under a
+//! relocated home writes a directory nobody reads, and the skills silently never appear.
+//!
+//! The yaml is *derived* from the skill's own frontmatter ([`codex_metadata`]) rather than
+//! checked in beside it, so a skill and its Codex metadata cannot drift apart. Deriving it
+//! means meeting Codex's contract for the file (its own `skill-creator` reference states it):
+//! `interface.short_description` must be 25-64 characters — a CBC `description:` is written
+//! for a model choosing whether to load the skill and runs far longer, so it is trimmed to a
+//! clause ([`short_description`]) — and `interface.default_prompt` must invoke the skill
+//! explicitly as `$name`.
 //!
 //! Layering mirrors `settings.rs`: a pure classifier ([`classify`]) decides what a target
 //! currently is from an injected dir, and the read/back-up/write glue ([`install_one`]) is
@@ -62,15 +72,37 @@ impl Harness {
         }
     }
 
+    /// The value this harness takes on `--harness`.
+    pub fn flag(self) -> &'static str {
+        match self {
+            Harness::ClaudeCode => "claude",
+            Harness::Codex => "codex",
+        }
+    }
+
+    /// The env var that relocates this harness's configuration home, and the default
+    /// directory under `$HOME` when it is unset. Both harnesses let a user move their
+    /// config elsewhere, and both then read skills from the moved home — so honouring
+    /// these is what keeps an install from writing into a directory nobody reads.
+    fn home_env(self) -> (&'static str, &'static str) {
+        match self {
+            Harness::ClaudeCode => ("CLAUDE_CONFIG_DIR", ".claude"),
+            Harness::Codex => ("CODEX_HOME", ".codex"),
+        }
+    }
+
     /// The harness's home directory. A harness whose home is absent is not installed on
     /// this machine, which is how an automatic install decides whom to write for.
     pub fn home(self) -> anyhow::Result<PathBuf> {
+        let (var, default) = self.home_env();
+        // An empty var is the shell's way of saying "unset"; treating it as a path would
+        // resolve the skills dir to a bare relative `skills/` in the process's cwd.
+        if let Some(configured) = std::env::var_os(var).filter(|v| !v.is_empty()) {
+            return Ok(PathBuf::from(configured));
+        }
         let home = std::env::var_os("HOME")
             .with_context(|| format!("HOME not set; cannot locate {}", self.label()))?;
-        Ok(PathBuf::from(home).join(match self {
-            Harness::ClaudeCode => ".claude",
-            Harness::Codex => ".codex",
-        }))
+        Ok(PathBuf::from(home).join(default))
     }
 
     /// The harness's *user* scope skills dir, which applies across every project. Each
@@ -143,13 +175,133 @@ fn codex_metadata(name: &str, body: &str) -> anyhow::Result<String> {
     let description = frontmatter_field(body, "description")
         .with_context(|| format!("the {name} skill has no `description:` in its frontmatter"))?;
     let summary = first_sentence(&description);
-    let prompt = format!("Use the /{name} skill: {summary}");
+    let prompt = format!("Use ${name} to {}", lower_initial(&summary));
     Ok(format!(
         "interface:\n  display_name: {}\n  short_description: {}\n  default_prompt: {}\n",
         yaml_quote(&display_name(name)),
-        yaml_quote(&summary),
+        yaml_quote(&short_description(name, &summary, &description)),
         yaml_quote(&prompt),
     ))
+}
+
+/// Codex's bounds on `interface.short_description`, from its own `skill-creator`
+/// reference (`25-64 chars`); its generator hard-errors outside them.
+const MIN_SHORT: usize = 25;
+const MAX_SHORT: usize = 64;
+
+/// Clause boundaries. Cutting a long summary at one of these ends on a finished phrase
+/// ("Coordinate with peer orchestrators as symmetric siblings") instead of mid-thought.
+const CLAUSE_BREAKS: &[&str] = &[" — ", " (", ", ", "; ", ": "];
+
+/// A UI blurb for Codex's skill picker, within its 25-64 character bounds. A CBC skill's
+/// `description:` is written for a model deciding whether to load it — 65 to 294
+/// characters here — so it cannot be used raw: Codex's own generator rejects anything
+/// longer than 64. Take the summary trimmed to fit; if that is too thin to scan, widen
+/// to the whole description before giving up on the skill's own words and falling back
+/// to a name-derived blurb (the last rung of the ladder Codex's generator walks).
+fn short_description(name: &str, summary: &str, description: &str) -> String {
+    for source in [summary, description] {
+        let source = source.trim().trim_end_matches('.').trim();
+        let candidate = if char_len(source) <= MAX_SHORT {
+            source.to_string()
+        } else {
+            clause_prefix(source).unwrap_or_else(|| word_prefix(source))
+        };
+        if char_len(&candidate) >= MIN_SHORT {
+            return candidate;
+        }
+    }
+    let blurb = format!("Help with {} tasks", display_name(name));
+    if char_len(&blurb) < MIN_SHORT {
+        format!("Help with {} tasks and workflows", display_name(name))
+    } else {
+        blurb
+    }
+}
+
+/// The longest prefix of `summary` ending at a clause boundary that lands inside the
+/// bounds, or `None` when no boundary does.
+fn clause_prefix(summary: &str) -> Option<String> {
+    let cut = CLAUSE_BREAKS
+        .iter()
+        .flat_map(|brk| summary.match_indices(brk).map(|(at, _)| at))
+        .filter(|&at| char_len(&summary[..at]) <= MAX_SHORT)
+        .max()?;
+    let head = summary[..cut].trim_end_matches([',', ';', ':']).trim();
+    (char_len(head) >= MIN_SHORT).then(|| head.to_string())
+}
+
+/// As many whole words of `summary` as fit. A mid-word cut ("orchestra") reads as a typo;
+/// a whole-word cut reads as an abbreviation.
+fn word_prefix(summary: &str) -> String {
+    let mut out = String::new();
+    for word in summary.split_whitespace() {
+        let width = char_len(&out) + char_len(word) + usize::from(!out.is_empty());
+        if width > MAX_SHORT {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    let out = out.trim_end_matches(['-', ',', ';', ':', '—']).trim();
+    trim_dangling(out)
+}
+
+/// Words that only make sense pointing at what follows them. Truncation routinely strands
+/// one ("working the same repo at"), which reads as a bug rather than a summary.
+const CONNECTIVES: &[&str] = &[
+    "a", "an", "the", "and", "or", "but", "at", "in", "on", "of", "to", "for", "with", "under",
+    "from", "by", "as", "into", "over", "per", "via", "that", "when", "while", "so", "than",
+];
+
+/// Drop a stranded connective, and the phrase it opens, off the end of a truncated blurb.
+/// One pass over the last two words only: anything further back belongs to a phrase that
+/// survived the cut intact, and repeating the pass eats those ("in a repo" -> "a" is a
+/// connective -> gone). Never trims below Codex's floor; a blurb that short is worse than
+/// a clipped one.
+fn trim_dangling(text: &str) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.len() < 2 {
+        return text.to_string();
+    }
+    let tail = words.len() - 2;
+    let Some(cut) = words[tail..]
+        .iter()
+        .position(|word| CONNECTIVES.contains(&word.to_lowercase().as_str()))
+        .map(|offset| tail + offset)
+    else {
+        return text.to_string();
+    };
+    let trimmed = words[..cut].join(" ");
+    if char_len(&trimmed) < MIN_SHORT {
+        return text.to_string();
+    }
+    trimmed
+}
+
+/// Character count, not byte count: skill descriptions carry em-dashes, and Codex counts
+/// its 25-64 bound in characters.
+fn char_len(text: &str) -> usize {
+    text.chars().count()
+}
+
+/// Lowercase a summary's first letter so it reads as a clause after "Use $name to ".
+/// Skill descriptions open with an imperative ("Run a sweep…" -> "run a sweep…"). An
+/// initialism is left alone — "CBC" must not become "cBC" — which a lowercase second
+/// character identifies.
+fn lower_initial(summary: &str) -> String {
+    let mut chars = summary.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let rest = chars.as_str();
+    if rest.starts_with(|c: char| c.is_lowercase()) {
+        first.to_lowercase().collect::<String>() + rest
+    } else {
+        summary.to_string()
+    }
 }
 
 /// Read a single-line `<key>: <value>` field out of a SKILL.md YAML frontmatter block.
@@ -332,8 +484,22 @@ fn install_one(
             // never touches what it points at), then write real dirs + files. `link`
             // is the skill dir for a devkit symlink, or an inner path for an inner
             // symlink; removing either leaves a real dir to write into.
-            std::fs::remove_file(&link)
-                .with_context(|| format!("removing the symlink at {}", link.display()))?;
+            //
+            // A skill dir can hold MORE than one symlink (a linked `SKILL.md` beside a
+            // linked `agents/`), and `classify` reports only the first it meets — so
+            // drain them until none is left. Writing after removing just one would go
+            // straight through the survivor and clobber its target, which is the exact
+            // corruption `force` promises not to cause. Each pass removes one link, so
+            // the loop is bounded by how many the dir has.
+            let mut link = link;
+            loop {
+                std::fs::remove_file(&link)
+                    .with_context(|| format!("removing the symlink at {}", link.display()))?;
+                match classify(&skill_dir, &files)? {
+                    TargetState::Symlink { link: next, .. } => link = next,
+                    _ => break,
+                }
+            }
             write_files(&skill_dir, &files)?;
             Ok(Outcome::ReplacedSymlink)
         }
@@ -352,6 +518,16 @@ fn back_up_stale(skill_dir: &Path, files: &[(PathBuf, String)]) -> anyhow::Resul
             continue;
         }
         let backup = PathBuf::from(format!("{}.bak", path.display()));
+        // The backup path gets the same guard as the files themselves: a `.bak` that is
+        // a symlink would send this write to whatever it points at — an unrelated user
+        // file — bypassing every check `classify` just made. The link is ours to drop;
+        // `remove_file` unlinks it and leaves its target alone.
+        if let Ok(meta) = std::fs::symlink_metadata(&backup) {
+            if meta.file_type().is_symlink() {
+                std::fs::remove_file(&backup)
+                    .with_context(|| format!("removing the symlink at {}", backup.display()))?;
+            }
+        }
         std::fs::write(&backup, &existing)
             .with_context(|| format!("backing up to {}", backup.display()))?;
     }
@@ -425,6 +601,14 @@ mod tests {
     /// The canonical single-skill case the original suite was written against: `cbc`,
     /// kept first in [`BUNDLED_SKILLS`]. Most install-mechanics tests drive `install_one`
     /// through this entry; the family-wide behavior is covered separately.
+    /// A real file OUTSIDE the skills dir, standing in for the devkit source a symlink
+    /// points at. Its contents must survive every install path.
+    fn external_target(root: &Path, name: &str) -> (PathBuf, String) {
+        let target = root.join(name);
+        std::fs::write(&target, "external").unwrap();
+        (target, "external".to_string())
+    }
+
     fn cbc_skill() -> &'static BundledSkill {
         let skill = &BUNDLED_SKILLS[0];
         assert_eq!(skill.name, "cbc", "BUNDLED_SKILLS[0] must be the cbc skill");
@@ -659,12 +843,15 @@ mod tests {
             "hyphens become spaces and each word is capitalized: {yaml}"
         );
         assert!(
-            yaml.contains(r#"short_description: "Does a thing well.""#),
-            "only the FIRST sentence of the description is carried: {yaml}"
+            yaml.contains(
+                r#"short_description: "Does a thing well. And a second sentence with more detail""#
+            ),
+            "a first sentence under Codex's 25-char floor widens to the whole \
+             description rather than being thrown away: {yaml}"
         );
         assert!(
-            yaml.contains(r#"default_prompt: "Use the /demo-skill skill: Does a thing well.""#),
-            "the default prompt names the skill and restates its purpose: {yaml}"
+            yaml.contains(r#"default_prompt: "Use $demo-skill to does a thing well.""#),
+            "the default prompt invokes the skill explicitly as $name: {yaml}"
         );
     }
 
@@ -682,7 +869,7 @@ mod tests {
         assert_eq!(read(&cbc.join("SKILL.md")), cbc_skill().body);
         let yaml = read(&cbc.join("agents").join("openai.yaml"));
         assert!(
-            yaml.contains(r#"default_prompt: "Use the /cbc skill:"#),
+            yaml.contains(r#"default_prompt: "Use $cbc to "#),
             "the Codex metadata must name the skill it launches: {yaml}"
         );
     }
@@ -708,7 +895,7 @@ mod tests {
         let yaml = codex_metadata("demo", body).unwrap();
 
         assert!(
-            yaml.contains(r#"short_description: "Use when a room stalls (e.g. a dead poll).""#),
+            yaml.contains(r#"short_description: "Use when a room stalls (e.g. a dead poll)""#),
             "the sentence must run past the abbreviation: {yaml}"
         );
     }
@@ -833,23 +1020,167 @@ mod tests {
                 skill.name
             );
             assert!(
-                yaml.contains(&format!(
-                    r#"default_prompt: "Use the /{} skill: "#,
-                    skill.name
-                )),
-                "{} must launch itself by name: {yaml}",
+                yaml.contains(&format!(r#"default_prompt: "Use ${} to "#, skill.name)),
+                "{} must launch itself as $name, the explicit-invocation form Codex's \
+                 openai.yaml contract requires: {yaml}",
                 skill.name
             );
             let summary = yaml
                 .lines()
                 .find_map(|l| l.trim().strip_prefix("short_description: "))
-                .unwrap();
+                .unwrap()
+                .trim_matches('"');
+            let len = summary.chars().count();
             assert!(
-                summary.len() > 20,
-                "{} summary is too thin to pick from a list: {summary}",
+                (MIN_SHORT..=MAX_SHORT).contains(&len),
+                "{}'s short_description is {len} chars; Codex's contract is \
+                 {MIN_SHORT}-{MAX_SHORT}: {summary}",
                 skill.name
             );
         }
+    }
+
+    /// Both harnesses let a user relocate their configuration home, and both then read
+    /// skills from the moved home. Installing into a hardcoded `~/.claude` / `~/.codex`
+    /// under such a setup writes a directory nobody reads — the skills silently never
+    /// appear. This is the only test that touches process env, so it does not race.
+    #[test]
+    fn a_relocated_configuration_home_is_where_skills_go() {
+        for (harness, var) in [
+            (Harness::ClaudeCode, "CLAUDE_CONFIG_DIR"),
+            (Harness::Codex, "CODEX_HOME"),
+        ] {
+            let restore = std::env::var_os(var);
+
+            std::env::set_var(var, "/somewhere/else");
+            let relocated = harness.skills_dir().unwrap();
+
+            // An empty var is the shell's "unset", not a path relative to the cwd.
+            std::env::set_var(var, "");
+            let defaulted = harness.skills_dir().unwrap();
+
+            match restore {
+                Some(value) => std::env::set_var(var, value),
+                None => std::env::remove_var(var),
+            }
+
+            assert_eq!(
+                relocated,
+                PathBuf::from("/somewhere/else").join("skills"),
+                "{} must follow {var}",
+                harness.label()
+            );
+            assert!(
+                defaulted.starts_with(std::env::var("HOME").unwrap()),
+                "an empty {var} must fall back to $HOME, not to a relative path: {}",
+                defaulted.display()
+            );
+        }
+    }
+
+    /// `force` promises to replace the link and never touch its target. A skill dir can
+    /// hold more than one link, and removing only the first would send the write for the
+    /// second straight through it — corrupting the very file the guard exists to protect.
+    #[test]
+    fn force_replaces_every_symlink_in_one_skill_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let skills = dir.path().join("skills");
+        let cbc = skills.join("cbc");
+        std::fs::create_dir_all(cbc.join("agents")).unwrap();
+
+        let (skill_link_target, _) = external_target(dir.path(), "devkit-SKILL.md");
+        let (yaml_link_target, _) = external_target(dir.path(), "devkit-openai.yaml");
+        std::os::unix::fs::symlink(&skill_link_target, cbc.join("SKILL.md")).unwrap();
+        std::os::unix::fs::symlink(&yaml_link_target, cbc.join("agents").join("openai.yaml"))
+            .unwrap();
+
+        let outcome = install_one(Harness::Codex, &skills, cbc_skill(), true).unwrap();
+
+        assert_eq!(outcome, Outcome::ReplacedSymlink);
+        assert_eq!(
+            read(&skill_link_target),
+            "external",
+            "target must be intact"
+        );
+        assert_eq!(read(&yaml_link_target), "external", "target must be intact");
+        assert_eq!(read(&cbc.join("SKILL.md")), cbc_skill().body);
+        assert!(read(&cbc.join("agents").join("openai.yaml")).contains("interface:"));
+    }
+
+    /// The backup path gets the same guard as the file it backs up: a symlinked `.bak`
+    /// would send the backup write to an unrelated file the installer never inspected.
+    #[test]
+    fn a_stale_file_is_not_backed_up_through_a_symlinked_bak() {
+        let dir = tempfile::tempdir().unwrap();
+        let skills = dir.path().join("skills");
+        let cbc = skills.join("cbc");
+        std::fs::create_dir_all(&cbc).unwrap();
+        std::fs::write(cbc.join("SKILL.md"), "stale").unwrap();
+
+        let (target, _) = external_target(dir.path(), "unrelated.txt");
+        std::os::unix::fs::symlink(&target, cbc.join("SKILL.md.bak")).unwrap();
+
+        let outcome = install_one(Harness::ClaudeCode, &skills, cbc_skill(), false).unwrap();
+
+        assert_eq!(outcome, Outcome::Updated);
+        assert_eq!(
+            read(&target),
+            "external",
+            "the symlink's target must be untouched"
+        );
+        assert_eq!(
+            read(&cbc.join("SKILL.md.bak")),
+            "stale",
+            "the backup must be a real file holding the stale copy"
+        );
+    }
+
+    /// A blurb Codex's own generator would reject is a blurb its picker will not show.
+    #[test]
+    fn a_long_description_is_cut_at_a_clause_not_mid_thought() {
+        let long = "Coordinate with peer orchestrators as symmetric siblings — open one \
+                    pairwise room per peer to reconcile work where your lanes meet";
+        let cut = short_description("cbc-peer", long, long);
+
+        assert_eq!(
+            cut,
+            "Coordinate with peer orchestrators as symmetric siblings"
+        );
+        assert!((MIN_SHORT..=MAX_SHORT).contains(&cut.chars().count()));
+    }
+
+    /// Nothing in a description guarantees a clause boundary inside 64 characters. Cutting
+    /// mid-word ("orchestra") reads as a typo; cutting at a word reads as an abbreviation.
+    #[test]
+    fn a_description_with_no_clause_break_is_cut_at_a_whole_word() {
+        let long = "Run a sweep of all worker rooms and flag any that have gone dark now";
+        let cut = short_description("cbc-checkup", long, long);
+
+        assert_eq!(
+            cut,
+            "Run a sweep of all worker rooms and flag any that have gone dark"
+        );
+        assert!((MIN_SHORT..=MAX_SHORT).contains(&cut.chars().count()));
+    }
+
+    /// Cutting at a whole word still lands mid-phrase when that word is a preposition:
+    /// "working the same repo at" reads as a truncation bug rather than a summary. The
+    /// phrase it opens is gone, so the preposition goes with it.
+    #[test]
+    fn a_word_truncated_blurb_does_not_end_on_a_dangling_preposition() {
+        let at = "Be the orchestrator for multiple agents working the same repo at once \
+                  and hold the map of what each is doing";
+        let under = "Implement one bounded piece in a repo under orchestrator coordination \
+                     and report every status transition";
+
+        assert_eq!(
+            short_description("cbc-orchestrator", at, at),
+            "Be the orchestrator for multiple agents working the same repo"
+        );
+        assert_eq!(
+            short_description("cbc-worker", under, under),
+            "Implement one bounded piece in a repo"
+        );
     }
 
     #[test]

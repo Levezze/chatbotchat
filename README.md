@@ -224,17 +224,25 @@ multi-agent coordination — `cbc-orchestrator`, `cbc-worker`, `cbc-peer`, `cbc-
 [Coordination modes](#coordination-modes)). The skill text is **embedded in the `cbc`
 binary**, so this works from a plain `cargo install` with no extra checkout.
 
-| harness | skills land at | extra file |
-|---|---|---|
-| Claude Code | `~/.claude/skills/<name>/SKILL.md` | — |
-| Codex | `~/.codex/skills/<name>/SKILL.md` | `agents/openai.yaml` |
+| harness | skills land at | relocate with | extra file |
+|---|---|---|---|
+| Claude Code | `~/.claude/skills/<name>/SKILL.md` | `CLAUDE_CONFIG_DIR` | — |
+| Codex | `~/.codex/skills/<name>/SKILL.md` | `CODEX_HOME` | `agents/openai.yaml` |
+
+Those paths are the defaults. Both harnesses move their configuration home when the env
+var in the table is set, and then read skills from the moved home — so `install-skill`
+follows it too. (Set it in your shell, not in a settings file, and export it before
+running `cbc`.)
 
 The two layouts differ because the harnesses do. Claude Code discovers a user-scope
 skill from its `SKILL.md` alone; Codex reads the same file but only surfaces the skill
 as a `/<name>` command when the directory also carries `agents/openai.yaml`. Without
 that file a Codex skill directory is **inert** — present on disk, invisible in the
 session. cbc *derives* that yaml from each skill's own frontmatter rather than shipping
-a second copy of the text, so a skill and its Codex metadata cannot drift apart.
+a second copy of the text, so a skill and its Codex metadata cannot drift apart. What it
+derives meets Codex's own contract for the file: a 25–64 character `short_description`
+(a skill's `description:` is written for a model and runs far longer, so it is cut back
+to a clause) and a `default_prompt` that invokes the skill explicitly as `$<name>`.
 
 By default `install-skill` writes for each harness whose home directory exists, and each
 one degrades on its own — an unwritable `~/.codex/skills` never costs Claude Code its

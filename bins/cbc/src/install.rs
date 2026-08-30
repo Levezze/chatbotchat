@@ -293,7 +293,7 @@ fn install_bundled_skill() {
                 );
                 eprintln!(
                     "Run `cbc install-skill --harness {}` yourself once it's resolved.",
-                    harness.label().to_lowercase().replace(" code", "")
+                    harness.flag()
                 );
             }
         }
