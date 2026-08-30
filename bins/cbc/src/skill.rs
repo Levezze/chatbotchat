@@ -500,6 +500,11 @@ fn install_one(
                     _ => break,
                 }
             }
+            // What the links hid can include a REAL stale file — a symlinked `agents/`
+            // beside a hand-edited `SKILL.md`. Those get the same backup any other
+            // stale file gets; skipping it would make `--force` the one path that
+            // destroys a user's edits without a copy.
+            back_up_stale(&skill_dir, &files)?;
             write_files(&skill_dir, &files)?;
             Ok(Outcome::ReplacedSymlink)
         }
@@ -1180,6 +1185,38 @@ mod tests {
         assert_eq!(
             short_description("cbc-worker", under, under),
             "Implement one bounded piece in a repo"
+        );
+    }
+
+    /// `--force` replaces links; it must not become the one path that destroys a real
+    /// file without a copy. A symlinked `agents/` can sit beside a hand-edited
+    /// `SKILL.md`, and that stale file is owed the same `.bak` as any other.
+    #[test]
+    fn force_backs_up_a_stale_real_file_it_finds_behind_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let skills = dir.path().join("skills");
+        let cbc = skills.join("cbc");
+        std::fs::create_dir_all(&cbc).unwrap();
+        std::fs::write(cbc.join("SKILL.md"), "hand-edited").unwrap();
+
+        let agents = dir.path().join("devkit-agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(agents.join("openai.yaml"), "external").unwrap();
+        std::os::unix::fs::symlink(&agents, cbc.join("agents")).unwrap();
+
+        let outcome = install_one(Harness::Codex, &skills, cbc_skill(), true).unwrap();
+
+        assert_eq!(outcome, Outcome::ReplacedSymlink);
+        assert_eq!(
+            read(&cbc.join("SKILL.md.bak")),
+            "hand-edited",
+            "the real file the symlink sat beside must survive as a backup"
+        );
+        assert_eq!(read(&cbc.join("SKILL.md")), cbc_skill().body);
+        assert_eq!(
+            read(&agents.join("openai.yaml")),
+            "external",
+            "the symlink's target must be untouched"
         );
     }
 

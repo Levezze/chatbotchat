@@ -1246,3 +1246,55 @@ fn poll_bails_after_repeated_wait_errors_against_a_dead_server() {
         .assert()
         .failure();
 }
+
+/// `--harness installed` must mean "resolve what is actually here", including when
+/// `--skills-dir` comes with it. Clap cannot tell an explicit `installed` from its own
+/// default, and treating both as Claude Code writes the Claude layout on a Codex-only
+/// machine — the skill lands with no `agents/openai.yaml` and is inert in session.
+#[test]
+fn an_explicit_installed_harness_resolves_for_real_alongside_skills_dir() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let codex_home = dir.path().join("codex-home");
+    std::fs::create_dir_all(&codex_home).expect("codex home");
+    let out = dir.path().join("out");
+
+    Command::cargo_bin("cbc")
+        .unwrap()
+        .args(["install-skill", "--harness", "installed"])
+        .arg("--skills-dir")
+        .arg(&out)
+        .env("CODEX_HOME", &codex_home)
+        // The only harness "installed" here is Codex: point Claude Code's home at a
+        // path that does not exist so the resolution has exactly one answer.
+        .env("CLAUDE_CONFIG_DIR", dir.path().join("no-such-claude-home"))
+        .assert()
+        .success();
+
+    assert!(
+        out.join("cbc").join("agents").join("openai.yaml").is_file(),
+        "the Codex layout must be written, not Claude Code's"
+    );
+}
+
+/// `--skills-dir` predates `--harness`. Every invocation written against the old CLI meant
+/// "write Claude Code's layout into this dir"; fanning a bare one out to Codex as well
+/// would write a second harness's files somewhere the caller never named.
+#[test]
+fn a_bare_skills_dir_still_means_claude_code_alone() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("out");
+
+    Command::cargo_bin("cbc")
+        .unwrap()
+        .arg("install-skill")
+        .arg("--skills-dir")
+        .arg(&out)
+        .assert()
+        .success();
+
+    assert!(out.join("cbc").join("SKILL.md").is_file());
+    assert!(
+        !out.join("cbc").join("agents").exists(),
+        "no --harness means Claude Code, which has no use for agents/openai.yaml"
+    );
+}

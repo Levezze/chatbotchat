@@ -165,8 +165,13 @@ claude mcp add --scope user chatbotchat -e CBC_SERVER=http://127.0.0.1:8484 -- c
 per-repo `.mcp.json` editing. Open a fresh session and `cbc_*` tools are
 available. Verify with `claude mcp list`.
 
-For **Codex**, add the same stdio server to `~/.codex/config.toml` by hand (there is
-no `codex mcp add`-style registration for a local command):
+For **Codex**, register the same stdio server (note the `--` before the command):
+
+```sh
+codex mcp add chatbotchat --env CBC_SERVER=http://127.0.0.1:8484 -- cbc mcp
+```
+
+That writes this into `~/.codex/config.toml`, which you can equally add by hand:
 
 ```toml
 [mcp_servers.chatbotchat]

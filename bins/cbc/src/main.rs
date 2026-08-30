@@ -31,15 +31,15 @@ enum HarnessArg {
 }
 
 impl HarnessArg {
-    /// Expand the selection into concrete harnesses. `dir_override` reports whether the
-    /// caller passed `--skills-dir`: with it, the historic no-harness meaning of that flag
-    /// (Claude Code) is preserved rather than fanning out to every installed harness.
-    fn resolve(self, dir_override: bool) -> anyhow::Result<Vec<skill::Harness>> {
+    /// Expand the selection into concrete harnesses. `installed` reports what is actually
+    /// on the machine, so an explicit `--harness installed` means the same thing whether or
+    /// not `--skills-dir` came with it — the caller applies the one-directory rule afterwards
+    /// against the RESOLVED list, which on a Codex-only machine is Codex, not Claude Code.
+    fn resolve(self) -> anyhow::Result<Vec<skill::Harness>> {
         Ok(match self {
             HarnessArg::Claude => vec![skill::Harness::ClaudeCode],
             HarnessArg::Codex => vec![skill::Harness::Codex],
             HarnessArg::All => skill::HARNESSES.to_vec(),
-            HarnessArg::Installed if dir_override => vec![skill::Harness::ClaudeCode],
             HarnessArg::Installed => {
                 let present: Vec<_> = skill::HARNESSES
                     .iter()
@@ -47,10 +47,20 @@ impl HarnessArg {
                     .filter(|h| h.home().map(|p| p.is_dir()).unwrap_or(false))
                     .collect();
                 if present.is_empty() {
+                    // Name the directories actually checked, not the defaults: under
+                    // CLAUDE_CONFIG_DIR / CODEX_HOME they are somewhere else entirely,
+                    // and this is the message a user reads when nothing installed.
+                    let looked: Vec<String> = skill::HARNESSES
+                        .iter()
+                        .map(|h| match h.home() {
+                            Ok(path) => path.display().to_string(),
+                            Err(_) => format!("<{}'s home>", h.label()),
+                        })
+                        .collect();
                     anyhow::bail!(
-                        "found no AI coding harness on this machine (looked for ~/.claude \
-                         and ~/.codex); pass --harness claude or --harness codex to install \
-                         for one anyway"
+                        "found no AI coding harness on this machine (looked for {}); pass \
+                         --harness claude or --harness codex to install for one anyway",
+                        looked.join(" and ")
                     );
                 }
                 present
@@ -360,8 +370,13 @@ enum Command {
         force: bool,
         /// Which harness to install for. Defaults to every harness whose home
         /// directory exists on this machine.
-        #[arg(long, value_enum, default_value_t = HarnessArg::Installed)]
-        harness: HarnessArg,
+        //
+        // Deliberately an Option with no clap default: the handler has to tell an
+        // explicit `--harness installed` from the absence of the flag, because
+        // `--skills-dir` alone still means Claude Code for backwards compatibility
+        // while `--harness installed --skills-dir` must resolve for real.
+        #[arg(long, value_enum)]
+        harness: Option<HarnessArg>,
         /// Skills directory to write into, overriding the harness's own default.
         /// Needs the selection to name exactly one harness; with no --harness it
         /// means Claude Code.
@@ -764,7 +779,13 @@ async fn main() -> anyhow::Result<()> {
             harness,
             skills_dir,
         } => {
-            let targets = harness.resolve(skills_dir.is_some())?;
+            let targets = match harness {
+                Some(explicit) => explicit.resolve()?,
+                // No --harness at all: --skills-dir on its own has always meant Claude
+                // Code, and a bare `install-skill` fans out to whatever is installed.
+                None if skills_dir.is_some() => vec![skill::Harness::ClaudeCode],
+                None => HarnessArg::Installed.resolve()?,
+            };
             if targets.len() > 1 && skills_dir.is_some() {
                 anyhow::bail!(
                     "--skills-dir writes one directory, but {} harnesses are selected; \
@@ -774,9 +795,20 @@ async fn main() -> anyhow::Result<()> {
             }
             let mut installed = 0usize;
             for target in targets {
+                // Resolving the dir can fail (no HOME); degrade like a failed write
+                // rather than denying the remaining harnesses their skills.
                 let dir = match &skills_dir {
                     Some(d) => d.clone(),
-                    None => target.skills_dir()?,
+                    None => match target.skills_dir() {
+                        Ok(d) => d,
+                        Err(e) => {
+                            eprintln!(
+                                "Could not locate the skills directory for {}: {e:#}",
+                                target.label()
+                            );
+                            continue;
+                        }
+                    },
                 };
                 match skill::install_all(target, &dir, force) {
                     Ok(outcomes) => {
@@ -1530,26 +1562,14 @@ fn print_backoff(retry_after: Option<u32>) {
 mod tests {
     use super::*;
 
-    /// `--skills-dir` predates `--harness`. Every invocation written against the old CLI
-    /// meant "write Claude Code's layout into this dir" — a default that silently fanned
-    /// out to Codex as well would write a second harness's files somewhere the caller
-    /// never named.
-    #[test]
-    fn a_bare_skills_dir_still_means_claude_code_alone() {
-        assert_eq!(
-            HarnessArg::Installed.resolve(true).unwrap(),
-            vec![skill::Harness::ClaudeCode]
-        );
-    }
-
     #[test]
     fn naming_a_harness_selects_exactly_that_one() {
         assert_eq!(
-            HarnessArg::Codex.resolve(false).unwrap(),
+            HarnessArg::Codex.resolve().unwrap(),
             vec![skill::Harness::Codex]
         );
         assert_eq!(
-            HarnessArg::Claude.resolve(false).unwrap(),
+            HarnessArg::Claude.resolve().unwrap(),
             vec![skill::Harness::ClaudeCode]
         );
     }
@@ -1559,7 +1579,7 @@ mod tests {
     #[test]
     fn all_covers_every_harness_whether_installed_or_not() {
         assert_eq!(
-            HarnessArg::All.resolve(false).unwrap(),
+            HarnessArg::All.resolve().unwrap(),
             skill::HARNESSES.to_vec()
         );
     }
