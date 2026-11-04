@@ -50,6 +50,13 @@ Clippy with denied warnings and formatting pass. Independent read-only subagent 
 identified and led to fixes for blocking file/lock reads, duplicate hints, revoked-member
 starvation, profile-size mismatch, unbounded reply writes and implicit old Claude fallback.
 
+The initial whole-workspace GitHub CI run stopped under Rust 1.99 on an unchanged legacy
+test at `crates/chatbotchat-core/tests/storage.rs:61`, flagged by
+`clippy::useless_borrows_in_formatting`. That line is also present in base `1c582af`.
+Legacy source and the existing CI workflow remain unchanged. A separate candidate-only
+workflow verifies Rust and all four Python suites on Linux without suppressing that failure.
+Its actual run result is tracked on draft PR #120, separately from the local results above.
+
 ## Required native session next
 
 Follow [TESTING.md](TESTING.md) in disposable projects. Both Codex Desktop and Claude Desktop

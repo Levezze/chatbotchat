@@ -1,0 +1,59 @@
+name: Candidate CI
+
+on:
+  pull_request:
+    paths:
+      - "crates/cbc-candidate/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/candidate.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  candidate:
+    name: isolated candidate checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target-candidate"
+
+      - name: Format check
+        run: cargo fmt -p cbc-candidate -- --check
+
+      - name: Clippy
+        run: cargo clippy -p cbc-candidate --locked --all-targets -j 1 --target-dir target-candidate -- -D warnings
+
+      - name: Test candidate core
+        run: cargo test -p cbc-candidate --locked -j 1 --target-dir target-candidate -- --test-threads=1
+
+      - name: Test shared feed
+        run: python3 -B -I crates/cbc-candidate/adapters/shared/test_feed.py
+
+      - name: Test device driver
+        run: python3 -B -I crates/cbc-candidate/adapters/device/test_router.py
+
+      - name: Test Codex adapter
+        run: python3 -B -I crates/cbc-candidate/adapters/codex/test_adapter.py
+
+      - name: Test Claude adapter and router
+        run: python3 -B -I crates/cbc-candidate/adapters/claude/test_router.py
