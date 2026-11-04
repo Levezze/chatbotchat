@@ -5,6 +5,12 @@ It provides a private local socket and a bound core API. Native adapters are exp
 their evidence is separate from synthetic core tests. There is no installer or daily cutover.
 It does not use legacy runtime modules, service labels or default database paths for storage.
 
+The [native lifecycle and room policy](../../docs/design/cbc-agent-lifecycle-and-rooms.md)
+records environment-aware creation/messaging and uncapped rooms with informational milestones.
+Saved native environment selection is distinct from cwd and UI grouping. The candidate has
+no lifetime message cap; milestone notices and complete native creation remain acceptance
+work, not capabilities proven by this checkpoint. Routine messages need no extension votes.
+
 Build and test only this package with one job and separate artifacts:
 
 ```sh

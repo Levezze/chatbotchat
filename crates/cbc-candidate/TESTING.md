@@ -2,6 +2,23 @@
 
 Run this after the candidate's synthetic suites pass. This session qualifies actual Codex and Claude Code apps separately from their CLIs. It does not install CBC, migrate daily rooms or change native permissions. See [device driver](adapters/device/README.md) and [Claude adapter](adapters/claude/README.md) for protocol details. Historical private-socket experiments in those documents are not supported-channel acceptance.
 
+## Added acceptance requirements
+
+Follow the [current lifecycle and room policy](../../docs/design/cbc-agent-lifecycle-and-rooms.md).
+For #113 enrollment, record the configured target, actual host/device/native session, repository
+and saved project/environment evidence where supported. Verify execution target and UI grouping
+separately. A matching folder or a headless transcript does not qualify the chosen Desktop environment.
+
+Milestone notices are pending implementation. Once available, send beyond 100 and 200 distinct
+messages without an extension/approval/pause, verify parent-only report notices and both-peer
+notices, and prove retries/notices do not count themselves. Check restart and live cadence changes
+without duplicate notices. A notice must not create a decision card, hold or required response.
+
+Full create/bind/initial-assignment/message/resume acceptance belongs to #117. Prove a standing
+Primarch target grant, actual saved environment/UI placement, one child under duplicate or
+uncertain creation, and no computer use where supported. Native permission exceptions remain
+separate. Do not silently substitute CLI workers or mark documented-but-untested handoff as PASS.
+
 ## Prepare one private case
 
 Use the checkout containing this file. Keep one core and one device driver in dedicated terminals. Host-required MCP stdio shims still exist; no chat gets a polling shell.

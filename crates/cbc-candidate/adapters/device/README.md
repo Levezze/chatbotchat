@@ -1,5 +1,10 @@
 # Shared native device driver
 
+Current [lifecycle and room requirements](../../../../docs/design/cbc-agent-lifecycle-and-rooms.md)
+distinguish native project/environment placement from working directory. This driver routes
+enrolled sessions; it does not yet create a native chat or select a saved Desktop environment.
+Informational room milestones never require extension votes, approvals or suspended work.
+
 This is an isolated candidate executable for issue #113. It combines the existing Claude
 request/channel server and the cross-host shared feed in one device process. Codex tool calls
 still use its bound MCP adapter directly against the candidate core. Claude shims use the

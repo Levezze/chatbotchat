@@ -4,6 +4,12 @@ Date: 2026-11-04. Tracks [issue #113](https://github.com/Levezze/chatbotchat/iss
 This checkpoint reuses the earlier isolated candidate foundation. It does not install or
 replace daily CBC. Native acceptance is still open; this document is not a completion claim.
 
+The later [lifecycle and room policy](../../docs/design/cbc-agent-lifecycle-and-rooms.md)
+adds saved-environment targeting, standing native lifecycle grants and informational 100/200
+message milestones. This checkpoint already has capless sends. It does not implement milestone
+generation or prove zero-click creation in the selected native environment. The test counts
+below predate those additions and were not rerun for the documentation amendment.
+
 ## Implemented
 
 - Candidate SQLite core with ordered/idempotent messages, fair bounded checks, exact
