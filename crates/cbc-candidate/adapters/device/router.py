@@ -13,8 +13,10 @@ from pathlib import Path
 import re
 import select
 import signal
+import socket
 import stat
 import threading
+import time
 
 
 ADAPTERS = Path(__file__).resolve().parents[1]
@@ -30,6 +32,7 @@ def load_module(name, path):
 claude = load_module("cbc_device_claude", ADAPTERS / "claude/router.py")
 shared = load_module("cbc_device_feed", ADAPTERS / "shared/feed.py")
 codex = load_module("cbc_device_codex", ADAPTERS / "codex/queue_delivery.py")
+native = load_module("cbc_device_native_http", ADAPTERS / "device/native_http.py")
 
 
 def load_targets(path):
@@ -116,6 +119,11 @@ class DeviceRouter(claude.Router):
         self.queued = queued
         self.all_bindings = bindings
         self.quarantined = set()
+        self.native_ready = threading.Condition()
+        self.native_generation = 0
+        self.native_sessions = set()
+        self.native_pending = set()
+        self.native_slots = threading.BoundedSemaphore(native.MAX_WAITERS)
         handlers = {}
         for session, binding in bindings.items():
             key = (binding["context"], binding["member"])
@@ -144,6 +152,189 @@ class DeviceRouter(claude.Router):
         self.feed = shared.ChangeFeed(core, bindings.values(), handlers, self.event,
                                       policy_provider=policy, reconcile=self.reconcile_bindings)
 
+    def event(self, kind, **fields):
+        # The one watch already emits this after durable changes. Waking HTTP
+        # waiters requires no second watch, per-room timer, or model turn.
+        if kind == "feed_changed" and hasattr(self, "native_ready"):
+            self.wake_native()
+        super().event(kind, **fields)
+
+    def wake_native(self):
+        with self.native_ready:
+            self.native_generation += 1
+            self.native_ready.notify_all()
+
+    def deliver_hint(self, session):
+        with self.native_ready:
+            is_native = session in self.native_sessions
+        if is_native:
+            # binding_status in the waiter is non-consuming. notify() would call
+            # check and freeze a batch before the native host asks for its inbox.
+            self.wake_native()
+            return True
+        return super().deliver_hint(session)
+
+    def native_identity(self, pid, uid):
+        return native.corroborate_native(pid, uid, self.sessions_dir,
+                                         claude.procinfo, claude.record_start)
+
+    def native_binding(self, session):
+        with self.registry_lock:
+            if session in self.quarantined or self.targets.get(session) != "claude":
+                return None
+            return self.all_bindings.get(session)
+
+    def wake_status(self, binding, timeout):
+        """A bounded non-consuming core call, independent of MCP's long timeout."""
+        deadline = time.monotonic() + timeout
+        with socket.socket(socket.AF_UNIX) as connection:
+            connection.settimeout(timeout)
+            try:
+                connection.connect(self.core)
+                connection.settimeout(max(0.001, deadline - time.monotonic()))
+                connection.sendall((claude.dumps({"v": 1, "auth": binding,
+                    "request": {"op": "binding_status"}}) + "\n").encode())
+                raw = b""
+                while not raw.endswith(b"\n"):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or len(raw) >= claude.MAX_FRAME:
+                        return {"type": "error"}
+                    connection.settimeout(remaining)
+                    part = connection.recv(min(65536, claude.MAX_FRAME + 1 - len(raw)))
+                    if not part:
+                        return {"type": "error"}
+                    raw += part
+                reply = json.loads(raw) if len(raw) <= claude.MAX_FRAME else None
+                return reply if isinstance(reply, dict) else {"type": "error"}
+            except (OSError, ValueError):
+                return {"type": "error"}
+
+    def handle_native(self, conn, pid, uid, initial):
+        try:
+            after = native.read_request(conn, initial)
+        except (OSError, ValueError):
+            return native.response(400)
+        if conn.family != socket.AF_UNIX:
+            return native.response(401)
+        session = self.native_identity(pid, uid)
+        binding = self.native_binding(session)
+        if not session or not binding:
+            return native.response(401)
+        with self.native_ready:
+            if session in self.native_pending or not self.native_slots.acquire(blocking=False):
+                return native.response(429)
+            self.native_pending.add(session)
+            attached = session not in self.native_sessions
+            self.native_sessions.add(session)
+        if attached:
+            self.event("native_mod_attached", member=binding["member"])
+        try:
+            return self.wait_native(session, binding, pid, uid, after)
+        finally:
+            with self.native_ready:
+                self.native_pending.discard(session)
+            self.native_slots.release()
+
+    def wait_native(self, session, binding, pid, uid, after):
+        deadline = time.monotonic() + native.WAIT_SECONDS
+        while True:
+            with self.native_ready:
+                generation = self.native_generation
+            if self.feed.stopped.is_set():
+                return native.response(503)
+            if (self.native_binding(session) != binding
+                    or self.native_identity(pid, uid) != session):
+                return native.response(401)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return native.response(204)
+            reply = self.wake_status(binding, min(2.0, remaining))
+            if reply.get("type") == "error" and reply.get("code") == "invalid_binding":
+                return native.response(401)
+            if reply.get("type") != "binding_status" or "first_unread_sequence" not in reply:
+                return native.response(503)
+            first = reply.get("first_unread_sequence")
+            if first is not None and (type(first) is not int or first < 1):
+                return native.response(503)
+            token = native.cursor(binding, first) if first is not None else None
+            if token is not None and token != after:
+                # Revalidate both native process identity and binding authority
+                # after I/O. Never deliver an event for a replaced/revoked chat.
+                if (self.native_identity(pid, uid) != session
+                        or self.native_binding(session) != binding):
+                    return native.response(401)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return native.response(503)
+                fresh = self.wake_status(binding, min(2.0, remaining))
+                if fresh.get("type") == "error" and fresh.get("code") == "invalid_binding":
+                    return native.response(401)
+                if fresh.get("type") != "binding_status" or "first_unread_sequence" not in fresh:
+                    return native.response(503)
+                fresh_first = fresh["first_unread_sequence"]
+                if fresh_first is not None and (type(fresh_first) is not int or fresh_first < 1):
+                    return native.response(503)
+                if fresh.get("first_unread_sequence") != first:
+                    continue
+                if (self.native_identity(pid, uid) != session
+                        or self.native_binding(session) != binding):
+                    return native.response(401)
+                self.event("native_mod_pending", member=binding["member"])
+                return native.response(200, {"v": 1, "type": "pending", "cursor": token})
+            with self.native_ready:
+                if generation != self.native_generation:
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return native.response(204)
+                self.native_ready.wait(remaining)
+                timed_out = generation == self.native_generation
+            if timed_out:
+                # No registry lock while holding native_ready: refresh acquires
+                # them in the opposite order. Heartbeats perform no core poll.
+                if self.feed.stopped.is_set():
+                    return native.response(503)
+                if (self.native_identity(pid, uid) != session
+                        or self.native_binding(session) != binding):
+                    return native.response(401)
+                return native.response(204)
+
+    def serve(self, conn):
+        keep = False
+        try:
+            conn.settimeout(native.HEADER_SECONDS)
+            initial = conn.recv(1)
+            if not initial:
+                return
+            pid, uid = claude.peer_credentials(conn)
+            if initial not in b"{[ \t\r\n":
+                reply = self.handle_native(conn, pid, uid, initial)
+                conn.settimeout(1)
+                conn.sendall(reply)
+                return
+            # Preserve the original raw newline JSON protocol and channel ownership.
+            conn.settimeout(10)
+            raw = initial
+            while not raw.endswith(b"\n") and len(raw) <= claude.MAX_FRAME:
+                chunk = conn.recv(min(65536, claude.MAX_FRAME + 1 - len(raw)))
+                if not chunk:
+                    break
+                raw += chunk
+            if len(raw) > claude.MAX_FRAME or not raw.endswith(b"\n"):
+                reply = {"error": "invalid request"}
+            else:
+                reply = self.handle(conn, raw=raw, credentials=(pid, uid))
+            if reply is claude.SUBSCRIBED:
+                keep = True
+            elif reply is not None:
+                conn.sendall((claude.dumps(reply) + "\n").encode())
+        except OSError:
+            pass
+        finally:
+            if not keep:
+                self.drop_channel(conn)
+            self.slots.release()
+
     def install_registry(self):
         """Caller holds registry_lock; one shared feed survives membership changes."""
         active = {s: b for s, b in self.all_bindings.items() if s not in self.quarantined}
@@ -153,6 +344,9 @@ class DeviceRouter(claude.Router):
         handlers = {(b["context"], b["member"]): self.handlers[(b["context"], b["member"])]
                     for b in active.values()}
         self.feed.replace_registry(active.values(), handlers)
+        with self.native_ready:
+            self.native_sessions.intersection_update(self.bindings)
+        self.wake_native()
 
     def reconcile_bindings(self):
         """A rejected watch cannot let one revoked binding starve healthy chats."""
@@ -199,9 +393,9 @@ class DeviceRouter(claude.Router):
             self.install_registry()
         self.event("profile_refreshed", targets=len(bindings))
 
-    def handle(self, conn):
-        pid, uid = claude.peer_credentials(conn)
-        raw = claude.read_frame(conn)
+    def handle(self, conn, raw=None, credentials=None):
+        pid, uid = credentials or claude.peer_credentials(conn)
+        raw = claude.read_frame(conn) if raw is None else raw
         try:
             request = json.loads(raw) if raw else None
         except ValueError:
@@ -264,6 +458,7 @@ def run(router, listen_path, stopped=None):
     def stop(*_args):
         stopped.set()
         router.feed.stop()
+        router.wake_native()
         try:
             router.wake_write.send(b"1")
         except OSError:
@@ -302,6 +497,11 @@ def run(router, listen_path, stopped=None):
                 if router.slots.acquire(blocking=False):
                     threading.Thread(target=router.serve, args=(connection,), daemon=True).start()
                 else:
+                    connection.settimeout(0.1)
+                    try:
+                        connection.sendall(native.response(429))
+                    except OSError:
+                        pass
                     connection.close()
     finally:
         stop()

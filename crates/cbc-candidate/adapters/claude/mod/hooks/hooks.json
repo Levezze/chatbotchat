@@ -1,0 +1,4 @@
+{
+  "description": "Candidate content-free inbox wake transport",
+  "modules": ["./register.js"]
+}

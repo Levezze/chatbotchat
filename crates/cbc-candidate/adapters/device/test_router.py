@@ -8,6 +8,8 @@ import subprocess
 import socket
 import sys
 import tempfile
+import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -258,6 +260,289 @@ class DeviceTests(unittest.TestCase):
         for value in invalid:
             self.assertIn("error", router.receipt_nudge(value, os.getuid()))
         self.assertIn("error", router.receipt_nudge(request, os.getuid() + 1))
+
+
+class NativeHttpTests(DeviceTests):
+    """Actual Unix socket framing with explicitly synthetic native process facts.
+
+    These tests verify driver contracts; they are not native Claude uptake evidence.
+    """
+    def setUp(self):
+        super().setUp()
+        self.router = device.DeviceRouter(self.args())
+        self.addCleanup(self.cleanup_router, self.router)
+        self.pid = os.getpid()
+        self.sessions = self.root / "sessions"
+        self.sessions.mkdir()
+        self.start = 1700000000
+        self.facts = {"uid": os.getuid(), "ppid": self.pid + 123, "start": self.start}
+        self.record = {"pid": self.pid, "sessionId": CLAUDE,
+                       "procStart": time.strftime("%a %b %d %H:%M:%S %Y", time.gmtime(self.start))}
+        self.save_record()
+        fake = patch.object(device.claude, "procinfo", side_effect=lambda pid: dict(self.facts)
+                            if pid == self.pid else None)
+        fake.start()
+        self.addCleanup(fake.stop)
+        duration = patch.object(device.native, "WAIT_SECONDS", 0.15)
+        duration.start()
+        self.addCleanup(duration.stop)
+        self.state = {"type": "binding_status", "first_unread_sequence": None}
+        self.calls = []
+        def status(grant, timeout):
+            self.calls.append((dict(grant), timeout))
+            return dict(self.state)
+        self.router.wake_status = status
+        self.router.core_call = lambda *_args: self.fail("wake called consuming/MCP core path")
+
+    def save_record(self):
+        (self.sessions / f"{self.pid}.json").write_text(json.dumps(self.record))
+
+    def begin(self, request=b"GET /cbc/v1/wake?after= HTTP/1.1\r\nHost: localhost\r\n\r\n"):
+        # Real connected AF_UNIX pair, real peer_credentials, real serve framing.
+        client, server = socket.socketpair(socket.AF_UNIX)
+        client.settimeout(2)
+        self.assertTrue(self.router.slots.acquire(blocking=False))
+        worker = threading.Thread(target=self.router.serve, args=(server,))
+        worker.start()
+        self.addCleanup(worker.join, 2)
+        self.addCleanup(client.close)
+        try:
+            client.sendall(request)
+        except BrokenPipeError:
+            # An over-limit request may be rejected before the kernel finishes
+            # accepting its bytes. The already-written HTTP error still matters.
+            pass
+        return client, worker
+
+    def finish(self, client, worker):
+        raw = b""
+        while True:
+            part = client.recv(4096)
+            if not part:
+                break
+            raw += part
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
+        headers, payload = raw.split(b"\r\n\r\n", 1)
+        lines = headers.split(b"\r\n")
+        values = dict(line.split(b": ", 1) for line in lines[1:])
+        self.assertEqual(int(values[b"Content-Length"]), len(payload))
+        self.assertEqual(values[b"Connection"], b"close")
+        return int(lines[0].split()[1]), json.loads(payload) if payload else None
+
+    def exchange(self, request=None):
+        return self.finish(*self.begin() if request is None else self.begin(request))
+
+    def wait_parked(self):
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            if self.router.native_pending and self.calls:
+                return
+            time.sleep(0.001)
+        self.fail("request did not park")
+
+    def test_uds_empty_heartbeat_has_no_content_or_idle_core_poll(self):
+        feed = self.router.feed
+        events = []
+        with patch.object(self.router, "event", side_effect=lambda kind, **fields:
+                          events.append((kind, fields))):
+            self.assertEqual(self.exchange(), (204, None))
+            self.assertEqual(self.exchange(), (204, None))
+        self.assertEqual(events, [("native_mod_attached", {"member": "claude"})])
+        self.assertEqual(len(self.calls), 2)
+        self.assertIs(self.router.feed, feed)
+        self.assertFalse(feed.started)
+        self.assertEqual(self.router.native_pending, set())
+
+    def test_unread_only_exact_payload_stable_cursor_and_downward_change(self):
+        self.state["first_unread_sequence"] = 99
+        events = []
+        capture = patch.object(self.router, "event", side_effect=lambda kind, **fields:
+                               events.append((kind, fields)))
+        capture.start()
+        self.addCleanup(capture.stop)
+        status, body = self.exchange()
+        self.assertEqual(status, 200)
+        self.assertEqual(set(body), {"v", "type", "cursor"})
+        self.assertEqual(body["v"], 1)
+        self.assertEqual(body["type"], "pending")
+        token = body["cursor"]
+        self.assertRegex(token, "^[0-9a-f]{64}$")
+        self.assertEqual(self.exchange()[1]["cursor"], token)
+        request = f"GET /cbc/v1/wake?after={token} HTTP/1.1\r\n\r\n".encode()
+        self.assertEqual(self.exchange(request), (204, None))
+        self.state["first_unread_sequence"] = 1
+        status, body = self.exchange(request)
+        self.assertEqual(status, 200)
+        self.assertNotEqual(body["cursor"], token)
+        grant = self.profile["bindings"][1]
+        self.assertNotEqual(device.native.cursor(grant, 1), device.native.cursor(grant | {"epoch": 2}, 1))
+        for key in ("context", "member", "device", "session"):
+            self.assertNotEqual(device.native.cursor(grant, 1),
+                                device.native.cursor(grant | {key: "replacement"}, 1))
+        self.state["first_unread_sequence"] = None
+        self.assertEqual(self.exchange(request), (204, None))
+        self.assertEqual(events, [("native_mod_attached", {"member": "claude"}),
+            ("native_mod_pending", {"member": "claude"}),
+            ("native_mod_pending", {"member": "claude"}),
+            ("native_mod_pending", {"member": "claude"})])
+
+    def test_shared_feed_wakes_request_without_check_or_another_feed(self):
+        with patch.object(device.native, "WAIT_SECONDS", 2):
+            client, worker = self.begin()
+            self.wait_parked()
+            feed = self.router.feed
+            self.state["first_unread_sequence"] = 7
+            feed.dispatch({"type": "members_changed", "sequence": 7, "members": [
+                {"context": "project", "member": "claude", "sequence": 7}]}, 0)
+            self.assertEqual(self.finish(client, worker)[0], 200)
+            self.assertIs(self.router.feed, feed)
+            self.assertTrue(feed.deliver_ready())
+            self.assertEqual(feed.pending_count(), 0)
+            self.assertLessEqual(len(self.calls), 4)
+
+    def test_duplicate_wait_returns_429_and_reconnect_releases_session(self):
+        client, worker = self.begin()
+        self.wait_parked()
+        self.assertEqual(self.exchange(), (429, None))
+        self.assertEqual(self.finish(client, worker), (204, None))
+        self.state["first_unread_sequence"] = 2
+        self.assertEqual(self.exchange()[0], 200)
+
+    def test_native_delivery_mode_survives_wait_gap_without_consuming_check(self):
+        self.assertEqual(self.exchange(), (204, None))
+        self.assertEqual(self.router.native_pending, set())
+        self.assertIn(CLAUDE, self.router.native_sessions)
+        self.assertTrue(self.router.deliver_hint(CLAUDE))
+        self.assertEqual(len(self.calls), 1)
+
+    def test_revocation_during_wait_and_shutdown_cancel_promptly(self):
+        for stop in (False, True):
+            with self.subTest(shutdown=stop), patch.object(device.native, "WAIT_SECONDS", 2):
+                self.calls.clear()
+                client, worker = self.begin()
+                self.wait_parked()
+                if stop:
+                    self.router.feed.stop()
+                    self.router.wake_native()
+                else:
+                    self.state = {"type": "error", "code": "invalid_binding"}
+                    self.router.wake_native()
+                self.assertEqual(self.finish(client, worker), (503 if stop else 401, None))
+                self.state = {"type": "binding_status", "first_unread_sequence": None}
+
+    def test_profile_quarantine_and_identity_loss_during_wait(self):
+        client, worker = self.begin()
+        self.wait_parked()
+        with self.router.registry_lock:
+            self.router.quarantined.add(CLAUDE)
+            self.router.install_registry()
+        self.assertEqual(self.finish(client, worker), (401, None))
+        self.router.quarantined.clear()
+        self.router.install_registry()
+        self.calls.clear()
+        client, worker = self.begin()
+        self.wait_parked()
+        self.facts["start"] += 1
+        self.router.wake_native()
+        self.assertEqual(self.finish(client, worker), (401, None))
+
+    def test_direct_pid_not_adapter_parent_and_session_correspondence(self):
+        self.assertEqual(self.router.native_identity(self.pid, os.getuid()), CLAUDE)
+        self.assertIsNone(self.router.native_identity(self.pid + 123, os.getuid()))
+        self.assertIsNone(self.router.native_identity(self.pid, os.getuid() + 1))
+        for changes in ({"pid": self.pid + 1}, {"sessionId": SESSION}, {"procStart": "wrong"}):
+            original = dict(self.record)
+            self.record.update(changes)
+            self.save_record()
+            self.assertEqual(self.exchange(), (401, None))
+            self.record = original
+        self.assertEqual(self.calls, [])
+
+    def test_status_failure_is_503_and_revocation_only_is_401(self):
+        for state in ({"type": "error"}, {"type": "batch"}, {"type": "binding_status"},
+                      {"type": "binding_status", "first_unread_sequence": True},
+                      {"type": "binding_status", "first_unread_sequence": -1}):
+            self.state = state
+            self.assertEqual(self.exchange(), (503, None))
+        self.state = {"type": "error", "code": "invalid_binding"}
+        self.assertEqual(self.exchange(), (401, None))
+
+    def test_revalidate_core_and_identity_before_pending_response(self):
+        self.state["first_unread_sequence"] = 1
+        states = iter([dict(self.state), {"type": "error", "code": "invalid_binding"}])
+        self.router.wake_status = lambda *_args: next(states)
+        events = []
+        with patch.object(self.router, "event", side_effect=lambda kind, **fields:
+                          events.append((kind, fields))):
+            self.assertEqual(self.exchange(), (401, None))
+        self.assertEqual(events, [("native_mod_attached", {"member": "claude"})])
+
+    def test_wake_status_actual_core_uds_is_only_non_consuming_status(self):
+        observed = []
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(self.router.core)
+        listener.listen(2)
+        listener.settimeout(2)
+        self.addCleanup(listener.close)
+        def core():
+            for _ in range(2):
+                conn, _ = listener.accept()
+                with conn:
+                    observed.append(json.loads(device.claude.read_frame(conn)))
+                    conn.sendall(b'{"type":"binding_status","first_unread_sequence":7}\n')
+        server = threading.Thread(target=core)
+        server.start()
+        self.addCleanup(server.join, 2)
+        self.router.wake_status = device.DeviceRouter.wake_status.__get__(self.router)
+        self.assertEqual(self.exchange()[0], 200)
+        server.join(2)
+        self.assertEqual(len(observed), 2)
+        for request in observed:
+            self.assertEqual(request["auth"], self.profile["bindings"][1])
+            self.assertEqual(request["request"], {"op": "binding_status"})
+
+    def test_header_timeout_is_bounded(self):
+        with patch.object(device.native, "HEADER_SECONDS", 0.05):
+            self.assertEqual(self.exchange(b"GET /cbc/v1/wake?after= HTTP/1.1\r\n"), (400, None))
+        self.assertEqual(self.calls, [])
+
+    def test_malformed_query_headers_methods_and_bounds_never_reach_core(self):
+        invalid = [b"POST /cbc/v1/wake?after= HTTP/1.1\r\n\r\n",
+            b"GET /cbc/v1/wake HTTP/1.1\r\n\r\n",
+            b"GET /cbc/v1/wake?after=&session=chosen HTTP/1.1\r\n\r\n",
+            b"GET /cbc/v1/wake?after=" + b"A" * 64 + b" HTTP/1.1\r\n\r\n",
+            b"GET /cbc/v1/wake?after= HTTP/1.1\r\nContent-Length: 1\r\n\r\nx",
+            b"GET /cbc/v1/wake?after= HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n",
+            b"GET /cbc/v1/wake?after= HTTP/1.1\r\nX: a\r\nX: b\r\n\r\n",
+            b"GET /cbc/v1/wake?after= HTTP/1.1\r\n folded\r\n\r\n",
+            b"GET /cbc/v1/wake?after= HTTP/1.1\r\nX: " + b"x" * 9000 + b"\r\n\r\n"]
+        for request in invalid:
+            with self.subTest(request=request[:80]):
+                self.assertEqual(self.exchange(request), (400, None))
+        self.assertEqual(self.calls, [])
+
+    def test_waiter_budget_is_bounded_without_allocating_another_feed(self):
+        for _ in range(device.native.MAX_WAITERS):
+            self.assertTrue(self.router.native_slots.acquire(blocking=False))
+        self.assertEqual(self.exchange(), (429, None))
+        for _ in range(device.native.MAX_WAITERS):
+            self.router.native_slots.release()
+        self.assertEqual(self.calls, [])
+
+    def test_raw_json_mcp_and_codex_nudge_remain_newline_json(self):
+        self.router.core_call = lambda *_args: {"type": "binding_status", "first_unread_sequence": None}
+        client, worker = self.begin((json.dumps({"v": 1, "op": "codex_receipt",
+            "auth": self.profile["bindings"][0]}) + "\n").encode())
+        raw = client.recv(4096)
+        worker.join(2)
+        self.assertEqual(json.loads(raw), {"ok": True})
+        with patch.object(device.claude, "corroborate", return_value=CLAUDE):
+            self.router.core_call = lambda *_args: {"type": "empty"}
+            client, worker = self.begin(b'{"v":1,"op":"check"}\n')
+            raw = client.recv(4096)
+            worker.join(2)
+            self.assertEqual(json.loads(raw), {"items": []})
 
 
 class CodexQueueTests(unittest.TestCase):

@@ -32,6 +32,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
@@ -57,3 +62,6 @@ jobs:
 
       - name: Test Claude adapter and router
         run: python3 -B -I crates/cbc-candidate/adapters/claude/test_router.py
+
+      - name: Test native Claude wake mod
+        run: node --test crates/cbc-candidate/adapters/claude/mod/test_mod.mjs

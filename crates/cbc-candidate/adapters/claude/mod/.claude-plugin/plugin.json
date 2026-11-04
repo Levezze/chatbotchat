@@ -1,0 +1,7 @@
+{
+  "name": "cbc-candidate-wake",
+  "version": "0.0.1",
+  "description": "Disposable CBC candidate wake transport for Claude Code mods",
+  "author": { "name": "CBC" },
+  "license": "MIT"
+}

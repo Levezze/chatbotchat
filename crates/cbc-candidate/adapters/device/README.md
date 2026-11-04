@@ -5,6 +5,13 @@ distinguish native project/environment placement from working directory. This dr
 enrolled sessions; it does not yet create a native chat or select a saved Desktop environment.
 Informational room milestones never require extension votes, approvals or suspended work.
 
+The candidate also supports the [native Claude mod](../claude/mod/README.md). It opens a
+bounded HTTP wait over this same private Unix socket, authenticated from the native caller's
+kernel PID/UID and live host session record. One shared core watch wakes these waits; no extra
+receiver process or per-room watch is created. Idle 204 responses cause no model turn.
+`native_mod_attached` and `native_mod_pending` log logical member IDs only. They are distinct
+from channel writes and still do not replace actual native check/receipt evidence.
+
 This is an isolated candidate executable for issue #113. It combines the existing Claude
 request/channel server and the cross-host shared feed in one device process. Codex tool calls
 still use its bound MCP adapter directly against the candidate core. Claude shims use the

@@ -1,6 +1,12 @@
 # Isolated native test session for #113
 
-Run this after the candidate's synthetic suites pass. This session qualifies actual Codex and Claude Code apps separately from their CLIs. It does not install CBC, migrate daily rooms or change native permissions. See [device driver](adapters/device/README.md) and [Claude adapter](adapters/claude/README.md) for protocol details. Historical private-socket experiments in those documents are not supported-channel acceptance.
+Run this after the candidate's synthetic suites pass. This session qualifies actual Codex and Claude Code apps separately from their CLIs. It does not install CBC, migrate daily rooms or change native permissions. See [device driver](adapters/device/README.md), [Claude adapter](adapters/claude/README.md), and [native mod](adapters/claude/mod/README.md) for protocol details. Historical private-socket experiments in those documents are not supported-channel acceptance.
+
+For the Desktop mod test, install only the candidate plugin in the designated disposable
+project's local scope, following its README. Put the private device socket in that project's
+`.cbc-candidate-wake.json`. Keep MCP for send/check; the mod supplies attributed native hints.
+It uses no channel-preview flag or permission hook. The mod and channel paths have separate
+acceptance evidence; a successful channel write never substitutes for model uptake.
 
 ## Added acceptance requirements
 
@@ -122,3 +128,8 @@ rtk proxy "$CBC113_BIN" revoke --root "$CBC113_ROOT" --protected-db "$CBC113_PRO
 Require that binding's next check/send/discovery to fail and the driver's watch to quarantine it while the other binding remains usable. Repeat the same revoke and require stale-request rejection. Revocation preserves logical membership and unread history; it neither closes the native chat nor changes host permissions. Rebinding/re-enrollment recovery remains a separate native setup capability. Do not edit SQLite, mint replacement grants or put a stale credential into chat. A fresh native session requires fresh corroboration.
 
 Keep per-host results as `PASS`, `FAIL`, `notLoaded`, `dormant` or `notRun`, with actual evidence. Record CPU/RSS for core, driver and required MCP shims during an idle interval and the marker sequence; count any extra processes. Missing supported project/channel activation, actual cross-app fetch/echo, reconnect evidence or native stale-binding test remains visible before #113 completion. Stop only the two owned terminals with Ctrl-C/SIGTERM; preserve the private case for review. Do not stop daily services or remove project trust globally.
+
+For mod cleanup, revoke its disposable binding first so HTTP returns 401 and the receiver
+stops retrying. Do not kill host-owned MCP shims: Codex can retain their closed transports
+without respawning them. Use supported native lifecycle controls when a host reconnect is
+needed. Keep the prior profile/context evidence when provisioning a fresh disposable pair.

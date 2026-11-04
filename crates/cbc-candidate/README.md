@@ -11,7 +11,8 @@ Saved native environment selection is distinct from cwd and UI grouping. The can
 no lifetime message cap. Informational notices count distinct committed participant sends,
 notify only the report parent or both peers, and require no extension vote or response.
 Complete native creation remains separate acceptance work. See [EVIDENCE.md](EVIDENCE.md)
-for actual native delivery results and the unresolved Claude Desktop channel activation gate.
+for actual native delivery results, including the in-process Claude mod path. The channel-only
+Desktop activation gate is separate from that tested mod transport.
 
 Build and test only this package with one job and separate artifacts:
 

@@ -18,8 +18,9 @@ The tests below were rerun after the milestone implementation.
   authorized directory discovery, deterministic report/peer connection setup and introductions.
 - A single device driver with one shared watch and two delivery workers. Required native
   MCP stdio shims remain separate processes. No per-room polling shell or empty model timer.
-- Codex queue hints and explicit receipt nudges; Claude channel-only delivery in the shared
-  driver. Hints contain no message bodies or human approval authority.
+- Codex queue hints and explicit receipt nudges; Claude channels and the native mod transport
+  described below. The shared driver never uses the historical private-socket probe. Hints
+  contain no message bodies or human approval authority.
 - Live revision-checked retry settings, scoped inheritance and last-good preservation.
 - Atomic distinct-message counts and informational notices, report parent only or both peers.
   Notices/retries/introductions do not count themselves. Unfrozen notices coalesce; an issued
@@ -38,11 +39,12 @@ The separate native run below does.
 | Suite | Passing tests |
 | --- | ---: |
 | Rust core, isolation, storage, enrollment, settings, owner CLI and socket integration | 112 |
-| Shared device driver | 20 |
+| Shared device driver | 50 |
 | Shared change feed | 13 |
 | Codex MCP adapter | 21 |
 | Claude MCP adapter/router | 53 |
-| Total | 219 |
+| Native Claude mod, fake host | 11 |
+| Total | 260 |
 
 Commands:
 
@@ -54,6 +56,7 @@ rtk proxy python3 -B -I crates/cbc-candidate/adapters/device/test_router.py
 rtk proxy python3 -B -I crates/cbc-candidate/adapters/shared/test_feed.py
 rtk proxy python3 -B -I crates/cbc-candidate/adapters/codex/test_adapter.py
 rtk proxy python3 -B -I crates/cbc-candidate/adapters/claude/test_router.py
+rtk proxy node --test crates/cbc-candidate/adapters/claude/mod/test_mod.mjs
 rtk git diff --check
 ```
 
@@ -113,10 +116,10 @@ One resource snapshot showed core 9,456 KiB RSS, shared driver 15,888 KiB, Claud
 shell wrappers and transient CLI commands. This is one sample, not a peak/load benchmark.
 There were no per-room polling processes. The project-only shims remain host-required.
 
-### Remaining host gate
+### Channel-only host gate
 
-Claude project MCP loading and ordinary two-way tool exchange work. Automatic Desktop wake
-does not yet qualify. A channel write is not host uptake. Official
+Claude project MCP loading and ordinary two-way tool exchange work. The channel-only path
+did not qualify automatic Desktop wake. A channel write is not host uptake. Official
 [channel guidance](https://code.claude.com/docs/en/channels#security) requires session opt-in;
 [development channels](https://code.claude.com/docs/en/channels-reference#test-during-the-research-preview)
 require an interactive startup flag. No supported equivalent for enabling our custom channel
@@ -127,16 +130,83 @@ publishes authentication framing but not its message envelope. The public SDK's 
 envelope is not evidence for that socket protocol. The shared driver did not fall back to
 the historical private-socket probe or change native permission settings.
 
-Automatic Claude idle/active uptake, closed-chat wake, the remaining per-host lifecycle and
-re-enrollment cases remain open. CLI-only success cannot replace Desktop acceptance.
+The native mod trial below subsequently proved automatic Desktop uptake through a different
+documented API. It does not claim that custom Desktop channels started working.
+
+## Native in-process mod trial, 2026-11-04
+
+The [candidate mod](adapters/claude/mod/README.md) uses documented Claude APIs available on
+the installed Desktop and CLI versions. `$.http.fetch` supports a Unix `socketPath`;
+`$.prompt.submit({text, asUser:false})` submits an attributed notification when idle.
+The mod adds no receiver process and does not call a model for unchanged state.
+
+The shared driver accepts bounded HTTP waits on its existing private Unix socket. It
+corroborates the actual native caller PID, UID, process start and host-owned session record.
+The request supplies no identity or credential. One existing core watch wakes these requests;
+they read non-consuming binding status, never freeze or receipt an inbox. An opaque cursor
+covers binding scope/epoch and first unread item. It is an equality token, not a global
+message cursor that would skip newly visible older backlog. Idle responses are 204.
+
+There is one in-process request per native session, parked for at most 25 seconds under the
+host's 30-second HTTP limit. A timeout reopens the wait without a model call or transcript
+entry. The driver limits parked waits and total clients. The mod backs off on transient
+failures, suppresses duplicate cursors, and ignores late callbacks after interruption.
+401 or a refused/dropped native prompt stops it until accepted human composer input.
+No `asUser:true`, tool approval hooks, native permission changes or private inbox frames.
+
+The private marketplace and plugin were enabled with **local scope only** in
+`/private/tmp/cbc113-live-aqyctpbd/claude-project`. Its exact socket config is that project's
+`.cbc-candidate-wake.json`; no global plugin option was written. Native `/reload-plugins`
+confirmed re-reading the final mod source from that private folder. Installed CLI strict
+plugin validation passed. New automated coverage passes 50 device tests and 11 mod tests;
+all 137 Python tests were rerun. Rust source is unchanged since the 112-test run above.
+
+Actual observations:
+
+| Probe | Evidence |
+| --- | --- |
+| Operator-generated initial wake | Marker 14, native Claude check/receipt, echo 15; UI explicitly attributed the notification to `cbc-candidate-wake` |
+| Real Codex-to-Claude exchange | Fresh Codex chat `01a17a75-029b-7862-a69d-5ee06baf9acc` sent M6 at 18; Claude automatically fetched/echoed at 19; Codex automatically fetched echo/notice and then empty |
+| Bounded foreground fixture | One 15-second Claude foreground command around M7; marker 21, automatic check, echo 22. This is not a hard mid-turn/preemption guarantee |
+| Shared driver offline/restart | M8 committed at 24 while the driver was stopped; same profile restarted; Claude automatically recovered/echoed at 25 with no resend/manual prompt; Codex fetched echo and empty |
+| Final reviewed driver diagnostics | `native_mod_attached`, M9 send 27, `native_mod_pending`, native check/receipt, echo 28; Codex fetched echo and empty |
+
+The final context was `cbc113-mod-pair`, room
+`cbc-report-aa7b2b7ea1ef627fac6d59e9aebe4750`. Claude retained native session
+`bfde8be2-b697-4fc0-9af6-442ab1cb24ae`, live corroborated PID 65066. At 21:55:49.381 UTC
+M9 committed, the mod pending event followed at 21:55:49.383, and the native check followed
+at 21:55:51.432. The notification contained no marker body; Claude fetched that through CBC.
+Earlier tests using the previous native Codex chat remain separately recorded above.
+
+A sample showed the candidate core at 9,488 KiB RSS, driver at 19,808 KiB, and the existing
+native Claude host at 474,896 KiB. That native host survived over eight minutes in the test.
+These are samples, not peak/load results. The mod does not eliminate the native app/session's
+own memory cost, and this does not prove indefinite idle retention or restart of an exited
+Desktop process. The 25-second waits are host callbacks, not terminal polls or model timers.
+
+Test cleanup initially terminated the first Codex chat's host-owned MCP shim. That chat
+retained a closed transport instead of respawning it. The native pair trial therefore reused
+an existing spare disposable chat; it did not restart the app or create a production chat.
+Future cleanup must revoke test bindings and stop the owned driver/core, leaving host-owned
+shim lifecycle to the app. Do not treat a killed cached MCP transport as an empty inbox.
+
+The final Codex binding was intentionally revoked; its native check rejected the operation
+without retry. The Claude binding was then revoked to stop its mod's HTTP receiver. Both
+owned candidate processes were stopped, with test profiles/history preserved privately.
+Host-owned shims were left to the apps for this cleanup.
+
+Sources: [mod support](https://code.claude.com/docs/en/plugins/mods/overview),
+[prompt and network APIs](https://code.claude.com/docs/en/plugins/mods/api),
+[public API declarations](https://github.com/anthropics/claude-code/blob/main/mods/types/claude-code.d.ts).
 
 ## Remaining native acceptance
 
-Follow [TESTING.md](TESTING.md) in disposable projects. Both Codex Desktop and Claude Desktop
-Code must actually fetch and reply to markers through the same candidate core/driver, with
-active, idle, reconnect, receipt, revocation and resource evidence. CLI-only tests or a queued
-hint are insufficient. Native IDs, project MCP loading and Claude channel consent must be
-corroborated rather than simulated. Dormant wake limitations must remain explicit.
+The native pair above proves actual automatic fetch/reply through the same core/driver.
+Follow [TESTING.md](TESTING.md) for the remaining matrix: prolonged idle/resource soak,
+native stop/rearm and exited-process/app-restart recovery. CLI mod operation still needs
+its own native run; a mocked host is not a CLI PASS. Native identities, local plugin loading
+and actual uptake must stay corroborated. A queued hint is insufficient. Dormant wake
+limitations remain explicit. #113 is not closed by this checkpoint.
 
 No global native settings, permission modes, installed skills, daily service/database or
 active project agents were changed. No candidate service was installed to run persistently.
