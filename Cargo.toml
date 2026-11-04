@@ -6,6 +6,7 @@ members = [
     "crates/chatbotchat-client",
     "bins/chatbotchat-server",
     "bins/cbc",
+    "crates/cbc-candidate",
 ]
 
 [workspace.package]
