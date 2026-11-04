@@ -316,22 +316,53 @@ class NativeHttpTests(DeviceTests):
 
     def finish(self, client, worker):
         raw = b""
-        while True:
+        while b"\r\n\r\n" not in raw:
             part = client.recv(4096)
-            if not part:
-                break
+            self.assertTrue(part, "HTTP response headers incomplete")
             raw += part
-        worker.join(2)
-        self.assertFalse(worker.is_alive())
         headers, payload = raw.split(b"\r\n\r\n", 1)
         lines = headers.split(b"\r\n")
         values = dict(line.split(b": ", 1) for line in lines[1:])
-        self.assertEqual(int(values[b"Content-Length"]), len(payload))
+        length = int(values[b"Content-Length"])
+        while len(payload) < length:
+            part = client.recv(min(4096, length - len(payload)))
+            self.assertTrue(part, "HTTP response body incomplete")
+            payload += part
+        self.assertEqual(length, len(payload))
         self.assertEqual(values[b"Connection"], b"close")
+        # Linux may reset a Unix connection when the server closes with rejected
+        # oversized request bytes unread. Content-Length defines completion; a
+        # further EOF probe must not discard a complete, valid error response.
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
         return int(lines[0].split()[1]), json.loads(payload) if payload else None
 
     def exchange(self, request=None):
         return self.finish(*self.begin() if request is None else self.begin(request))
+
+    def test_complete_response_succeeds_before_reset_but_truncation_still_fails(self):
+        class ResetClient:
+            """Synthetic response stream with Linux-style reset after its bytes."""
+            def __init__(self, chunks):
+                self.chunks = iter(chunks)
+                self.reads = 0
+
+            def recv(self, _limit):
+                self.reads += 1
+                try:
+                    return next(self.chunks)
+                except StopIteration:
+                    raise ConnectionResetError(104, "connection reset")
+
+        worker = SimpleNamespace(join=lambda _timeout: None, is_alive=lambda: False)
+        response = device.native.response(400)
+        client = ResetClient([response[:15], response[15:]])
+        self.assertEqual(self.finish(client, worker), (400, None))
+        self.assertEqual(client.reads, 2)
+        # A partial declared body must still reach that reset and fail verification.
+        partial = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{"
+        with self.assertRaises(ConnectionResetError):
+            self.finish(ResetClient([partial]), worker)
 
     def wait_parked(self):
         deadline = time.monotonic() + 1

@@ -39,12 +39,12 @@ The separate native run below does.
 | Suite | Passing tests |
 | --- | ---: |
 | Rust core, isolation, storage, enrollment, settings, owner CLI and socket integration | 112 |
-| Shared device driver | 50 |
+| Shared device driver | 51 |
 | Shared change feed | 13 |
 | Codex MCP adapter | 21 |
 | Claude MCP adapter/router | 53 |
 | Native Claude mod, fake host | 11 |
-| Total | 260 |
+| Total | 261 |
 
 Commands:
 
@@ -158,8 +158,8 @@ The private marketplace and plugin were enabled with **local scope only** in
 `/private/tmp/cbc113-live-aqyctpbd/claude-project`. Its exact socket config is that project's
 `.cbc-candidate-wake.json`; no global plugin option was written. Native `/reload-plugins`
 confirmed re-reading the final mod source from that private folder. Installed CLI strict
-plugin validation passed. New automated coverage passes 50 device tests and 11 mod tests;
-all 137 Python tests were rerun. Rust source is unchanged since the 112-test run above.
+plugin validation passed. New automated coverage passes 51 device tests and 11 mod tests;
+all 137 Python tests passed before the Linux-only response-reader regression added one more passing device test. Rust source is unchanged since the 112-test run above.
 
 Actual observations:
 
