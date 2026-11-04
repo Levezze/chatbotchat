@@ -8,8 +8,10 @@ It does not use legacy runtime modules, service labels or default database paths
 The [native lifecycle and room policy](../../docs/design/cbc-agent-lifecycle-and-rooms.md)
 records environment-aware creation/messaging and uncapped rooms with informational milestones.
 Saved native environment selection is distinct from cwd and UI grouping. The candidate has
-no lifetime message cap; milestone notices and complete native creation remain acceptance
-work, not capabilities proven by this checkpoint. Routine messages need no extension votes.
+no lifetime message cap. Informational notices count distinct committed participant sends,
+notify only the report parent or both peers, and require no extension vote or response.
+Complete native creation remains separate acceptance work. See [EVIDENCE.md](EVIDENCE.md)
+for actual native delivery results and the unresolved Claude Desktop channel activation gate.
 
 Build and test only this package with one job and separate artifacts:
 

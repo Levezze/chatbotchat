@@ -9,10 +9,14 @@ For #113 enrollment, record the configured target, actual host/device/native ses
 and saved project/environment evidence where supported. Verify execution target and UI grouping
 separately. A matching folder or a headless transcript does not qualify the chosen Desktop environment.
 
-Milestone notices are pending implementation. Once available, send beyond 100 and 200 distinct
+Milestone notices are implemented. Send beyond 100 and 200 distinct
 messages without an extension/approval/pause, verify parent-only report notices and both-peer
 notices, and prove retries/notices do not count themselves. Check restart and live cadence changes
 without duplicate notices. A notice must not create a decision card, hold or required response.
+The automated suite exercises 100/200; a disposable native run can lower
+`defaults.room_notice_every_messages` to avoid spending 200 model turns. This does not replace
+the automated boundary tests. Report cadence uses the verified parent's effective policy;
+peer cadence uses defaults and context policy, shared by both peers.
 
 Full create/bind/initial-assignment/message/resume acceptance belongs to #117. Prove a standing
 Primarch target grant, actual saved environment/UI placement, one child under duplicate or

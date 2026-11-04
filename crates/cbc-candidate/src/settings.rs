@@ -31,6 +31,14 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub struct DispatchPolicy {
     pub retry_initial_ms: u64,
     pub retry_max_ms: u64,
+    /// Participant-message milestones only; this never limits conversation length.
+    /// Rooms resolve the report owner's policy, or defaults/context only for symmetric peers.
+    #[serde(default = "default_room_notice_every_messages")]
+    pub room_notice_every_messages: u64,
+}
+
+fn default_room_notice_every_messages() -> u64 {
+    100
 }
 
 impl Default for DispatchPolicy {
@@ -38,6 +46,7 @@ impl Default for DispatchPolicy {
         Self {
             retry_initial_ms: 1000,
             retry_max_ms: 30_000,
+            room_notice_every_messages: default_room_notice_every_messages(),
         }
     }
 }
@@ -49,6 +58,8 @@ pub struct PolicyPatch {
     pub retry_initial_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_max_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_notice_every_messages: Option<u64>,
 }
 
 impl PolicyPatch {
@@ -58,6 +69,9 @@ impl PolicyPatch {
         }
         if let Some(value) = self.retry_max_ms {
             policy.retry_max_ms = value;
+        }
+        if let Some(value) = self.room_notice_every_messages {
+            policy.room_notice_every_messages = value;
         }
     }
 }
@@ -112,7 +126,10 @@ impl RuntimeSettings {
         ] {
             if let Some(patch) = patch {
                 patch.apply(&mut policy);
-                if patch.retry_initial_ms.is_some() || patch.retry_max_ms.is_some() {
+                if patch.retry_initial_ms.is_some()
+                    || patch.retry_max_ms.is_some()
+                    || patch.room_notice_every_messages.is_some()
+                {
                     sources.push(source.into());
                 }
             }
@@ -327,6 +344,10 @@ fn validate_policy(policy: &DispatchPolicy) -> Result<()> {
             && (25..=300_000).contains(&policy.retry_max_ms)
             && policy.retry_initial_ms <= policy.retry_max_ms,
         "invalid runtime retry policy"
+    );
+    ensure!(
+        (1..=1_000_000).contains(&policy.room_notice_every_messages),
+        "invalid room notice cadence"
     );
     Ok(())
 }

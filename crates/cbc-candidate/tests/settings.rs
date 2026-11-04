@@ -66,6 +66,7 @@ fn inheritance_and_explicit_override_removal_preserve_scope() {
         PolicyPatch {
             retry_initial_ms: Some(100),
             retry_max_ms: None,
+            room_notice_every_messages: None,
         },
     );
     settings.roles.insert(
@@ -73,6 +74,7 @@ fn inheritance_and_explicit_override_removal_preserve_scope() {
         PolicyPatch {
             retry_initial_ms: Some(200),
             retry_max_ms: None,
+            room_notice_every_messages: None,
         },
     );
     settings.members.entry("api".into()).or_default().insert(
@@ -80,6 +82,7 @@ fn inheritance_and_explicit_override_removal_preserve_scope() {
         PolicyPatch {
             retry_initial_ms: Some(300),
             retry_max_ms: None,
+            room_notice_every_messages: None,
         },
     );
     let initial = service.snapshot();
@@ -250,12 +253,14 @@ fn unknown_fields_invalid_schema_and_composed_policy_do_not_replace_accepted_val
     bad.defaults = DispatchPolicy {
         retry_initial_ms: 100,
         retry_max_ms: 1000,
+        room_notice_every_messages: 100,
     };
     bad.contexts.insert(
         "api".into(),
         PolicyPatch {
             retry_initial_ms: Some(500),
             retry_max_ms: None,
+            room_notice_every_messages: None,
         },
     );
     bad.roles.insert(
@@ -263,6 +268,7 @@ fn unknown_fields_invalid_schema_and_composed_policy_do_not_replace_accepted_val
         PolicyPatch {
             retry_initial_ms: None,
             retry_max_ms: Some(200),
+            room_notice_every_messages: None,
         },
     );
     assert!(bad.validate().is_err()); // Both individual patches fit defaults; their combination does not.
@@ -410,4 +416,148 @@ fn owner_settings_snapshot_roundtrips_without_accepting_unknown_envelope_fields(
     assert_eq!(parsed.settings, snapshot.settings);
     encoded["permissions"] = serde_json::json!("unrelated authority");
     assert!(serde_json::from_value::<SettingsSnapshot>(encoded).is_err());
+}
+
+#[test]
+fn old_settings_files_inherit_the_default_notice_cadence_without_rewriting_primary() {
+    let (_temp, sandbox) = fixture();
+    let legacy = br#"{"schema":1,"defaults":{"retry_initial_ms":1000,"retry_max_ms":30000},"contexts":{"api":{"retry_initial_ms":500}},"roles":{},"members":{}}"#;
+    let path = sandbox.root().join("runtime-settings.json");
+    write_private(&path, legacy);
+    let snapshot = RuntimeSettingsService::open(&sandbox).unwrap().snapshot();
+    assert_eq!(snapshot.settings.defaults.room_notice_every_messages, 100);
+    let effective = snapshot.effective("api", "repo_lead", "lead");
+    assert_eq!(effective.policy.room_notice_every_messages, 100);
+    assert_eq!(effective.policy.retry_initial_ms, 500);
+    assert_eq!(fs::read(path).unwrap(), legacy);
+}
+
+#[test]
+fn live_notice_cadence_updates_preserve_overrides_and_reset_to_inheritance() {
+    let (_temp, sandbox) = fixture();
+    let mut service = RuntimeSettingsService::open(&sandbox).unwrap();
+    let initial = service.snapshot();
+    let mut settings = initial.settings;
+    settings.defaults.room_notice_every_messages = 200;
+    settings.contexts.insert(
+        "api".into(),
+        PolicyPatch {
+            room_notice_every_messages: Some(150),
+            ..PolicyPatch::default()
+        },
+    );
+    settings.roles.insert(
+        "repo_lead".into(),
+        PolicyPatch {
+            room_notice_every_messages: Some(125),
+            ..PolicyPatch::default()
+        },
+    );
+    settings.members.entry("api".into()).or_default().insert(
+        "lead".into(),
+        PolicyPatch {
+            room_notice_every_messages: Some(50),
+            ..PolicyPatch::default()
+        },
+    );
+    let updated = service.update(&initial.revision, settings.clone()).unwrap();
+    assert_ne!(initial.revision, updated.revision);
+    assert_eq!(
+        updated
+            .effective("other", "feature_lead", "lead")
+            .policy
+            .room_notice_every_messages,
+        200
+    );
+    assert_eq!(
+        updated
+            .effective("api", "feature_lead", "child")
+            .policy
+            .room_notice_every_messages,
+        150
+    );
+    assert_eq!(
+        updated
+            .effective("api", "repo_lead", "peer")
+            .policy
+            .room_notice_every_messages,
+        125
+    );
+    assert_eq!(
+        updated
+            .effective("api", "repo_lead", "lead")
+            .policy
+            .room_notice_every_messages,
+        50
+    );
+    assert_eq!(
+        updated.effective("api", "repo_lead", "lead").sources,
+        ["defaults", "context", "role", "member"]
+    );
+
+    // External edits are observed by the same running service, with no restart.
+    settings.defaults.room_notice_every_messages = 300;
+    publish_external(sandbox.root(), &settings);
+    let refreshed = service.refresh();
+    assert_eq!(
+        refreshed
+            .effective("other", "feature_lead", "lead")
+            .policy
+            .room_notice_every_messages,
+        300
+    );
+    assert_eq!(
+        refreshed
+            .effective("api", "repo_lead", "lead")
+            .policy
+            .room_notice_every_messages,
+        50
+    );
+    settings.members.clear();
+    let inherited = service.update(&refreshed.revision, settings).unwrap();
+    assert_eq!(
+        inherited
+            .effective("api", "repo_lead", "lead")
+            .policy
+            .room_notice_every_messages,
+        125
+    );
+    let reopened = RuntimeSettingsService::open(&sandbox).unwrap().snapshot();
+    assert_eq!(reopened.revision, inherited.revision);
+    assert_eq!(reopened.settings, inherited.settings);
+}
+
+#[test]
+fn invalid_notice_cadence_and_hidden_invalid_overrides_keep_last_good() {
+    let (_temp, sandbox) = fixture();
+    let mut service = RuntimeSettingsService::open(&sandbox).unwrap();
+    let initial = service.snapshot();
+    for invalid in [0, 1_000_001] {
+        let mut changed = initial.settings.clone();
+        changed.defaults.room_notice_every_messages = invalid;
+        assert!(service.update(&initial.revision, changed.clone()).is_err());
+        publish_external(sandbox.root(), &changed);
+        let retained = service.refresh();
+        assert_eq!(retained.revision, initial.revision);
+        assert_eq!(retained.settings.defaults.room_notice_every_messages, 100);
+        assert!(retained.last_error.is_some());
+        publish_external(sandbox.root(), &initial.settings);
+        assert!(service.refresh().last_error.is_none());
+    }
+    let mut changed = initial.settings;
+    changed.roles.insert(
+        "repo_lead".into(),
+        PolicyPatch {
+            room_notice_every_messages: Some(0),
+            ..PolicyPatch::default()
+        },
+    );
+    changed.members.entry("api".into()).or_default().insert(
+        "lead".into(),
+        PolicyPatch {
+            room_notice_every_messages: Some(100),
+            ..PolicyPatch::default()
+        },
+    );
+    assert!(changed.validate().is_err());
 }

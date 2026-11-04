@@ -14,6 +14,7 @@ pub const MAX_BATCH_BYTES: usize = 48 * 1024;
 pub const MAX_ESCAPED_BODY_BYTES: usize = 2 * MAX_BODY_BYTES;
 /// Retained for immutable batches and valid rows created before the smaller default budget.
 pub const MAX_BATCH_HARD_BYTES: usize = 128 * 1024;
+pub const DEFAULT_ROOM_NOTICE_INTERVAL: u64 = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Item {
@@ -68,8 +69,8 @@ impl Store {
         }
         let mut changes = Vec::new();
         for binding in bindings {
-            let sequence:i64 = sqlx::query_scalar("SELECT COALESCE(MAX(i.sequence),0) FROM candidate_items i JOIN candidate_room_members m ON m.context_id=i.context_id AND m.room_id=i.room_id WHERE m.context_id=? AND m.member_id=? AND m.active=1 AND i.sender<>? AND i.sequence>? AND NOT EXISTS (SELECT 1 FROM candidate_receipts r WHERE r.context_id=i.context_id AND r.member_id=m.member_id AND r.sequence=i.sequence)")
-                .bind(&binding.context_id).bind(&binding.member_id).bind(&binding.member_id).bind(after).fetch_one(&mut *tx).await?;
+            let sequence:i64 = sqlx::query_scalar("SELECT COALESCE(MAX(sequence),0) FROM candidate_unread_items WHERE context_id=? AND recipient=? AND sequence>?")
+                .bind(&binding.context_id).bind(&binding.member_id).bind(after).fetch_one(&mut *tx).await?;
             if sequence > after {
                 changes.push(InboxChange {
                     context: binding.context_id.clone(),
@@ -198,6 +199,42 @@ impl Store {
         key: &str,
         body: &str,
     ) -> Result<i64> {
+        self.send_with_notice_interval(binding, room, key, body, DEFAULT_ROOM_NOTICE_INTERVAL)
+            .await
+    }
+
+    /// Return the verified report owner for policy resolution; peers use context defaults.
+    /// This is an authorization snapshot, not a grant reusable by a later send operation.
+    pub async fn room_notice_policy_owner(
+        &self,
+        binding: &SessionBinding,
+        room: &str,
+    ) -> Result<Option<(String, String)>> {
+        valid_id(room)?;
+        let mut tx = self.pool.begin().await?;
+        validate_on(&mut tx, binding).await?;
+        authorized_room(&mut tx, binding, room).await?;
+        let row: Option<(String, String)> = sqlx::query_as(
+            "SELECT m.member_id,m.role FROM candidate_connections c JOIN candidate_room_members r ON r.context_id=c.context_id AND r.room_id=c.room_id AND r.active=1 JOIN candidate_members m ON m.context_id=r.context_id AND m.member_id=r.member_id AND m.active=1 WHERE c.context_id=? AND c.room_id=? AND c.kind='report' AND m.role='repo_lead'",
+        ).bind(&binding.context_id).bind(room).fetch_optional(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+
+    /// Trusted connector supplies the room owner's effective live policy, never a model arg.
+    /// Information is generated in this send transaction; count never restricts a send.
+    pub async fn send_with_notice_interval(
+        &self,
+        binding: &SessionBinding,
+        room: &str,
+        key: &str,
+        body: &str,
+        interval: u64,
+    ) -> Result<i64> {
+        ensure!(
+            interval > 0 && interval <= i64::MAX as u64,
+            "invalid room notice interval"
+        );
         valid_id(room)?;
         valid_id(key)?;
         ensure!(
@@ -227,6 +264,11 @@ impl Store {
         let sequence = sqlx::query("INSERT INTO candidate_items(context_id,room_id,sender,kind,body,request_key) VALUES (?,?,?,'message',?,?) RETURNING sequence")
             .bind(&binding.context_id).bind(room).bind(&binding.member_id).bind(body).bind(key)
             .fetch_one(&mut *tx).await?.try_get("sequence")?;
+        let count: i64 = sqlx::query_scalar("UPDATE candidate_rooms SET participant_message_count=participant_message_count+1 WHERE context_id=? AND room_id=? AND participant_message_count<9223372036854775807 RETURNING participant_message_count")
+            .bind(&binding.context_id).bind(room).fetch_one(&mut *tx).await?;
+        if count % interval as i64 == 0 {
+            emit_room_notice(&mut tx, binding, room, count).await?;
+        }
         tx.commit().await?;
         Ok(sequence)
     }
@@ -240,7 +282,7 @@ impl Store {
             .bind(&binding.context_id).bind(&binding.member_id).bind(binding.epoch).fetch_optional(&mut *tx).await?;
         if let Some(reference) = pending {
             if batch_authorized(&mut tx, binding, &reference).await? {
-                let items = batch_items(&mut tx, &reference).await?;
+                let items = batch_items(&mut tx, binding, &reference).await?;
                 tx.commit().await?;
                 return Ok(Some(Batch { items, reference }));
             }
@@ -269,8 +311,8 @@ impl Store {
         'rounds: loop {
             let before = items.len();
             for room in &rooms {
-                let row = sqlx::query("SELECT i.sequence,i.room_id,i.sender,i.kind,i.body FROM candidate_items i WHERE i.context_id=? AND i.room_id=? AND i.sender<>? AND i.sequence>? AND NOT EXISTS (SELECT 1 FROM candidate_receipts r WHERE r.context_id=i.context_id AND r.member_id=? AND r.sequence=i.sequence) ORDER BY i.sequence LIMIT 1")
-                    .bind(&binding.context_id).bind(room).bind(&binding.member_id).bind(*after.get(room).unwrap_or(&0)).bind(&binding.member_id).fetch_optional(&mut *tx).await?;
+                let row = sqlx::query("SELECT sequence,room_id,sender,kind,body FROM candidate_unread_items WHERE context_id=? AND room_id=? AND recipient=? AND sequence>? ORDER BY sequence LIMIT 1")
+                    .bind(&binding.context_id).bind(room).bind(&binding.member_id).bind(*after.get(room).unwrap_or(&0)).fetch_optional(&mut *tx).await?;
                 if let Some(r) = row {
                     let item = Item {
                         sequence: r.try_get("sequence")?,
@@ -340,14 +382,18 @@ async fn batch_authorized(
     binding: &SessionBinding,
     reference: &str,
 ) -> Result<bool> {
-    let invalid: i64 = sqlx::query_scalar("SELECT count(*) FROM candidate_batch_items b JOIN candidate_items i ON i.sequence=b.sequence LEFT JOIN candidate_room_members m ON m.context_id=i.context_id AND m.room_id=i.room_id AND m.member_id=? WHERE b.reference=? AND (i.context_id<>? OR COALESCE(m.active,0)<>1)")
-        .bind(&binding.member_id).bind(reference).bind(&binding.context_id).fetch_one(conn).await?;
+    let invalid: i64 = sqlx::query_scalar("SELECT count(*) FROM candidate_batch_items b LEFT JOIN candidate_delivery_items d ON d.sequence=b.sequence AND d.context_id=? AND d.recipient=? WHERE b.reference=? AND d.sequence IS NULL")
+        .bind(&binding.context_id).bind(&binding.member_id).bind(reference).fetch_one(conn).await?;
     Ok(invalid == 0)
 }
 
-async fn batch_items(conn: &mut SqliteConnection, reference: &str) -> Result<Vec<Item>> {
-    let rows = sqlx::query("SELECT i.sequence,i.room_id,i.sender,i.kind,i.body FROM candidate_batch_items b JOIN candidate_items i ON i.sequence=b.sequence WHERE b.reference=? ORDER BY b.ordinal")
-        .bind(reference).fetch_all(conn).await?;
+async fn batch_items(
+    conn: &mut SqliteConnection,
+    binding: &SessionBinding,
+    reference: &str,
+) -> Result<Vec<Item>> {
+    let rows = sqlx::query("SELECT d.sequence,d.room_id,d.sender,d.kind,d.body FROM candidate_batch_items b JOIN candidate_delivery_items d ON d.sequence=b.sequence AND d.context_id=? AND d.recipient=? WHERE b.reference=? ORDER BY b.ordinal")
+        .bind(&binding.context_id).bind(&binding.member_id).bind(reference).fetch_all(conn).await?;
     rows.into_iter()
         .map(|r| {
             Ok(Item {
@@ -359,6 +405,35 @@ async fn batch_items(conn: &mut SqliteConnection, reference: &str) -> Result<Vec
             })
         })
         .collect()
+}
+
+async fn emit_room_notice(
+    conn: &mut SqliteConnection,
+    binding: &SessionBinding,
+    room: &str,
+    count: i64,
+) -> Result<()> {
+    let recipients: Vec<String> = sqlx::query_scalar(
+        "SELECT r.member_id FROM candidate_connections c JOIN candidate_room_members r ON r.context_id=c.context_id AND r.room_id=c.room_id AND r.active=1 JOIN candidate_members m ON m.context_id=r.context_id AND m.member_id=r.member_id AND m.active=1 WHERE c.context_id=? AND c.room_id=? AND (c.kind='peer' OR (c.kind='report' AND m.role='repo_lead')) ORDER BY r.member_id",
+    ).bind(&binding.context_id).bind(room).fetch_all(&mut *conn).await?;
+    if recipients.is_empty() {
+        return Ok(()); // Untyped fixture rooms do not invent an owner or peer relationship.
+    }
+    let body = format!("Info: {count} messages. No action required. Keep this room focused on its coordination purpose; use a new linked room if that purpose changes.");
+    let sequence: i64 = sqlx::query_scalar("INSERT INTO candidate_items(context_id,room_id,sender,kind,body) VALUES (?,?,?,'message',?) RETURNING sequence")
+        .bind(&binding.context_id).bind(room).bind(&binding.member_id).bind(body)
+        .fetch_one(&mut *conn).await?;
+    sqlx::query("INSERT INTO candidate_room_notices(sequence,context_id,room_id,message_count) VALUES (?,?,?,?)")
+        .bind(sequence).bind(&binding.context_id).bind(room).bind(count)
+        .execute(&mut *conn).await?;
+    for recipient in recipients {
+        sqlx::query("INSERT INTO candidate_notice_recipients(sequence,member_id) VALUES (?,?)")
+            .bind(sequence)
+            .bind(recipient)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(())
 }
 
 async fn authorized_room(

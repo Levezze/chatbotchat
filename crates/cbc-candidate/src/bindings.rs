@@ -271,10 +271,9 @@ impl Store {
         .fetch_one(&mut *tx)
         .await?;
         let first_unread_sequence: Option<i64> = sqlx::query_scalar(
-            "SELECT MIN(i.sequence) FROM candidate_items i JOIN candidate_room_members m ON m.context_id=i.context_id AND m.room_id=i.room_id WHERE m.context_id=? AND m.member_id=? AND m.active=1 AND i.sender<>? AND NOT EXISTS (SELECT 1 FROM candidate_receipts r WHERE r.context_id=i.context_id AND r.member_id=m.member_id AND r.sequence=i.sequence)",
+            "SELECT MIN(sequence) FROM candidate_unread_items WHERE context_id=? AND recipient=?",
         )
         .bind(&binding.context_id)
-        .bind(&binding.member_id)
         .bind(&binding.member_id)
         .fetch_one(&mut *tx)
         .await?;

@@ -555,9 +555,28 @@ async fn dispatch(
             },
             None => Reply::Empty,
         },
-        Operation::Send { room, key, body } => Reply::Sent {
-            sequence: store.send(&binding, &room, &key, &body).await?,
-        },
+        Operation::Send { room, key, body } => {
+            // Cadence belongs to the report parent or the shared peer context, never
+            // whichever participant happens to send the threshold-crossing message.
+            let owner = store.room_notice_policy_owner(&binding, &room).await?;
+            let snapshot = settings
+                .lock()
+                .map_err(|_| anyhow::anyhow!("settings unavailable"))?
+                .refresh();
+            let (member, role) = owner
+                .as_ref()
+                .map(|(member, role)| (member.as_str(), role.as_str()))
+                .unwrap_or(("", ""));
+            let interval = snapshot
+                .effective(&binding.context_id, role, member)
+                .policy
+                .room_notice_every_messages;
+            Reply::Sent {
+                sequence: store
+                    .send_with_notice_interval(&binding, &room, &key, &body, interval)
+                    .await?,
+            }
+        }
         Operation::Receipt { reference } => {
             store.receipt(&binding, &reference).await?;
             Reply::Receipted

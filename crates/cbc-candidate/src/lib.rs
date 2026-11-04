@@ -32,7 +32,7 @@ const FILES: [&str; 14] = [
     "owner.key",
 ];
 pub const APPLICATION_ID: u32 = 0x43424332;
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

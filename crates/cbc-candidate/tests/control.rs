@@ -113,6 +113,14 @@ async fn live_owner_provisioning_discovery_and_settings_share_the_running_core()
         PolicyPatch {
             retry_initial_ms: Some(125),
             retry_max_ms: Some(500),
+            room_notice_every_messages: Some(99),
+        },
+    );
+    update.members.entry("test".into()).or_default().insert(
+        "lead".into(),
+        PolicyPatch {
+            room_notice_every_messages: Some(2),
+            ..PolicyPatch::default()
         },
     );
     let changed = owner
@@ -125,6 +133,28 @@ async fn live_owner_provisioning_discovery_and_settings_share_the_running_core()
         125
     );
     assert_eq!(lead.settings().await.unwrap().policy.retry_initial_ms, 1000);
+    // Room cadence uses the report parent's live settings, not the sending child's99.
+    feature
+        .send(&connected.room, "two", "threshold integration marker")
+        .await
+        .unwrap();
+    let notices = lead.check().await.unwrap().unwrap();
+    assert_eq!(
+        notices
+            .items
+            .iter()
+            .filter(|item| item.kind == "room_notice")
+            .count(),
+        1
+    );
+    lead.receipt(&notices).await.unwrap();
+    if let Some(child_items) = feature.check().await.unwrap() {
+        assert!(child_items
+            .items
+            .iter()
+            .all(|item| item.kind != "room_notice"));
+        feature.receipt(&child_items).await.unwrap();
+    }
     assert!(owner
         .update_settings(&initial.revision, initial.settings)
         .await

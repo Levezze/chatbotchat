@@ -27,3 +27,15 @@ and `two` bound at epoch 1, and room `original-room`. No native or daily data
 was used, and its random credentials were not retained.
 SHA-256: `88dea257a15ca375e3f77e249cd51971b1bae856810b0c370f9bae8fe3c6a859`.
 The capture example refuses any newer schema or existing destination.
+
+## Synthetic v4 upgrade fixture
+
+`store-v4.sqlite3` was captured on 2026-11-04 using the already-built actual schema-4
+candidate server, before migration 0005 was added. A private temporary root was provisioned
+through its owner socket with synthetic Repo Lead `lead` and Feature Leads `child`/`peer`,
+context `v4-upgrade-kept`, device `fixture-device`, report scope `fixture-feature` and peer
+scope `fixture-contract`. It contains 99 normal report sends plus two deterministic
+connection introductions. The server shut down gracefully before the closed database was
+copied; header/migration max 4 and foreign keys were verified. Temporary credentials/root
+were removed, and no native sessions or daily data were used.
+SHA-256: `34c80845d07d5320f7f37b733f509e704d108b59017518fd10edeea002d18233`.
