@@ -1,0 +1,3 @@
+# Claude generates these from the native build when loading --plugin-dir.
+/.claude-plugin/types/
+/tsconfig.json
