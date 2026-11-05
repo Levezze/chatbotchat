@@ -97,9 +97,15 @@ impl Fixture {
     fn spec(&self) -> PathBuf {
         self.document("provision-input.json", &json!({"context":"demo","device":"laptop",
             "members":[{"member":"owner","role":"repo_lead","host":"codex","session":"native-session",
-                "evidence_ref":"actual-host-reference","repository":"api","label":"api owner","summary":"Disposable enrollment"}],
+                "evidence_ref":"actual-host-reference","repository":"api","label":"api owner","summary":"Disposable enrollment", "target":target()}],
             "grants":[]}))
     }
+}
+
+fn target() -> Value {
+    json!({"v":1,"profile":"unknown","repository":"api","worktree":null,
+        "cwd":"/fixtures/api","saved_project":{"status":"not_exposed"},
+        "saved_environment":{"status":"not_exposed"},"placement":{"evidence_ref":"synthetic-ui-observation"}})
 }
 
 impl Drop for Fixture {
@@ -136,7 +142,7 @@ fn provisions_against_live_store_and_prints_only_private_profile_location() {
     let private: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(
         private["targets"],
-        json!([{"session":"native-session","host":"codex"}])
+        json!([{"session":"native-session","host":"codex","target":target()}])
     );
     assert!(private["bindings"][0]["token"]
         .as_str()

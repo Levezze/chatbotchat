@@ -14,6 +14,8 @@ Follow the [current lifecycle and room policy](../../docs/design/cbc-agent-lifec
 For #113 enrollment, record the configured target, actual host/device/native session, repository
 and saved project/environment evidence where supported. Verify execution target and UI grouping
 separately. A matching folder or a headless transcript does not qualify the chosen Desktop environment.
+Read [the native target contract](NATIVE_TARGETS.md) for the mandatory owner target, v2 private
+profile and current per-host observation limits before provisioning.
 
 Milestone notices are implemented. Send beyond 100 and 200 distinct
 messages without an extension/approval/pause, verify parent-only report notices and both-peer
@@ -99,8 +101,8 @@ input must then rearm the mod and recover the marker. The recorded CLI Stop inte
 exceeded 85 seconds. For CLI exit/resume, exit through `/exit`, verify the actual process
 is gone, send while absent, then launch public `--resume ACTUAL_UUID` with the same project
 and session flags. Require a newly corroborated PID and automatic pending recovery without
-reprovisioning or another send. That CLI probe passed. Desktop Stop/app-quit remains a
-separate, unproven probe; operator-initiated CLI resume does not prove autonomous restart.
+reprovisioning or another send. That CLI probe passed. Desktop Stop/rearm and single-engine
+exit/reopen also passed separately; full app quit and autonomous restart remain unproven.
 
 ## Enroll once and start the shared driver
 
@@ -108,8 +110,8 @@ Write `ROOT/provision.json` privately using the following shape. Replace every `
 
 ```json
 {"context":"cbc113-test","device":"test-device","members":[
- {"member":"test-primarch","role":"repo_lead","host":"codex","session":"ACTUAL_CODEX_UUID","evidence_ref":"ACTUAL_CODEX_EVIDENCE_REF","repository":"cbc-test","label":"Test Primarch","summary":"Disposable delivery test"},
- {"member":"test-chapter","role":"feature_lead","host":"claude","session":"ACTUAL_CLAUDE_SESSION","evidence_ref":"ACTUAL_CLAUDE_EVIDENCE_REF","repository":"cbc-test","label":"Test Chapter Master","summary":"Disposable delivery test"}
+ {"member":"test-primarch","role":"repo_lead","host":"codex","session":"ACTUAL_CODEX_UUID","evidence_ref":"ACTUAL_CODEX_EVIDENCE_REF","repository":"cbc-test","label":"Test Primarch","summary":"Disposable delivery test","target":{"v":1,"profile":"unknown","repository":"cbc-test","worktree":null,"cwd":"/ACTUAL/CODEX/PROJECT","saved_project":{"status":"not_exposed"},"saved_environment":{"status":"not_exposed"},"placement":{"evidence_ref":"ACTUAL_CODEX_PLACEMENT_REF"}}},
+ {"member":"test-chapter","role":"feature_lead","host":"claude","session":"ACTUAL_CLAUDE_SESSION","evidence_ref":"ACTUAL_CLAUDE_EVIDENCE_REF","repository":"cbc-test","label":"Test Chapter Master","summary":"Disposable delivery test","target":{"v":1,"profile":"desktop","repository":"cbc-test","worktree":null,"cwd":"/ACTUAL/CLAUDE/PROJECT","saved_project":{"status":"not_exposed"},"saved_environment":{"status":"not_exposed"},"placement":{"evidence_ref":"ACTUAL_CLAUDE_PLACEMENT_REF"}}}
 ],"grants":[{"requester":"test-chapter","target":"test-primarch","kind":"report","scope_ref":"delivery-test"}]}
 ```
 
@@ -119,7 +121,9 @@ rtk proxy "$CBC113_BIN" provision --root "$CBC113_ROOT" --protected-db "$CBC113_
 rtk proxy python3 -B -I "$CBC113_REPO/crates/cbc-candidate/adapters/device/router.py" --profile "$CBC113_ROOT/device-profile.json" --listen "$CBC113_ROOT/device.sock" --sessions-dir /ACTUAL/CLAUDE/SESSIONS --codex-executable /ACTUAL/INSTALLED/CODEX --log-dir "$CBC113_ROOT/device-log"
 ```
 
-Provisioning prints only paths/counts. Do not retry an uncertain provision against the same members or delete its output reservation to force replay. Preserve evidence and resolve custody first. The driver uses the same private profile for both hosts and stays in its terminal. `connector.sock` is core RPC; `device.sock` is the shared driver. Never point either adapter at daily CBC.
+Use `profile:"cli"` for an observed Claude CLI entrypoint. Provisioning rejects unsupported
+Codex execution-profile claims or configured saved selectors before changing state. Its output
+profile is v2 and includes each complete target. Provisioning prints only paths/counts. Do not retry an uncertain provision against the same members or delete its output reservation to force replay. Preserve evidence and resolve custody first. The driver uses the same private profile for both hosts and stays in its terminal. `connector.sock` is core RPC; `device.sock` is the shared driver. Never point either adapter at daily CBC.
 
 ## Delivery sequence and proof
 
@@ -134,6 +138,15 @@ Use unique bodies `CASE-M1-codex-to-claude`, `CASE-M2-claude-to-codex`, `CASE-M3
 5. Close a disposable native chat and send another marker. Record `dormant` separately. Codex `queue` exit 0 is only queue acceptance. A Claude channel write is only delivery to a live channel. Neither proves that a closed Desktop chat woke. Resume through supported host actions, then verify pending recovery.
 
 Preserve sanitized adapter/core evidence of the receipt and a following empty check. Do not extract receipt tokens into the evidence log. An unavailable adapter, missing consent, unsupported metadata or dormant wake is a limitation, never an empty inbox or PASS. CLI acceptance does not substitute for either Desktop app.
+
+### Target drift probe
+
+After successful v2 native delivery, preserve the exact private profile. Change only one
+target field while keeping credentials/epoch fixed, then call the native adapter. Require
+rejection with no receiver receipt progress. A device SIGHUP refresh must also reject drift
+and retain its prior registry. Restore the exact profile and require normal recovery. The
+core's target for that epoch is the authority; changing a local file is not re-enrollment.
+Use only the disposable case and preserve all private evidence.
 
 ## Change policy without restart
 

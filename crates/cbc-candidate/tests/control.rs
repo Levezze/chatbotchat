@@ -37,13 +37,16 @@ async fn live_owner_provisioning_discovery_and_settings_share_the_running_core()
         .is_err());
 
     // This is explicit trusted synthetic setup. Evidence labels do not prove native identity.
+    let target = serde_json::json!({"v":1,"profile":"unknown","repository":"repo","worktree":null,
+        "cwd":"/fixtures/repo","saved_project":{"status":"not_exposed"},
+        "saved_environment":{"status":"not_exposed"},"placement":{"evidence_ref":"synthetic-ui-observation"}});
     let spec: ProvisionSpec = serde_json::from_value(serde_json::json!({
         "context":"test", "device":"fixture-device",
         "members":[
             {"member":"lead","role":"repo_lead","host":"codex","session":"lead-native",
-             "evidence_ref":"synthetic-owned-session","repository":"repo","label":"repo lead","summary":"coordination"},
+             "evidence_ref":"synthetic-owned-session","repository":"repo","label":"repo lead","summary":"coordination","target":target},
             {"member":"feature","role":"feature_lead","host":"claude","session":"feature-native",
-             "evidence_ref":"synthetic-owned-session","repository":"repo","label":"feature lead","summary":"one assignment"}
+             "evidence_ref":"synthetic-owned-session","repository":"repo","label":"feature lead","summary":"one assignment","target":target}
         ],
         "grants":[{"requester":"feature","target":"lead","kind":"report","scope_ref":"assignment-one"}]
     })).unwrap();

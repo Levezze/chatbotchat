@@ -1,5 +1,12 @@
 # Claude adapter and native router (candidate)
 
+For current shared delivery, use the [device driver](../device/README.md) and
+[native mod](mod/README.md). Before provisioning or diagnosing a target mismatch, read
+[the native target contract](../../NATIVE_TARGETS.md). The shared driver checks actual host
+and shim cwd plus native entrypoint against the core's epoch-bound target. The private-socket
+sections below preserve historical probe results and do not describe its delivery fallback.
+Current native results are in [EVIDENCE.md](../../EVIDENCE.md).
+
 ## Opt-in documented MCP channel
 
 For disposable channel testing, set `CBC_CANDIDATE_CHANNEL=1` in this adapter's isolated MCP
@@ -64,10 +71,11 @@ The router repeats these checks on every connection:
 4. The record's `sessionId` selects a binding from the profile. No binding means
    `unregistered`; any failed check means `unbound`.
 
-The profile must be a regular, single-link, 0600 file of at most 64 KiB, owned by this
+The profile must be a regular, single-link, 0600 file of at most 128 KiB, owned by this
 user and opened without following symlinks. Each native session may appear once.
 
-The profile is written by Codex's `seed_native_fixture`. It is read privately and its
+Current profiles are written by trusted owner provisioning. `seed_native_fixture` was the
+historical probe setup. The profile is read privately and its
 tokens are never logged. Bindings are per native session: an adapter restart reuses
 them and never rebinds, so epochs do not churn when Desktop relaunches a chat.
 

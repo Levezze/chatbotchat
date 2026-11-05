@@ -19,6 +19,7 @@ HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("device_router", HERE / "router.py")
 device = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(device)
+VERIFY_TARGET_REGISTRY = device.DeviceRouter.verify_target_registry
 SESSION = "11111111-1111-4111-8111-111111111111"
 CLAUDE = "22222222-2222-4222-8222-222222222222"
 HINT = {"context": "project", "member": "codex", "sequence": 7}
@@ -29,11 +30,21 @@ def binding(member, session):
             "epoch": 1, "token": "cbcc1_" + "a" * 64}
 
 
+def execution_target(cwd, profile="unknown"):
+    return {"v": 1, "profile": profile, "repository": "cbc-test", "worktree": None,
+            "cwd": str(cwd), "saved_project": {"status": "not_exposed"},
+            "saved_environment": {"status": "not_exposed"},
+            "placement": {"evidence_ref": "synthetic-unit-evidence"}}
+
+
 class DeviceTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="cbc-device-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        verified = patch.object(device.DeviceRouter, "verify_target_registry", return_value=None)
+        verified.start()
+        self.addCleanup(verified.stop)
         os.chmod(self.root, 0o700)
         self.path = self.root / "device.json"
         self.profile = {"v": 1, "core_socket": str(self.root / "connector.sock"), "bindings": [
@@ -59,6 +70,111 @@ class DeviceTests(unittest.TestCase):
         self.assertEqual(core, self.profile["core_socket"])
         self.assertEqual(set(bindings), {SESSION, CLAUDE})
         self.assertEqual(targets, {SESSION: "codex", CLAUDE: "claude"})
+
+    def test_v2_targets_are_required_and_strict_while_v1_remains_legacy(self):
+        self.profile["v"] = 2
+        for entry in self.profile["targets"]:
+            entry["target"] = execution_target(self.root)
+        self.save()
+        core, bindings, hosts, native = device.load_targets(str(self.path), with_native=True)
+        self.assertEqual(native[CLAUDE]["target"]["cwd"], str(self.root))
+        self.assertEqual(device.claude.load_profile(str(self.path), with_targets=True)[2], native)
+        original = json.loads(json.dumps(self.profile))
+        for field, value in (("v", True), ("cwd", "/tmp/../wrong"), ("cwd", "/tmp//wrong"),
+                             ("worktree", "/unrelated"), ("profile", "desktop-inferred"),
+                             ("saved_project", {"status": "not_exposed", "id": "invented"}),
+                             ("placement", {"evidence_ref": "x", "authority": True})):
+            self.profile = json.loads(json.dumps(original))
+            self.profile["targets"][1]["target"][field] = value
+            self.save()
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                device.load_targets(str(self.path))
+        self.profile = original
+        del self.profile["targets"][1]["target"]
+        self.save()
+        with self.assertRaises(ValueError):
+            device.load_targets(str(self.path))
+
+    def test_kernel_cwd_observation_matches_current_process_and_fails_missing_pid(self):
+        target = device.claude.native_target
+        self.assertEqual(target.process_cwd(os.getpid()), os.path.realpath(os.getcwd()))
+        self.assertIsNone(target.process_cwd(2147483647))
+
+    def test_expected_paths_are_not_recanonicalized_or_placement_used_as_authority(self):
+        target = device.claude.native_target
+        actual = os.path.realpath(self.root)
+        expected = execution_target(actual)
+        observed = {"cwd": actual, "profile": "unknown", "saved_project": None,
+                    "saved_environment": None}
+        self.assertTrue(target.match_target(expected, observed))
+        expected["placement"]["project_label"] = "Some desktop project"
+        expected["profile"] = "desktop"
+        self.assertFalse(target.match_target(expected, observed))
+        expected["profile"] = "unknown"
+        expected["saved_project"] = {"status": "configured", "id": "not-observable"}
+        self.assertFalse(target.match_target(expected, observed))
+        expected["saved_project"] = {"status": "not_exposed"}
+        alias = self.root / "alias"
+        alias.symlink_to(self.root, target_is_directory=True)
+        expected["cwd"] = str(alias)
+        self.assertFalse(target.match_target(expected, observed))
+
+    def test_placement_audit_ids_roundtrip_without_satisfying_runtime_constraints(self):
+        target = device.claude.native_target
+        expected = execution_target(os.path.realpath(self.root))
+        expected["placement"].update(project_id="owner-observed-project",
+                                     environment_id="owner-observed-environment")
+        observed = {"cwd": expected["cwd"], "profile": "unknown",
+                    "saved_project": None, "saved_environment": None}
+        self.assertEqual(target.validate_target(json.loads(json.dumps(expected))), expected)
+        self.assertTrue(target.match_target(expected, observed))
+        for selector, audit_key in (("saved_project", "project_id"),
+                                   ("saved_environment", "environment_id")):
+            expected[selector] = {"status": "configured", "id": expected["placement"][audit_key]}
+            self.assertFalse(target.match_target(expected, observed))
+            expected[selector] = {"status": "not_exposed"}
+        for key in ("project_id", "environment_id"):
+            original = expected["placement"][key]
+            for invalid in (None, True, "", "x" * 129, "bad\x00id"):
+                expected["placement"][key] = invalid
+                with self.subTest(key=key, invalid=invalid), self.assertRaises(ValueError):
+                    target.validate_target(expected)
+            expected["placement"][key] = original
+        expected["placement"]["unrecognized_id"] = "must-not-pass"
+        with self.assertRaises(ValueError):
+            target.validate_target(expected)
+
+    def test_startup_and_refresh_require_explicit_authoritative_target_agreement(self):
+        strong = execution_target(os.path.realpath(self.root), "desktop")
+        invalid = [{"type": "binding_status"}, {"type": "error"},
+                   {"type": "binding_status", "native_target": strong}]
+        for status in invalid:
+            with self.subTest(status=status), patch.object(device.DeviceRouter,
+                    "verify_target_registry", VERIFY_TARGET_REGISTRY), patch.object(
+                    device.DeviceRouter, "read_wake_status", return_value=status):
+                with self.assertRaisesRegex(ValueError, "core binding authority"):
+                    device.DeviceRouter(self.args())
+        router = device.DeviceRouter(self.args())
+        self.addCleanup(self.cleanup_router, router)
+        original = dict(router.all_bindings)
+        router.verify_target_registry = VERIFY_TARGET_REGISTRY.__get__(router)
+        self.profile["bindings"][0]["epoch"] = 2
+        self.save()
+        with patch.object(router, "read_wake_status", return_value={"type": "binding_status"}):
+            with self.assertRaises(ValueError):
+                router.refresh_profile()
+        self.assertEqual(router.all_bindings, original)
+
+    def test_profile_edit_and_v1_downgrade_cannot_weaken_persisted_epoch_target(self):
+        persisted = execution_target(os.path.realpath(self.root), "desktop")
+        edited = json.loads(json.dumps(persisted))
+        edited["profile"] = "unknown"
+        status = {"type": "binding_status", "native_target": persisted}
+        self.assertFalse(device.claude.native_target.target_agrees(edited, status))
+        self.assertFalse(device.claude.native_target.target_agrees(None, status))
+        self.assertTrue(device.claude.native_target.target_agrees(persisted, status))
+        self.assertTrue(device.claude.native_target.target_agrees(None,
+            {"type": "binding_status", "native_target": None}))
 
     def test_valid_profile_above_64k_is_accepted_but_128k_bound_remains(self):
         self.path.write_text(json.dumps(self.profile) + " " * (70 * 1024))
@@ -507,6 +623,87 @@ class NativeHttpTests(DeviceTests):
         self.assertEqual(client.recv(4096), b'{"type":"changed"}\n')
         self.assertEqual(len(self.calls), 1)
 
+    def test_v2_http_wake_checks_actual_cwd_record_and_literal_entrypoint(self):
+        actual = os.path.realpath(self.root)
+        expected = execution_target(actual, "cli")
+        self.router.native_targets[CLAUDE] = {"host": "claude", "target": expected}
+        self.record.update(cwd=actual, entrypoint="cli")
+        self.save_record()
+        self.state["first_unread_sequence"] = 7
+        with patch.object(device.claude.native_target, "process_cwd", return_value=actual):
+            self.assertEqual(self.exchange()[0], 200)
+            for field, value in (("profile", "desktop"), ("cwd", actual + "/different"),
+                                 ("saved_environment", {"status": "configured", "id": "not-exposed"})):
+                original = expected[field]
+                expected[field] = value
+                self.calls.clear()
+                with self.subTest(field=field):
+                    self.assertEqual(self.exchange(), (401, None))
+                    self.assertEqual(self.calls, [])
+                expected[field] = original
+            self.record["cwd"] = actual + "/false-host-record"
+            self.save_record()
+            self.assertEqual(self.exchange(), (401, None))
+            self.record["cwd"] = actual
+            self.record["entrypoint"] = "desktop"
+            self.save_record()
+            expected["profile"] = "desktop"
+            self.assertEqual(self.exchange(), (401, None))
+
+    def test_v2_mcp_target_mismatch_blocks_every_operation_before_core(self):
+        actual = os.path.realpath(self.root)
+        expected = execution_target(actual, "desktop")
+        self.router.native_targets[CLAUDE] = {"host": "claude", "target": expected}
+        observed = {"session": CLAUDE, "cwd": actual, "profile": "cli",
+                    "saved_project": None, "saved_environment": None}
+        self.router.core_call = lambda *_args: self.fail("mismatched target reached core")
+        with patch.object(device.claude.native_target, "claude_observation", return_value=observed):
+            for op in ("hello", "subscribe", "check", "send", "receipt", "discover", "connect"):
+                with self.subTest(op=op):
+                    self.assertEqual(self.mcp_request({"v": 1, "op": op}),
+                                     {"error": "native execution target mismatch"})
+            expected["profile"] = "cli"
+            requests = []
+            self.router.core_call = lambda _binding, request: requests.append(request) or {"type": "empty"}
+            self.assertEqual(self.mcp_request({"v": 1, "op": "check"}), {"items": []})
+            self.assertEqual(requests, [{"op": "check"}])
+
+    def test_v2_native_observation_refuses_adapter_cwd_and_pid_reuse(self):
+        actual = os.path.realpath(self.root)
+        self.record.update(cwd=actual, entrypoint="cli")
+        self.save_record()
+        target = device.claude.native_target
+        child_pid = self.pid + 1
+        def facts(pid):
+            if pid == self.pid:
+                return dict(self.facts)
+            if pid == child_pid:
+                return {"uid": os.getuid(), "start": self.start, "ppid": self.pid}
+        def cwd(pid):
+            return actual if pid == self.pid else actual + "/wrong-adapter"
+        self.assertIsNone(target.claude_observation(self.pid, os.getuid(), self.sessions,
+            facts, device.claude.record_start, adapter_pid=child_pid, cwd_provider=cwd))
+        calls = 0
+        def replaced(pid):
+            nonlocal calls
+            calls += 1
+            return dict(self.facts, start=self.start + (calls > 1))
+        self.assertIsNone(target.claude_observation(self.pid, os.getuid(), self.sessions,
+            replaced, device.claude.record_start, cwd_provider=lambda _pid: actual))
+
+    def test_http_wake_refuses_missing_or_stronger_authoritative_target(self):
+        self.router.wake_status = device.DeviceRouter.wake_status.__get__(self.router)
+        self.router.read_wake_status = lambda *_args: dict(self.state)
+        self.state["first_unread_sequence"] = 7
+        # Legacy profile cannot treat an absent field as legacy authority.
+        self.assertEqual(self.exchange(), (401, None))
+        self.state["native_target"] = execution_target(os.path.realpath(self.root), "desktop")
+        self.assertEqual(self.exchange(), (401, None))
+        self.state["native_target"] = None
+        self.assertEqual(self.exchange()[0], 200)
+        self.state = {"type": "error"}
+        self.assertEqual(self.exchange(), (503, None))
+
     def test_revocation_during_wait_and_shutdown_cancel_promptly(self):
         for stop in (False, True):
             with self.subTest(shutdown=stop), patch.object(device.native, "WAIT_SECONDS", 2):
@@ -581,7 +778,7 @@ class NativeHttpTests(DeviceTests):
                 conn, _ = listener.accept()
                 with conn:
                     observed.append(json.loads(device.claude.read_frame(conn)))
-                    conn.sendall(b'{"type":"binding_status","first_unread_sequence":7}\n')
+                    conn.sendall(b'{"type":"binding_status","first_unread_sequence":7,"native_target":null}\n')
         server = threading.Thread(target=core)
         server.start()
         self.addCleanup(server.join, 2)

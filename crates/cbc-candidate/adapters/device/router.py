@@ -35,7 +35,7 @@ codex = load_module("cbc_device_codex", ADAPTERS / "codex/queue_delivery.py")
 native = load_module("cbc_device_native_http", ADAPTERS / "device/native_http.py")
 
 
-def load_targets(path):
+def load_targets(path, with_native=False):
     if not Path(path).is_absolute():
         raise ValueError("device profile path must be explicit and absolute")
     before = os.lstat(path)
@@ -53,7 +53,7 @@ def load_targets(path):
         raise ValueError("device profile too large")
     profile = json.loads(raw)
     if (not isinstance(profile, dict) or set(profile) != {"v", "core_socket", "bindings", "targets"}
-            or type(profile["v"]) is not int or profile["v"] != 1 or not isinstance(profile["bindings"], list)
+            or type(profile["v"]) is not int or profile["v"] not in (1, 2) or not isinstance(profile["bindings"], list)
             or not 1 <= len(profile["bindings"]) <= shared.MAX_BINDINGS
             or not isinstance(profile["core_socket"], str)
             or not os.path.isabs(profile["core_socket"]) or not isinstance(profile["targets"], list)):
@@ -77,22 +77,16 @@ def load_targets(path):
             raise ValueError("duplicate device binding")
         bindings[session] = binding
         members.add(key)
-    targets = {}
-    for target in profile["targets"]:
-        if (not isinstance(target, dict) or set(target) != {"session", "host"}
-                or not isinstance(target["session"], str)
-                or target["host"] not in ("codex", "claude")
-                or target["session"] in targets):
-            raise ValueError("invalid device target")
-        targets[target["session"]] = target["host"]
-    if set(targets) != set(bindings):
-        raise ValueError("every binding needs exactly one explicit host target")
+    native_targets = claude.native_target.parse_targets(profile, bindings)
+    targets = {session: entry["host"] for session, entry in native_targets.items()}
+    if with_native:
+        return profile["core_socket"], bindings, targets, native_targets
     return profile["core_socket"], bindings, targets
 
 
 class DeviceRouter(claude.Router):
     def __init__(self, args):
-        core, bindings, targets = load_targets(args.profile)
+        core, bindings, targets, native_targets = load_targets(args.profile, with_native=True)
         queued = {}
         # Validate all host targets before the inherited router allocates sockets.
         for session, host in targets.items():
@@ -101,7 +95,7 @@ class DeviceRouter(claude.Router):
                     raise ValueError("an explicit Codex executable is required for Codex targets")
                 queued[session] = codex.QueueDelivery(args.codex_executable, session)
         super().__init__(args)
-        if self.core != core or self.bindings != bindings:
+        if self.core != core or self.bindings != bindings or self.native_targets != native_targets:
             self.wake_read.close()
             self.wake_write.close()
             raise ValueError("device profile changed during startup")
@@ -212,6 +206,8 @@ class DeviceRouter(claude.Router):
             session = claude.corroborate(pid, uid, self.sessions_dir)
             binding = self.native_binding(session)
             if session and binding and any(self.native_notification_mode(session)):
+                if not self.target_allowed(session, pid, uid):
+                    return {"error": "native execution target mismatch"}
                 if request != {"v": 1, "op": "hello"} or type(request.get("v")) is not int:
                     return {"error": "invalid request"}
                 reply = self.notify(session, force=True)
@@ -227,8 +223,11 @@ class DeviceRouter(claude.Router):
         return super().handle_request(conn, pid, uid, raw=raw)
 
     def native_identity(self, pid, uid):
-        return native.corroborate_native(pid, uid, self.sessions_dir,
-                                         claude.procinfo, claude.record_start)
+        session = native.corroborate_native(pid, uid, self.sessions_dir,
+                                           claude.procinfo, claude.record_start)
+        if session and self.target_allowed(session, pid, uid, direct=True):
+            return session
+        return None
 
     def native_binding(self, session):
         with self.registry_lock:
@@ -236,7 +235,25 @@ class DeviceRouter(claude.Router):
                 return None
             return self.all_bindings.get(session)
 
+    def verify_target_registry(self, bindings, targets):
+        for session, binding in bindings.items():
+            status = self.read_wake_status(binding, 2.0)
+            if not claude.native_target.target_agrees(targets[session]["target"], status):
+                raise ValueError("native target disagrees with core binding authority")
+
     def wake_status(self, binding, timeout):
+        status = self.read_wake_status(binding, timeout)
+        with self.registry_lock:
+            expected = self.native_targets.get(binding["session"])
+            current = self.all_bindings.get(binding["session"])
+        if (current != binding or expected is None
+                or not claude.native_target.target_agrees(expected["target"], status)):
+            if status.get("type") == "error":
+                return status
+            return {"type": "error", "code": "native_target_mismatch"}
+        return status
+
+    def read_wake_status(self, binding, timeout):
         """A bounded non-consuming core call, independent of MCP's long timeout."""
         deadline = time.monotonic() + timeout
         with socket.socket(socket.AF_UNIX) as connection:
@@ -301,7 +318,7 @@ class DeviceRouter(claude.Router):
             if remaining <= 0:
                 return native.response(204)
             reply = self.wake_status(binding, min(2.0, remaining))
-            if reply.get("type") == "error" and reply.get("code") == "invalid_binding":
+            if reply.get("type") == "error" and reply.get("code") in ("invalid_binding", "native_target_mismatch"):
                 return native.response(401)
             if reply.get("type") != "binding_status" or "first_unread_sequence" not in reply:
                 return native.response(503)
@@ -319,7 +336,7 @@ class DeviceRouter(claude.Router):
                 if remaining <= 0:
                     return native.response(503)
                 fresh = self.wake_status(binding, min(2.0, remaining))
-                if fresh.get("type") == "error" and fresh.get("code") == "invalid_binding":
+                if fresh.get("type") == "error" and fresh.get("code") in ("invalid_binding", "native_target_mismatch"):
                     return native.response(401)
                 if fresh.get("type") != "binding_status" or "first_unread_sequence" not in fresh:
                     return native.response(503)
@@ -423,9 +440,10 @@ class DeviceRouter(claude.Router):
 
     def refresh_profile(self):
         """Explicit SIGHUP lifecycle refresh; reject malformed profiles atomically."""
-        core, bindings, targets = load_targets(self.profile_path)
+        core, bindings, targets, native_targets = load_targets(self.profile_path, with_native=True)
         if core != self.core:
             raise ValueError("profile refresh cannot change the core endpoint")
+        self.verify_target_registry(bindings, native_targets)
         queued, handlers = {}, {}
         with self.registry_lock:
             for session, binding in bindings.items():
@@ -441,6 +459,7 @@ class DeviceRouter(claude.Router):
                     callback.status_provider = lambda binding=binding: self.core_call(binding, {"op": "binding_status"})
                     queued[session] = handlers[key] = callback
             self.all_bindings, self.targets, self.queued, self.handlers = bindings, targets, queued, handlers
+            self.native_targets = native_targets
             self.quarantined = set()
             self.install_registry()
         self.event("profile_refreshed", targets=len(bindings))

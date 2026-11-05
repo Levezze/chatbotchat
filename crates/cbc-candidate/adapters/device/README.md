@@ -18,24 +18,27 @@ still use its bound MCP adapter directly against the candidate core. Claude shim
 device socket and existing process corroboration. One parked core watch covers all enrolled
 members, with two delivery workers, rather than a receiving process per chat or room.
 
-No native-app acceptance is claimed by this implementation. The executable has not been
-started against real chats as part of its unit tests. It has not changed global MCP settings,
-native trust, daily CBC, active rooms or any agent's permissions.
+Actual Desktop and CLI results are recorded in [EVIDENCE.md](../../EVIDENCE.md), separately
+from synthetic suites. These runs leave daily CBC, active project agents and native
+permission settings unchanged.
 
 ## Explicit profile and startup
 
 Trusted owner provisioning must produce a private, owned, single-link mode-0600 JSON profile
 inside the candidate root. The root shape is exactly:
 
-- v: integer 1.
+- v: integer 2 for new owner provisioning.
 - core_socket: the candidate root's connector.sock.
 - bindings: the existing array of context/member/device/session/epoch/token grants.
-- targets: one object per enrolled session with session and host, where host is codex or claude.
+- targets: one object per enrolled session with session, host and target, where host is codex or claude.
 
 The target list and binding sessions must match exactly. Duplicate native sessions and
 duplicate context/member pairs are refused. Codex targets require canonical UUIDs, not display
 names. Profile tokens stay in the adapter; never paste this file into a chat. Provisioning is
 owner administration, not permission for a model to name an arbitrary session or self-enroll.
+Read [the native target contract](../../NATIVE_TARGETS.md) before provisioning or changing a
+profile. Runtime observations and the epoch-bound core target must both agree. Profile v1
+is retained only for legacy bindings with explicit null core targets.
 
 After the candidate core is running and the private profile exists, run one driver:
 
@@ -115,15 +118,9 @@ operation does not create periodic settings reads or model turns.
 
 ## Capability evidence and remaining tests
 
-| Capability | Current evidence | Remaining native acceptance |
-| --- | --- | --- |
-| Shared target selection | Disposable unit tests dispatch one host without calling another | Real messages from both native hosts through the one device process |
-| Codex bound check/send | Existing candidate adapter and previous disposable evidence | New enrolled-room demo and revocation/reconnect with current build |
-| Codex queue hint | Current official docs and installed CLI help; bounded callback tests | Active-turn, idle and dormant Desktop behavior, actual inbox fetch and response |
-| Codex public app-server connection | Read-only daemon-version check reports absent default control socket | A supported connection to the actual Desktop controller, if needed; no private endpoint substitution |
-| Claude documented channel | Existing process-level channel tests | Native session opt-in, actual notification uptake, reply and reconnect |
-| Claude process binding | Existing peer-process corroboration tests | Native session record/evidence matching in the disposable setup |
-| Live retry settings | Driver has a bound provider; shared feed has failure-only refresh | Core/driver integration with a real failed delivery and external settings edit |
+[EVIDENCE.md](../../EVIDENCE.md) records actual shared Codex/Claude Desktop delivery,
+Claude CLI delivery, interruption/rearm and recovery. It distinguishes operator fixtures
+from native peers and successful live-process delivery from unsupported dormant wake.
 
 Historical source text about private Claude socket experiments is not proof of current native
 support. Use freshly verified documented interfaces and preserve the difference between a live

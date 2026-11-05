@@ -134,6 +134,8 @@ impl std::error::Error for InvalidBinding {}
 pub struct BindingActivity {
     pub last_receipted_sequence: i64,
     pub first_unread_sequence: Option<i64>,
+    #[serde(deserialize_with = "crate::native_target::required_target")]
+    pub native_target: Option<crate::native_target::NativeTarget>,
 }
 
 impl Store {
@@ -277,10 +279,12 @@ impl Store {
         .bind(&binding.member_id)
         .fetch_one(&mut *tx)
         .await?;
+        let native_target = crate::native_target::target_on(&mut tx, binding).await?;
         tx.commit().await?;
         Ok(Some(BindingActivity {
             last_receipted_sequence,
             first_unread_sequence,
+            native_target,
         }))
     }
 }

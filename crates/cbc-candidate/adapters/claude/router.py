@@ -33,6 +33,10 @@ _feed_spec = importlib.util.spec_from_file_location(
 _feed_module = importlib.util.module_from_spec(_feed_spec)
 _feed_spec.loader.exec_module(_feed_module)
 ChangeFeed = _feed_module.ChangeFeed
+_target_spec = importlib.util.spec_from_file_location(
+    "cbc_native_target", os.path.join(os.path.dirname(os.path.abspath(__file__)), "../shared/native_target.py"))
+native_target = importlib.util.module_from_spec(_target_spec)
+_target_spec.loader.exec_module(native_target)
 
 MAX_FRAME = 256 * 1024
 MAX_CLIENTS = 32
@@ -126,7 +130,7 @@ def corroborate(peer_pid, peer_uid, sessions_dir, facts=procinfo):
 
 # --- router -----------------------------------------------------------------------
 
-def load_profile(path):
+def load_profile(path, with_targets=False):
     before = os.lstat(path)
     if not stat.S_ISREG(before.st_mode):
         raise SystemExit("profile must be a regular file")
@@ -144,17 +148,26 @@ def load_profile(path):
         profile = json.loads(raw)
     except ValueError:
         raise SystemExit("profile is not JSON")
-    if profile.get("v") != 1 or not isinstance(profile.get("core_socket"), str):
+    if (not isinstance(profile, dict) or type(profile.get("v")) is not int
+            or profile.get("v") not in (1, 2) or not isinstance(profile.get("core_socket"), str)
+            or not isinstance(profile.get("bindings"), list)):
         raise SystemExit("unsupported profile")
     if len(profile.get("bindings", [])) > MAX_BINDINGS:
         raise SystemExit(f"profile has more than {MAX_BINDINGS} bindings, more than one feed carries")
     bindings = {}
     for b in profile.get("bindings", []):
-        if set(b) != AUTH_FIELDS:
+        if (not isinstance(b, dict) or set(b) != AUTH_FIELDS
+                or not isinstance(b.get("session"), str) or not b["session"]):
             raise SystemExit("malformed binding in profile")
         if b["session"] in bindings:
             raise SystemExit("duplicate native session in profile")
         bindings[b["session"]] = b
+    try:
+        targets = native_target.parse_targets(profile, bindings)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
+    if with_targets:
+        return profile["core_socket"], bindings, targets
     return profile["core_socket"], bindings
 
 
@@ -172,7 +185,8 @@ def read_frame(conn):
 
 class Router:
     def __init__(self, args):
-        self.core, self.bindings = load_profile(args.profile)
+        self.core, self.bindings, self.native_targets = load_profile(args.profile, with_targets=True)
+        self.verify_target_registry(self.bindings, self.native_targets)
         self.sessions_dir = args.sessions_dir
         self.log_path = os.path.join(args.log_dir, "router-events.jsonl") if args.log_dir else None
         self.bells = 0
@@ -189,6 +203,14 @@ class Router:
                 (lambda _hint, session=session: self.deliver_hint(session))
             for session, binding in self.bindings.items()
         }, self.event) if self.bindings else None
+
+    def verify_target_registry(self, bindings, targets):
+        # Epoch targets are immutable in the core. This handshake is cached by
+        # the installed in-memory registry until a fully verified profile refresh.
+        for session, binding in bindings.items():
+            status = self.core_call(binding, {"op": "binding_status"})
+            if not native_target.target_agrees(targets[session]["target"], status):
+                raise ValueError("native target disagrees with core binding authority")
 
     def event(self, kind, **fields):
         if not self.log_path:
@@ -221,6 +243,35 @@ class Router:
         """False leaves the hint queued for shared backoff, without a new model turn."""
         reply = self.notify(session)
         return reply.get("type") == "empty" or reply.get("_notified") is True
+
+    def target_allowed(self, session, pid, uid, direct=False):
+        selected = self.native_targets.get(session)
+        if not selected or selected["target"] is None:
+            return selected is not None  # Explicit v1 legacy compatibility only.
+        if selected["host"] != "claude":
+            return False
+        peer = procinfo(pid)
+        if not peer:
+            return False
+        host_pid = pid if direct else peer.get("ppid")
+        observed = native_target.claude_observation(host_pid, uid, self.sessions_dir,
+            procinfo, record_start, adapter_pid=None if direct else pid)
+        return (observed is not None and observed["session"] == session
+                and native_target.match_target(selected["target"], observed))
+
+    def delivery_target_allowed(self, session):
+        selected = self.native_targets.get(session)
+        if selected and selected["target"] is None:
+            return True
+        with self.lock:
+            channel = self.channels.get(session)
+        if not channel:
+            return False
+        try:
+            pid, uid = peer_credentials(channel[0])
+            return self.target_allowed(session, pid, uid)
+        except OSError:
+            return False
 
     def subscribe(self, session, conn):
         """One existing MCP shim connection, bound by peer identity rather than an argument."""
@@ -325,6 +376,8 @@ class Router:
         forgotten, so the next send or hello tries again. A chat with no live process
         is not checked at all: checking would freeze its next batch at whatever is
         pending now, and its hello rings it on relaunch anyway."""
+        if not self.delivery_target_allowed(session):
+            return {"type": "error", "message": "native execution target mismatch"}
         with self.lock:
             channel_only = session in self.channel_sessions
             channel_live = session in self.channels
@@ -362,6 +415,8 @@ class Router:
         if not binding:
             self.event("peer_rejected", reason="unregistered", session=h(session))
             return {"error": "unregistered: no binding for this chat"}
+        if not self.target_allowed(session, pid, uid):
+            return {"error": "native execution target mismatch"}
         raw = read_frame(conn) if raw is None else raw
         try:
             req = json.loads(raw) if raw else None

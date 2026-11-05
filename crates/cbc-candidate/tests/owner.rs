@@ -1,6 +1,7 @@
 use cbc_candidate::{
     bindings::SessionBinding,
     enrollment::ConnectionKind,
+    native_target::{ExecutionProfile, SavedSelection},
     owner::{OwnerControl, ProvisionSpec},
     store::Store,
     Sandbox,
@@ -27,11 +28,17 @@ fn spec() -> ProvisionSpec {
     serde_json::from_value(json!({
         "context":"demo", "device":"laptop", "members":[
             {"member":"codex-owner","role":"repo_lead","host":"codex","session":"codex-native-session",
-             "evidence_ref":"trusted-host-read-1","repository":"api","label":"api owner","summary":"Disposable native delivery"},
+             "evidence_ref":"trusted-host-read-1","repository":"api","label":"api owner","summary":"Disposable native delivery", "target":target("api")},
             {"member":"claude-owner","role":"repo_lead","host":"claude","session":"claude-native-session",
-             "evidence_ref":"trusted-host-hook-2","repository":"client","label":"client owner","summary":"Disposable native delivery"}
+             "evidence_ref":"trusted-host-hook-2","repository":"client","label":"client owner","summary":"Disposable native delivery", "target":target("client")}
         ], "grants":[{"requester":"codex-owner","target":"claude-owner","kind":"peer","scope_ref":"demo-contract"}]
     })).unwrap()
+}
+
+fn target(repository: &str) -> Value {
+    json!({"v":1,"profile":"unknown","repository":repository,"worktree":null,
+        "cwd":format!("/fixtures/{repository}"),"saved_project":{"status":"not_exposed"},
+        "saved_environment":{"status":"not_exposed"},"placement":{"evidence_ref":"synthetic-ui-observation"}})
 }
 
 fn binding(value: &Value) -> SessionBinding {
@@ -105,7 +112,7 @@ async fn live_store_provision_returns_private_profile_and_authorized_discovery_w
     for field in ["v", "core_socket", "bindings", "targets"] {
         assert!(profile.get(field).is_some());
     }
-    assert_eq!(profile["v"], 1);
+    assert_eq!(profile["v"], 2);
     assert_eq!(
         profile["core_socket"],
         sandbox
@@ -117,14 +124,18 @@ async fn live_store_provision_returns_private_profile_and_authorized_discovery_w
     assert_eq!(
         profile["targets"],
         json!([
-            {"session":"codex-native-session","host":"codex"},
-            {"session":"claude-native-session","host":"claude"}
+            {"session":"codex-native-session","host":"codex","target":target("api")},
+            {"session":"claude-native-session","host":"claude","target":target("client")}
         ])
     );
     let codex = binding(&profile["bindings"][0]);
     let claude = binding(&profile["bindings"][1]);
     assert!(store.current_member(&codex).await.is_ok());
     assert!(store.current_member(&claude).await.is_ok());
+    assert_eq!(
+        serde_json::to_value(store.native_target(&codex).await.unwrap().unwrap()).unwrap(),
+        target("api")
+    );
     assert!(!owner.authenticate(codex.expose_token_for_adapter()));
     let discovery = store.discover_connections(&codex, 64).await.unwrap();
     assert_eq!(discovery.len(), 1);
@@ -183,6 +194,54 @@ async fn invalid_manifest_is_rejected_before_context_or_member_creation() {
 }
 
 #[tokio::test]
+async fn unavailable_adapter_constraints_are_rejected_before_mutation_but_audit_ids_are_retained() {
+    let (_temp, sandbox) = fixture();
+    let owner = OwnerControl::open(&sandbox).unwrap();
+    let store = Store::open(&sandbox).await.unwrap();
+    for profile in [ExecutionProfile::Desktop, ExecutionProfile::Cli] {
+        let mut unsupported = spec();
+        unsupported.members[0].target.profile = profile;
+        let error = owner.provision(&store, unsupported).await.unwrap_err();
+        assert!(error.to_string().contains("Codex execution profile"));
+        assert!(!store.context_exists("demo").await.unwrap());
+    }
+    for member in [0, 1] {
+        for project in [true, false] {
+            let mut unsupported = spec();
+            let selection = SavedSelection::Configured {
+                id: "synthetic-saved-id".into(),
+            };
+            if project {
+                unsupported.members[member].target.saved_project = selection;
+            } else {
+                unsupported.members[member].target.saved_environment = selection;
+            }
+            let error = owner.provision(&store, unsupported).await.unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("unsupported by current adapters"));
+            assert!(!store.context_exists("demo").await.unwrap());
+        }
+    }
+    let mut supported = spec();
+    supported.members[0].target.placement.project_id = Some("synthetic-observed-project".into());
+    supported.members[0].target.placement.environment_id =
+        Some("synthetic-observed-environment".into());
+    supported.members[1].target.profile = ExecutionProfile::Desktop;
+    let profile = owner.provision(&store, supported).await.unwrap();
+    assert_eq!(
+        profile["targets"][0]["target"]["placement"]["project_id"],
+        "synthetic-observed-project"
+    );
+    assert_eq!(
+        profile["targets"][0]["target"]["placement"]["environment_id"],
+        "synthetic-observed-environment"
+    );
+    assert_eq!(profile["targets"][1]["target"]["profile"], "desktop");
+    store.close().await;
+}
+
+#[tokio::test]
 async fn owner_cannot_provision_a_different_candidate_store() {
     let (_first_temp, first) = fixture();
     let (_second_temp, second) = fixture();
@@ -195,6 +254,15 @@ async fn owner_cannot_provision_a_different_candidate_store() {
 
 #[test]
 fn manifest_schema_and_summary_bounds_are_strict() {
+    let mut missing = serde_json::to_value(spec()).unwrap();
+    missing["members"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("target");
+    assert!(serde_json::from_value::<ProvisionSpec>(missing).is_err());
+    let mut mismatched = spec();
+    mismatched.members[0].target.repository = "wrong-repository".into();
+    assert!(mismatched.validate().is_err());
     let mut value = serde_json::to_value(spec()).unwrap();
     value["permissions"] = json!("allow everything");
     assert!(serde_json::from_value::<ProvisionSpec>(value).is_err());

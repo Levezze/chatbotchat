@@ -19,7 +19,15 @@ the server starts before any grant exists (a new chat must run before its thread
 can be enrolled) and a rewritten profile takes effect on the next call; a missing or
 unsafe profile refuses that call. Framing and send bounds match adapters/claude/adapter.py.
 """
+import importlib.util
+import hashlib
 import json, os, socket, stat, sys
+from pathlib import Path
+
+_target_spec = importlib.util.spec_from_file_location(
+    "cbc_codex_native_target", Path(__file__).resolve().parents[1] / "shared/native_target.py")
+native_target = importlib.util.module_from_spec(_target_spec)
+_target_spec.loader.exec_module(native_target)
 
 PROFILE = os.environ.get("CBC_CANDIDATE_PROFILE")
 MAX_PROFILE = 128 * 1024
@@ -29,6 +37,8 @@ MAX_FRAME = 256 * 1024
 # catches a bug, and a refused write is never receipted.
 MAX_OUT = 2 * MAX_FRAME + 8192
 AUTH_FIELDS = {"context", "member", "device", "session", "epoch", "token"}
+AUTHORITY_CACHE = set()
+PROFILE_SNAPSHOT = None
 SEND_LIMITS = {"room": 128, "body": 16384, "key": 128}
 MAX_ESCAPED_BODY = 32 * 1024
 MAX_THREAD_ID = 256
@@ -64,7 +74,13 @@ class ProfileError(Exception):
     pass
 
 
-def load_profile(path):
+class ProfileTargets(dict):
+    def __init__(self, entries, snapshot):
+        super().__init__(entries)
+        self.snapshot = snapshot
+
+
+def load_profile(path, with_targets=False):
     """The core socket and the grants keyed by native session (the Codex thread id)."""
     try:
         before = os.lstat(path)
@@ -86,7 +102,8 @@ def load_profile(path):
         profile = json.loads(raw)
     except ValueError:
         raise ProfileError("profile is not JSON")
-    if (not isinstance(profile, dict) or profile.get("v") != 1 or not isinstance(profile.get("core_socket"), str)
+    if (not isinstance(profile, dict) or type(profile.get("v")) is not int or profile.get("v") not in (1, 2)
+            or not isinstance(profile.get("core_socket"), str)
             or not isinstance(profile.get("bindings"), list)):
         raise ProfileError("unsupported profile")
     bindings = {}
@@ -96,6 +113,19 @@ def load_profile(path):
         if b["session"] in bindings:
             raise ProfileError("duplicate native session in profile")
         bindings[b["session"]] = b
+    try:
+        targets = native_target.parse_targets(profile, bindings)
+    except (ValueError, TypeError):
+        raise ProfileError("invalid native target profile")
+    global PROFILE_SNAPSHOT
+    snapshot = hashlib.sha256(json.dumps(profile, ensure_ascii=True, sort_keys=True,
+                                        separators=(",", ":")).encode()).hexdigest()
+    if PROFILE_SNAPSHOT != snapshot:
+        AUTHORITY_CACHE.clear()
+        PROFILE_SNAPSHOT = snapshot
+    targets = ProfileTargets(targets, snapshot)
+    if with_targets:
+        return profile["core_socket"], bindings, targets
     return profile["core_socket"], bindings
 
 
@@ -112,11 +142,12 @@ def read_frame(conn):
 
 
 class Core:
-    def __init__(self, path):
+    def __init__(self, path, targets):
         self.path = path
+        self.targets = targets
 
-    def call(self, binding, request):
-        """One v1 request; the reply as the model may see it, plus the batch reference."""
+    def raw_call(self, binding, request):
+        """Core reply stays internal until authority and result framing are checked."""
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(30)
         try:
@@ -125,9 +156,30 @@ class Core:
             raw = read_frame(s)
             reply = json.loads(raw) if raw else None
         except (OSError, ValueError):
-            return {"error": "core unavailable"}, None
+            return None
         finally:
             s.close()
+        return reply
+
+    def authority_agrees(self, binding):
+        target = self.targets.get(binding["session"], {}).get("target")
+        key = (self.path, self.targets.snapshot, dumps(binding),
+               json.dumps(target, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
+        if key in AUTHORITY_CACHE:
+            return True
+        status = self.raw_call(binding, {"op": "binding_status"})
+        if not native_target.target_agrees(target, status):
+            return False
+        if len(AUTHORITY_CACHE) >= 64:
+            AUTHORITY_CACHE.clear()
+        AUTHORITY_CACHE.add(key)
+        return True
+
+    def call(self, binding, request):
+        """Require stored target agreement before any CBC operation, including receipts."""
+        if not self.authority_agrees(binding):
+            return {"error": "core unavailable or native target authority does not match"}, None
+        reply = self.raw_call(binding, request)
         kind = reply.get("type") if isinstance(reply, dict) else None
         if kind == "batch":
             return {"items": reply["items"]}, reply["reference"]
@@ -209,6 +261,39 @@ def bound_grant(params, bindings):
     return bindings.get(thread)
 
 
+def target_matches(grant, targets):
+    """Codex exposes thread identity, not a verified Desktop/CLI or saved UI ID."""
+    expected = targets.get(grant["session"])
+    if expected is None:
+        return True  # Explicit compatibility for older, unqualified v1 profiles.
+    if expected["host"] not in ("codex", "unknown"):
+        return False
+    target = expected["target"]
+    if target is None:
+        return True
+    if expected["host"] != "codex":
+        return False
+    try:
+        observation = {"cwd": os.path.realpath(os.getcwd()), "profile": "unknown",
+                       "saved_project": None, "saved_environment": None}
+        return native_target.match_target(target, observation)
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def still_bound(grant, core_path, targets):
+    """Result writing cannot authorize a receipt after a local target/profile replacement."""
+    try:
+        path, bindings, current = load_profile(PROFILE, with_targets=True)
+        return (path == core_path and bindings.get(grant["session"]) == grant
+                and current.snapshot == targets.snapshot
+                and current.get(grant["session"]) == targets.get(grant["session"])
+                and target_matches(grant, current))
+    except ProfileError:
+        AUTHORITY_CACHE.clear()
+        return False
+
+
 def connect_args_error(args):
     required = {"target", "kind", "scope_ref", "key"}
     if not required <= set(args) <= required | {"explanation"}:
@@ -242,14 +327,18 @@ def call_tool(rid, params):
         write({"jsonrpc": "2.0", "id": rid, "error": {"code": -32602, "message": "unknown tool"}})
         return
     try:
-        core_path, bindings = load_profile(PROFILE)
+        core_path, bindings, targets = load_profile(PROFILE, with_targets=True)
     except ProfileError as e:
+        AUTHORITY_CACHE.clear()
         write(text_result(rid, {"error": str(e)}, True))
         return
-    core = Core(core_path)
+    core = Core(core_path, targets)
     grant = bound_grant(params, bindings)
     if grant is None:
         write(text_result(rid, {"error": "unbound: no registered Codex thread in host metadata"}, True))
+        return
+    if not target_matches(grant, targets):
+        write(text_result(rid, {"error": "native target unavailable or does not match this process"}, True))
         return
     if not isinstance(args, dict):
         write(text_result(rid, {"error": "arguments must be an object"}, True))
@@ -267,9 +356,9 @@ def call_tool(rid, params):
         write(text_result(rid, {"error": "cbc_check takes no arguments"}, True))
     elif name == "cbc_check":
         res, reference = core.call(grant, {"op": "check"})
-        if write(text_result(rid, res, "error" in res)) and reference:
+        if write(text_result(rid, res, "error" in res)) and reference and still_bound(grant, core_path, targets):
             receipt, _ = core.call(grant, {"op": "receipt", "reference": reference})
-            if receipt.get("ok") is True:
+            if receipt.get("ok") is True and still_bound(grant, core_path, targets):
                 nudge_device(grant, core_path)
     elif send_args_error(args):
         write(text_result(rid, {"error": send_args_error(args)}, True))

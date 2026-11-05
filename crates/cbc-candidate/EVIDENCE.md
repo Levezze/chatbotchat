@@ -28,6 +28,9 @@ The tests below were rerun after the milestone implementation.
   verified report-parent policy and shared context policy for peers.
 - Exact-epoch revocation, selective invalid-binding quarantine, SIGHUP profile refresh,
   bounded native calls, coalesced hints and unread recovery after reconnect.
+- Mandatory new-owner native targets, immutable invitation/binding-epoch target history,
+  v2 private profiles, and runtime/core target agreement. See [NATIVE_TARGETS.md](NATIVE_TARGETS.md)
+  for host observation limits and legacy compatibility.
 
 ## Verification run
 
@@ -38,13 +41,13 @@ The separate native run below does.
 
 | Suite | Passing tests |
 | --- | ---: |
-| Rust core, isolation, storage, enrollment, settings, owner CLI and socket integration | 112 |
-| Shared device driver | 54 |
+| Rust core, isolation, storage, enrollment, settings, owner CLI and socket integration | 122 |
+| Shared device driver | 70 |
 | Shared change feed | 13 |
-| Codex MCP adapter | 21 |
+| Codex MCP adapter | 31 |
 | Claude MCP adapter/router | 53 |
 | Native Claude mod, fake host | 11 |
-| Total | 264 |
+| Total | 300 |
 
 Commands:
 
@@ -60,7 +63,10 @@ rtk proxy node --test crates/cbc-candidate/adapters/claude/mod/test_mod.mjs
 rtk git diff --check
 ```
 
-Clippy with denied warnings and formatting pass. Independent read-only subagent review
+The Rust run passed 121 tests before the final owner capability gate; its targeted owner
+suite then passed all 8 tests, including that added regression, for 122 current Rust tests.
+All 167 Python tests passed. The 11 Node mod tests are unchanged from their passing run.
+Current strict Clippy passed; formatting also passed. Independent read-only subagent review
 identified and led to fixes for blocking file/lock reads, duplicate hints, revoked-member
 starvation, profile-size mismatch, unbounded reply writes and implicit old Claude fallback.
 
@@ -158,8 +164,8 @@ The private marketplace and plugin were enabled with **local scope only** in
 `/private/tmp/cbc113-live-aqyctpbd/claude-project`. Its exact socket config is that project's
 `.cbc-candidate-wake.json`; no global plugin option was written. Native `/reload-plugins`
 confirmed re-reading the final mod source from that private folder. Installed CLI strict
-plugin validation passed. The current automated total is 264: 112 Rust, 141 Python and
-11 Node tests, including 54 device tests. Rust source is unchanged since the 112-test run above.
+plugin validation passed. The current automated results are recorded in the verification
+table above; the native observations below retain their original case and sequences.
 
 Actual observations:
 
@@ -238,14 +244,76 @@ proves unread recovery after CLI restart, not autonomous restart of a closed Des
 Cleanup revoked both fresh bindings from epoch 1 to 2, exited the owned CLI and stopped
 only the owned candidate core/driver, preserving private history.
 
+## Desktop Stop, idle and engine recovery follow-up
+
+The same native Claude Desktop session `bfde8be2-b697-4fc0-9af6-442ab1cb24ae` ran in
+engine 2.1.317, initially PID 30178. Native Stop interrupted a bounded generation at 420 of
+1000. Marker M2 at sequence 34 remained unread for over 100 seconds. Genuine composer input
+`RESUMED` rearmed the mod, followed by automatic fetch, echo 35 and an empty check.
+
+A measured 697.5-second idle interval produced no CBC hint, check, receipt or send. M3 then
+committed at 37 and was fetched automatically, echoed at 38, and drained. This proves that
+11-minute 37.5-second interval, not indefinite idle retention or a peak-memory bound.
+
+For a single-engine failure probe, an identity-fenced SIGTERM stopped only that disposable
+native PID. M4 committed at 40 while the process was absent; native records were empty and
+the item stayed unread. Opening its Desktop view did not restart the engine. Genuine
+composer input `RESTARTED` started new PID 49706 with the same UUID/version, then the mod
+automatically recovered M4, echoed at 41 and cleared unread state with receipt 40. This is
+store-and-forward recovery after user-initiated engine restart. Full app quit was not tested
+because it would interrupt unrelated sessions; autonomous dormant restart is not established.
+
+## Native v2 target acceptance
+
+Fresh context `cbc113-target-pair` used the same corroborated Claude session and Codex chat
+`01a17a75-029b-7862-a69d-5ee06baf9acc`. Authorized native discovery/connect established room
+`cbc-report-1d813ec5ce21200ef6b8836d6b69ca26`. Both used new v2 profiles with complete targets.
+Codex sent at 44; Claude automatically checked and echoed at 45; Codex fetched that echo
+and informational notice 46 during an explicitly requested check. Its ordinary queue hint
+timed out after 10 seconds under heavy machine load. Automatic v2 return uptake is therefore
+not established by this exchange; the earlier mod pair's automatic return remains separate
+evidence. These are native peers, not operator-fixture sends.
+
+The Codex saved project ID `ab71799e-d999-40e8-bfe5-8e4db004ea3d` came from supported
+`list_projects` and remains audit evidence only. Current Codex MCP supplies thread identity
+and shim cwd, not a runtime Desktop/CLI distinction or saved UI IDs. Its target therefore
+uses `profile:"unknown"` and `not_exposed` selectors. Claude qualifies actual cwd/entrypoint
+from native process observations. New owner capability checks reject currently unobservable
+configured selectors before provisioning. See [the contract](NATIVE_TARGETS.md).
+
+For a native drift probe, only the Codex profile target's worktree changed from null to `/`,
+with credentials and epoch preserved. Its next `cbc_check` failed with
+`core unavailable or native target authority does not match`; unread/receipt state did not
+advance beyond last receipt 46. Restoring the exact private profile recovered an empty check.
+An edited local target cannot replace the core's target authority for that binding epoch.
+
+During the final reverse-direction probe, Claude engine PID 49706 became absent again while
+idle. The cause is unverified. Item 47 remained unread with last receipt 44. Supported
+`claude --desktop --resume UUID` exited 0 and printed an opening-session message, but native
+records stayed empty and the item remained unread. This result is `dormant`, not wake PASS.
+Installed Codex 0.165 also rejected `queue --resume` as unsupported. Neither a successful
+open command nor an unsupported flag resolves native dormant wake.
+
+Cleanup revoked both target-pair bindings from epoch 1 to 2 and stopped only owned candidate
+core PID 36360 and driver PID 57179. Pending item 47 and private history were preserved.
+Host-owned shims, daily CBC and unrelated sessions were left untouched.
+
 ## Remaining native acceptance
 
-The native Desktop pair and CLI trial prove automatic fetch/reply through the shared
-core/driver. Follow [TESTING.md](TESTING.md) for prolonged idle/resource soak and
-Desktop exited-process/app-restart recovery. CLI Stop/rearm and operator-initiated exit/resume
-passed; Desktop Stop/rearm and app quit remain unproven. Native identities, plugin loading
-and actual uptake must stay corroborated. A queued hint is insufficient. Dormant wake
-limitations remain explicit. #113 is not closed by this checkpoint.
+The Desktop pair and CLI trial prove automatic fetch/reply, Stop/rearm and reconnect through
+the shared core/driver. Native v2 target binding and drift rejection are also proven above.
+Full app quit/restart and autonomous dormant wake remain unproven. Saved native environment
+selection belongs to #117 and is not implied by cwd or audit labels. Follow [TESTING.md](TESTING.md)
+for isolated procedures and preserve these capability limits. #113 remains open at this checkpoint.
+
+## Next continuation
+
+Restart the isolated candidate with fresh bindings after actual native corroboration, then
+complete one v2 Claude-origin exchange with automatic Codex queued uptake. Preserve the
+unread-47 evidence while investigating supported dormant recovery: ordinary Codex queue
+timed out, its installed `--resume` is unsupported, and Claude Desktop resume reported success
+without starting an engine. No main merge, daily cutover, Pi deployment or next slice is
+authorized by this checkpoint. Work stops here for tonight as requested.
 
 No global native settings, permission modes, installed skills, daily service/database or
 active project agents were changed. No candidate service was installed to run persistently.

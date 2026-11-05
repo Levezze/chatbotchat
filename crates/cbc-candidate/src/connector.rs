@@ -278,6 +278,8 @@ enum Reply {
     BindingStatus {
         last_receipted_sequence: i64,
         first_unread_sequence: Option<i64>,
+        #[serde(deserialize_with = "crate::native_target::required_target")]
+        native_target: Option<crate::native_target::NativeTarget>,
     },
     OwnerResult {
         value: serde_json::Value,
@@ -508,6 +510,7 @@ async fn dispatch(
             Some(activity) => Reply::BindingStatus {
                 last_receipted_sequence: activity.last_receipted_sequence,
                 first_unread_sequence: activity.first_unread_sequence,
+                native_target: activity.native_target,
             },
             None => Reply::Error {
                 code: Some("invalid_binding".into()),

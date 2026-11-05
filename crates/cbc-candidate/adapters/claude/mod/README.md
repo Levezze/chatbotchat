@@ -49,6 +49,10 @@ claimed identity or authentication token. The HTTP route is an addition to the
 existing private socket, not a public TCP listener. Its implementation is tracked
 separately from this mod.
 
+New enrollment uses [the native target contract](../../../NATIVE_TARGETS.md). The driver
+requires actual cwd/entrypoint observations and agreement with the core's target for the
+current binding epoch. Audit labels cannot supply missing saved project/environment IDs.
+
 | HTTP response | Mod behavior |
 | --- | --- |
 | 204, after at most 25 seconds parked | Renew transport after one second; no prompt |
@@ -139,7 +143,9 @@ retirement interval and send a real CBC marker. Capture PID lifetime, fetch/echo
 receipt, resource usage and absence of extra processes/empty model turns. Also
 test active-turn delivery, Stop cancellation, fresh binding, driver reconnect and
 closed-chat recovery. The recorded Desktop trial passed automatic delivery after idle;
-its Stop/app-quit behavior remains unproven. CLI operator-initiated resume passed and
+its later follow-up passed Stop/rearm, 697.5 seconds idle and recovery after a single-engine
+exit plus genuine composer restart. Full app quit and autonomous dormant restart remain
+unproven. CLI operator-initiated resume passed and
 does not establish autonomous Desktop restart. If Desktop retires the process, report
 that result; this prototype has no private restart or keepalive override.
 

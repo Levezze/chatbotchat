@@ -5,6 +5,7 @@
 //! the core cannot turn a claimed session ID, token or evidence-reference string into proof.
 use crate::{
     bindings::{valid_id, validate_on, Role, SessionBinding},
+    native_target::NativeTarget,
     store::Store,
 };
 use anyhow::{ensure, Context, Result};
@@ -44,6 +45,7 @@ pub struct SessionEvidence {
     device: String,
     session: String,
     reference: String,
+    target: Option<NativeTarget>,
 }
 impl SessionEvidence {
     /// Call only after the adapter verifies host-owned metadata/process correlation. This
@@ -62,7 +64,16 @@ impl SessionEvidence {
             device: device.into(),
             session: session.into(),
             reference: reference.into(),
+            target: None,
         })
+    }
+
+    /// Adds a configured target only after trusted native observations have been checked.
+    /// This validates representation, not host placement or saved-environment availability.
+    pub fn with_target(mut self, target: NativeTarget) -> Result<Self> {
+        target.validate()?;
+        self.target = Some(target);
+        Ok(self)
     }
 }
 
@@ -237,9 +248,20 @@ impl Store {
         .await?;
         let epoch = epoch.context("enrollment member unavailable")?;
         ensure!(epoch < i64::MAX - 1, "member is unavailable for binding");
-        sqlx::query("INSERT INTO candidate_enrollment_invites(token_digest,context_id,member_id,expected_epoch,host,device_id,native_session_id,evidence_ref,expires_at) VALUES (?,?,?,?,?,?,?,?,?)")
+        let target_json = evidence
+            .target
+            .as_ref()
+            .map(NativeTarget::encoded)
+            .transpose()?;
+        let target_digest = evidence
+            .target
+            .as_ref()
+            .map(NativeTarget::digest)
+            .transpose()?;
+        sqlx::query("INSERT INTO candidate_enrollment_invites(token_digest,context_id,member_id,expected_epoch,host,device_id,native_session_id,evidence_ref,expires_at,target_json,target_digest) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
             .bind(Sha256::digest(token.as_bytes()).to_vec()).bind(context).bind(member).bind(epoch)
             .bind(evidence.host.as_str()).bind(&evidence.device).bind(&evidence.session).bind(&evidence.reference).bind(expires_at)
+            .bind(target_json).bind(target_digest)
             .execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(EnrollmentInvite { token, expires_at })
@@ -261,7 +283,7 @@ impl Store {
             "invalid enrollment invitation"
         );
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let row=sqlx::query("SELECT context_id,member_id,expected_epoch,host,device_id,native_session_id,evidence_ref,expires_at,consumed_epoch FROM candidate_enrollment_invites WHERE token_digest=?")
+        let row=sqlx::query("SELECT context_id,member_id,expected_epoch,host,device_id,native_session_id,evidence_ref,expires_at,consumed_epoch,target_json,target_digest FROM candidate_enrollment_invites WHERE token_digest=?")
             .bind(Sha256::digest(token.as_bytes()).to_vec()).fetch_optional(&mut *tx).await?.context("invalid enrollment invitation")?;
         ensure!(
             row.try_get::<Option<i64>, _>("consumed_epoch")?.is_none(),
@@ -278,6 +300,21 @@ impl Store {
                 && row.try_get::<String, _>("evidence_ref")? == evidence.reference,
             "enrollment evidence mismatch"
         );
+        let target_json = evidence
+            .target
+            .as_ref()
+            .map(NativeTarget::encoded)
+            .transpose()?;
+        let target_digest = evidence
+            .target
+            .as_ref()
+            .map(NativeTarget::digest)
+            .transpose()?;
+        ensure!(
+            row.try_get::<Option<String>, _>("target_json")? == target_json
+                && row.try_get::<Option<Vec<u8>>, _>("target_digest")? == target_digest,
+            "enrollment target mismatch"
+        );
         let context: String = row.try_get("context_id")?;
         let member: String = row.try_get("member_id")?;
         let expected: i64 = row.try_get("expected_epoch")?;
@@ -286,6 +323,12 @@ impl Store {
             .bind(&evidence.device).bind(&evidence.session).bind(Sha256::digest(binding_token.as_bytes()).to_vec())
             .bind(&context).bind(&member).bind(expected).fetch_optional(&mut *tx).await?;
         let epoch = epoch.context("enrollment was superseded or revoked")?;
+        if let (Some(target_json), Some(target_digest)) = (target_json, target_digest) {
+            sqlx::query("INSERT INTO candidate_native_targets(context_id,member_id,epoch,host,device_id,native_session_id,target_json,target_digest) VALUES (?,?,?,?,?,?,?,?)")
+                .bind(&context).bind(&member).bind(epoch).bind(evidence.host.as_str())
+                .bind(&evidence.device).bind(&evidence.session).bind(target_json).bind(target_digest)
+                .execute(&mut *tx).await?;
+        }
         sqlx::query("UPDATE candidate_enrollment_invites SET consumed_epoch=? WHERE token_digest=? AND consumed_epoch IS NULL")
             .bind(epoch).bind(Sha256::digest(token.as_bytes()).to_vec()).execute(&mut *tx).await?;
         sqlx::query("UPDATE candidate_batches SET state='superseded' WHERE context_id=? AND member_id=? AND state='pending'")

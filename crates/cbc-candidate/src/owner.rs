@@ -7,6 +7,7 @@ use crate::{
         ConnectionKind, NativeHost, SessionEvidence, MAX_DIRECTORY_SUMMARY_BYTES,
         MAX_DIRECTORY_SUMMARY_CHARS,
     },
+    native_target::{ExecutionProfile, NativeTarget, SavedSelection},
     store::Store,
     Sandbox,
 };
@@ -56,6 +57,7 @@ pub struct ProvisionMember {
     pub repository: String,
     pub label: String,
     pub summary: String,
+    pub target: NativeTarget,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -164,9 +166,9 @@ impl OwnerControl {
         let targets: Vec<_> = spec
             .members
             .iter()
-            .map(|member| json!({"session":member.session,"host":member.host}))
+            .map(|member| json!({"session":member.session,"host":member.host,"target":member.target}))
             .collect();
-        let conservative = json!({"v":1,"core_socket":self.root.join("connector.sock"),"bindings":bindings,"targets":targets});
+        let conservative = json!({"v":2,"core_socket":self.root.join("connector.sock"),"bindings":bindings,"targets":targets});
         ensure!(
             serde_json::to_vec(&conservative)?.len() < MAX_PROFILE_BYTES,
             "private provision profile exceeds bound"
@@ -206,14 +208,14 @@ impl OwnerControl {
             let mut bindings = Vec::new();
             let mut targets = Vec::new();
             for member in &spec.members {
-                let evidence = SessionEvidence::from_trusted_adapter(member.host.native(), &spec.device, &member.session, &member.evidence_ref)?;
+                let evidence = SessionEvidence::from_trusted_adapter(member.host.native(), &spec.device, &member.session, &member.evidence_ref)?.with_target(member.target.clone())?;
                 let invite = store.issue_enrollment_invite(&spec.context, &member.member, &evidence, 300).await?;
                 let binding = store.consume_enrollment_invite(invite.expose_token_for_adapter(), &evidence).await?;
                 bindings.push(json!({"context":spec.context,"member":member.member,"device":spec.device,
                     "session":member.session,"epoch":binding.epoch(),"token":binding.expose_token_for_adapter()}));
-                targets.push(json!({"session":member.session,"host":member.host}));
+                targets.push(json!({"session":member.session,"host":member.host,"target":member.target}));
             }
-            Ok::<_, anyhow::Error>(json!({"v":1,"core_socket":self.root.join("connector.sock"),
+            Ok::<_, anyhow::Error>(json!({"v":2,"core_socket":self.root.join("connector.sock"),
                 "bindings":bindings,"targets":targets}))
         }.await;
         result.context("owner provisioning may be partial on failure; inspect before retry")
@@ -235,6 +237,23 @@ impl ProvisionSpec {
         let mut roles = BTreeMap::new();
         let mut sessions = BTreeSet::new();
         for member in &self.members {
+            member.target.validate()?;
+            // Capability preflight for the currently shipped adapters. The core
+            // target type remains general for future trusted native observations.
+            ensure!(
+                member.host != OwnerNativeHost::Codex
+                    || member.target.profile == ExecutionProfile::Unknown,
+                "Codex execution profile is not exposed by the current adapter"
+            );
+            ensure!(
+                matches!(&member.target.saved_project, SavedSelection::NotExposed)
+                    && matches!(&member.target.saved_environment, SavedSelection::NotExposed),
+                "configured saved project/environment selectors are unsupported by current adapters"
+            );
+            ensure!(
+                member.target.repository == member.repository,
+                "native target repository differs from member repository"
+            );
             for id in [
                 &member.member,
                 &member.session,

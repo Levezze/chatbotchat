@@ -63,6 +63,7 @@ def read_line(conn):
 class FakeCore:
     """Speaks the Rust connector v1 wire; exact-field checks stand in for deny_unknown_fields."""
     OPS = {"check": set(), "send": {"room", "key", "body"}, "receipt": {"reference"}, "close": {"room"},
+           "binding_status": set(),
            "watch": {"others", "after"}, "watch_members": {"others", "after"},
            "discover": {"limit"}, "connect": {"target", "kind", "scope_ref", "key", "explanation"}}
     AUTH = {"context", "member", "device", "session", "epoch", "token"}
@@ -148,6 +149,9 @@ class FakeCore:
         member = auth["member"]
         if self.tokens.get(member) != auth["token"]:
             return {"type": "error", "message": "candidate operation rejected"}
+        if name == "binding_status":
+            return {"type": "binding_status", "native_target": None,
+                    "first_unread_sequence": None, "last_receipted_sequence": 0}
         if name in ("watch", "watch_members"):
             return self.watch(auth, op["others"], op["after"], conn, targeted=name == "watch_members")
         self.requests.append((member, name))

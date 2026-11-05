@@ -36,13 +36,17 @@ def read_line(conn):
 class FakeCore:
     """Speaks the Rust connector v1 wire; exact-field checks stand in for deny_unknown_fields."""
     OPS = {"check": set(), "send": {"room", "key", "body"}, "receipt": {"reference"},
-           "discover": {"limit"}, "connect": {"target", "kind", "scope_ref", "key", "explanation"}}
+           "discover": {"limit"}, "connect": {"target", "kind", "scope_ref", "key", "explanation"},
+           "binding_status": set()}
 
     def __init__(self, path, grants, rooms):
         self.tokens = {g["member"]: g["token"] for g in grants}
         self.rooms = rooms
         self.items, self.pending, self.done, self.keys, self.requests, self.references = [], {}, {}, {}, [], []
         self.operations = []
+        self.status_requests = []
+        self.native_targets = {g["member"]: None for g in grants}
+        self.status_override = None
         self.srv = socket.socket(socket.AF_UNIX)
         self.srv.bind(path)
         self.srv.listen(8)
@@ -74,9 +78,16 @@ class FakeCore:
         except (ValueError, AssertionError, KeyError, TypeError):
             return {"type": "error", "message": "invalid candidate request"}
         member = auth["member"]
-        self.requests.append((member, name))
+        if name == "binding_status":
+            self.status_requests.append(member)
+        else:
+            self.requests.append((member, name))
         if self.tokens.get(member) != auth["token"]:
             return {"type": "error", "message": "candidate operation rejected"}
+        if name == "binding_status":
+            if self.status_override is not None:
+                return json.loads(json.dumps(self.status_override))
+            return {"type": "binding_status", "native_target": self.native_targets[member]}
         self.operations.append((member, name, op))
         if name == "discover":
             return {"type": "directory", "members": [{"member": other, "label": other}
@@ -318,6 +329,193 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertEqual(self.core.requests, [])
 
     # -- binding by host metadata
+
+    def target(self, **changes):
+        value = {"v": 1, "profile": "unknown", "repository": "cbc-test",
+                 "worktree": None, "cwd": os.path.realpath(os.getcwd()),
+                 "saved_project": {"status": "not_exposed"},
+                 "saved_environment": {"status": "not_exposed"},
+                 "placement": {"evidence_ref": "synthetic-process-test"}}
+        value.update(changes)
+        return value
+
+    def save_targets(self, target=None, authoritative=False, **changes):
+        value = {"v": 2, "core_socket": self.core_path, "bindings": self.grants,
+                 "targets": [{"session": grant["session"], "host": "codex",
+                              "target": self.target() if target is None else target}
+                             for grant in self.grants]}
+        value.update(changes)
+        with open(self.profile, "w") as stream:
+            stream.write(rust_json(value))
+        if authoritative:
+            self.core.native_targets = {grant["member"]: json.loads(json.dumps(entry["target"]))
+                                        for grant, entry in zip(value["bindings"], value["targets"])}
+        return value
+
+    def test_v2_unknown_profile_accepts_actual_cwd_and_receipts_normally(self):
+        self.save_targets(self.target(worktree=os.path.dirname(os.path.realpath(os.getcwd()))), authoritative=True)
+        a = self.start()
+        result, error = a.call("cbc_send", {"room": ROOM, "body": "qualified", "key": "qualified"}, thread(THREAD_A))
+        self.assertFalse(error, result)
+        got, error = a.call("cbc_check", {}, thread(THREAD_B))
+        self.assertFalse(error, got)
+        self.assertEqual(got["items"][0]["body"], "qualified")
+        self.assertTrue(self.core.wait_for("member-b", "receipt"))
+        self.secrets_absent(a)
+
+    def test_v2_target_constraints_fail_before_any_core_operation(self):
+        a = self.start()
+        mismatches = [
+            self.target(cwd=os.path.realpath(self.root)),
+            self.target(worktree=os.path.realpath(self.root)),
+            self.target(profile="desktop"), self.target(profile="cli"),
+            self.target(saved_project={"status": "configured", "id": "project-one"}),
+            self.target(saved_environment={"status": "configured", "id": "environment-one"}),
+        ]
+        calls = [("cbc_check", {}), ("cbc_discover", {}),
+                 ("cbc_send", {"room": ROOM, "body": "blocked", "key": "blocked"}),
+                 ("cbc_connect", {"target": "member-b", "kind": "peer", "scope_ref": "feature", "key": "blocked"})]
+        for target in mismatches:
+            self.save_targets(target)
+            for name, arguments in calls:
+                with self.subTest(target=target, tool=name):
+                    result, error = a.call(name, arguments, thread(THREAD_A))
+                    self.assertTrue(error, result)
+                    self.assertEqual(self.core.requests, [])
+        self.secrets_absent(a)
+
+    def test_v2_wrong_host_and_malformed_target_are_rejected(self):
+        a = self.start()
+        valid = self.save_targets(authoritative=True)
+        for change in ("wrong-host", "missing-target", "extra-target-field", "extra-profile-field", "boolean-version"):
+            value = json.loads(json.dumps(valid))
+            if change == "wrong-host":
+                value["targets"][0]["host"] = "claude"
+            elif change == "missing-target":
+                del value["targets"][0]["target"]
+            elif change == "extra-target-field":
+                value["targets"][0]["target"]["session"] = THREAD_A
+            elif change == "extra-profile-field":
+                value["arbitrary"] = "ignored-authority"
+            else:
+                value["v"] = True
+            with open(self.profile, "w") as stream:
+                stream.write(rust_json(value))
+            with self.subTest(change=change):
+                result, error = a.call("cbc_check", {}, thread(THREAD_A))
+                self.assertTrue(error, result)
+                self.assertEqual(self.core.requests, [])
+
+    def test_claimed_profile_and_saved_ids_in_metadata_do_not_supply_observations(self):
+        a = self.start()
+        for target in [self.target(profile="desktop"),
+                       self.target(saved_project={"status": "configured", "id": "project-one"})]:
+            self.save_targets(target)
+            claimed = {"threadId": THREAD_A, "profile": "desktop", "cwd": target["cwd"],
+                       "saved_project": "project-one", "saved_environment": "environment-one"}
+            result, error = a.call("cbc_check", {}, claimed)
+            self.assertTrue(error, result)
+            self.assertEqual(self.core.requests, [])
+
+    def test_target_replacement_after_result_prevents_receipt_then_recovers(self):
+        sender = self.start()
+        sender.call("cbc_send", {"room": ROOM, "body": "retained", "key": "retained"}, thread(THREAD_A))
+        valid = self.save_targets(authoritative=True)
+        a = self.start()
+        original = self.core.handle
+        def replace_after_check(raw):
+            reply = original(raw)
+            if json.loads(raw)["request"]["op"] == "check":
+                self.save_targets(self.target(cwd=os.path.realpath(self.root)))
+            return reply
+        self.core.handle = replace_after_check
+        got, error = a.call("cbc_check", {}, thread(THREAD_B))
+        self.assertFalse(error, got)
+        self.assertEqual(got["items"][0]["body"], "retained")
+        a.reply(a.request("ping"))  # Barrier after the adapter's receipt decision.
+        self.assertNotIn(("member-b", "receipt"), self.core.requests)
+        self.assertIn("member-b", self.core.pending)
+        self.core.handle = original
+        with open(self.profile, "w") as stream:
+            stream.write(rust_json(valid))
+        again, error = a.call("cbc_check", {}, thread(THREAD_B))
+        self.assertFalse(error, again)
+        self.assertEqual(again, got)
+        self.assertTrue(self.core.wait_for("member-b", "receipt"))
+
+    def test_v1_targets_remain_explicitly_unqualified_compatible(self):
+        value = {"v": 1, "core_socket": self.core_path, "bindings": self.grants,
+                 "targets": [{"session": grant["session"], "host": "codex"} for grant in self.grants]}
+        with open(self.profile, "w") as stream:
+            stream.write(rust_json(value))
+        a = self.start()
+        result, error = a.call("cbc_check", {}, thread(THREAD_A))
+        self.assertFalse(error, result)
+        self.assertEqual(result, {"items": []})
+
+    def test_stored_target_rejects_local_tampering_and_v1_downgrade(self):
+        self.save_targets(authoritative=True)
+        a = self.start()
+        values = [self.save_targets(self.target(repository="changed-local-repository")),
+                  {"v": 1, "core_socket": self.core_path, "bindings": self.grants}]
+        for value in values:
+            with open(self.profile, "w") as stream:
+                stream.write(rust_json(value))
+            for name, args in [("cbc_check", {}), ("cbc_discover", {}),
+                               ("cbc_send", {"room": ROOM, "body": "no", "key": "no"}),
+                               ("cbc_connect", {"target": "member-b", "kind": "peer", "scope_ref": "scope", "key": "no"})]:
+                result, error = a.call(name, args, thread(THREAD_A))
+                self.assertTrue(error, result)
+                self.assertEqual(self.core.requests, [])
+        self.assertEqual(self.core.status_requests, ["member-a"] * 8)
+
+    def test_missing_or_failed_authoritative_status_never_authorizes_legacy(self):
+        a = self.start()
+        for status in [{"type": "binding_status"}, {"type": "error", "message": "temporary"},
+                       {"type": "empty"}, {"type": "binding_status", "native_target": {}}]:
+            self.core.status_override = status
+            result, error = a.call("cbc_check", {}, thread(THREAD_A))
+            self.assertTrue(error, result)
+            self.assertEqual(self.core.requests, [])
+        self.core.status_override = {"type": "binding_status", "native_target": None}
+        result, error = a.call("cbc_check", {}, thread(THREAD_A))
+        self.assertFalse(error, result)
+        self.assertEqual(self.core.requests, [("member-a", "check")])
+
+    def test_authority_cache_is_bound_to_full_profile_and_only_success_is_cached(self):
+        valid = self.save_targets(authoritative=True)
+        a = self.start()
+        for _ in range(3):
+            result, error = a.call("cbc_check", {}, thread(THREAD_A))
+            self.assertFalse(error, result)
+        self.assertEqual(self.core.status_requests, ["member-a"])
+        # Another member's audit metadata still changes the complete profile snapshot.
+        valid["targets"][1]["target"]["placement"]["evidence_ref"] = "new-profile-audit"
+        with open(self.profile, "w") as stream:
+            stream.write(rust_json(valid))
+        result, error = a.call("cbc_check", {}, thread(THREAD_A))
+        self.assertFalse(error, result)
+        self.assertEqual(self.core.status_requests, ["member-a", "member-a"])
+
+    def test_full_profile_change_after_result_prevents_receipt_and_nudge(self):
+        sender = self.start()
+        sender.call("cbc_send", {"room": ROOM, "body": "snapshot", "key": "snapshot"}, thread(THREAD_A))
+        valid = self.save_targets(authoritative=True)
+        a = self.start()
+        original = self.core.handle
+        def change_snapshot(raw):
+            reply = original(raw)
+            if json.loads(raw)["request"]["op"] == "check":
+                valid["targets"][0]["target"]["placement"]["evidence_ref"] = "revised-other-member"
+                with open(self.profile, "w") as stream:
+                    stream.write(rust_json(valid))
+            return reply
+        self.core.handle = change_snapshot
+        result, error = a.call("cbc_check", {}, thread(THREAD_B))
+        self.assertFalse(error, result)
+        a.reply(a.request("ping"))
+        self.assertNotIn(("member-b", "receipt"), self.core.requests)
+        self.assertIn("member-b", self.core.pending)
 
     def test_each_call_acts_as_the_member_its_thread_is_bound_to(self):
         a = self.start()
