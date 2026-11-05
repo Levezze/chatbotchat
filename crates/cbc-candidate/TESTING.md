@@ -63,12 +63,44 @@ env = { CBC_CANDIDATE_PROFILE = "/private/tmp/ACTUAL_CASE/core/device-profile.js
 Claude `claude-project/.mcp.json`:
 
 ```json
-{"mcpServers":{"cbc113":{"command":"/ABSOLUTE/PYTHON3","args":["-B","-I","/ABSOLUTE/CHECKOUT/crates/cbc-candidate/adapters/claude/adapter.py"],"env":{"CBC_CANDIDATE_CONNECTOR":"/private/tmp/ACTUAL_CASE/core/device.sock","CBC_CANDIDATE_CHANNEL":"1"}}}}
+{"mcpServers":{"cbc113":{"command":"/ABSOLUTE/PYTHON3","args":["-B","-I","/ABSOLUTE/CHECKOUT/crates/cbc-candidate/adapters/claude/adapter.py"],"env":{"CBC_CANDIDATE_CONNECTOR":"/private/tmp/ACTUAL_CASE/core/device.sock","CBC_CANDIDATE_CHANNEL":"0"}}}}
 ```
+
+This config uses the mod for wake notifications. For a separate channel trial, enable
+`CBC_CANDIDATE_CHANNEL=1` and complete the host's supported per-session channel opt-in.
 
 Open designated disposable chats in those projects through supported host actions. Collect their actual native IDs from supported host thread tools/exports and host-owned session records. For Claude, verify the real sessions directory and the live parent PID/start-time record used by the [router corroboration](adapters/claude/README.md). For Codex, verify that native `tools/call` metadata supplies the actual `_meta.threadId`. A display name, model argument, copied UUID or `evidence_ref` label alone proves nothing. Keep a dated, nonsecret reference to the evidence. Do not create fake session records or inject metadata to pass a native test.
 
 If the app has not loaded project MCP, record `notLoaded`. Complete genuine project trust, MCP consent and supported channel preview enablement only when required by the host. The environment flag alone does not enable Claude channels. No global MCP edit, permission-bypass flag, approval-mode change or computer-use workaround belongs in this procedure. A required native action that cannot be performed through a supported interface is an explicit test gate.
+
+### Claude CLI mod branch
+
+Use a fresh disposable project and case. Load the reviewed mod with `--plugin-dir`, the
+project's adapter with `--strict-mcp-config --mcp-config /ABS/PROJECT/.mcp.json`, and
+`--tools ""` to retain MCP while disabling built-ins. Keep authentication and permission
+mode unchanged. Supply a real interactive terminal. On macOS, when RTK captures stdout,
+the tested wrapper is:
+
+```sh
+rtk proxy /usr/bin/script -q /dev/null /ABS/claude --ax-screen-reader --plugin-dir /ABS/MOD --strict-mcp-config --mcp-config /ABS/PROJECT/.mcp.json --tools ""
+```
+
+Corroborate the generated native session ID and live PID/UID/start before provisioning.
+Start with a no-tools READY prompt while the operator prepares the core and driver.
+Require actual marker fetch, echo and cleared unread state after an idle interval and
+after driver restart. If the sender is an operator fixture, label it that way; it does
+not establish native Codex sending. The [CLI trial](EVIDENCE.md#native-cli-mod-trial)
+records those results separately from the native Desktop pair.
+
+For Stop/rearm, interrupt an active native CLI turn with Escape and verify the abort.
+Send a new marker after Stop; observe it through `binding_status` only and require it to
+remain unread without a model wake for at least 40 seconds. Genuine operator composer
+input must then rearm the mod and recover the marker. The recorded CLI Stop interval
+exceeded 85 seconds. For CLI exit/resume, exit through `/exit`, verify the actual process
+is gone, send while absent, then launch public `--resume ACTUAL_UUID` with the same project
+and session flags. Require a newly corroborated PID and automatic pending recovery without
+reprovisioning or another send. That CLI probe passed. Desktop Stop/app-quit remains a
+separate, unproven probe; operator-initiated CLI resume does not prove autonomous restart.
 
 ## Enroll once and start the shared driver
 

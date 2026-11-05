@@ -174,6 +174,58 @@ class DeviceRouter(claude.Router):
             return True
         return super().deliver_hint(session)
 
+    def native_notification_mode(self, session):
+        with self.native_ready:
+            is_native = session in self.native_sessions
+        with self.lock:
+            channel_missing = session in self.channel_sessions and session not in self.channels
+        return is_native, channel_missing
+
+    def notify(self, session, force=False):
+        """Native wake and unconnected channels must never prefetch an inbox batch."""
+        is_native, channel_missing = self.native_notification_mode(session)
+        if not is_native and not channel_missing:
+            return super().notify(session, force=force)
+        if not is_native and not force:
+            return {"type": "skipped"}
+        binding = self.native_binding(session)
+        if not binding:
+            return {"type": "error", "message": "invalid binding"}
+        if is_native:
+            self.wake_native()
+        reply = self.wake_status(binding, 2.0)
+        if reply.get("type") != "binding_status":
+            return reply
+        first = reply.get("first_unread_sequence")
+        if ("first_unread_sequence" not in reply
+                or first is not None and (type(first) is not int or first < 1)):
+            return {"type": "error", "message": "invalid binding status"}
+        return reply
+
+    def handle_request(self, conn, pid, uid, raw=None):
+        raw = claude.read_frame(conn) if raw is None else raw
+        try:
+            request = json.loads(raw) if raw else None
+        except ValueError:
+            request = None
+        if isinstance(request, dict) and request.get("op") == "hello":
+            session = claude.corroborate(pid, uid, self.sessions_dir)
+            binding = self.native_binding(session)
+            if session and binding and any(self.native_notification_mode(session)):
+                if request != {"v": 1, "op": "hello"} or type(request.get("v")) is not int:
+                    return {"error": "invalid request"}
+                reply = self.notify(session, force=True)
+                kind = reply.get("type")
+                self.event("hello", member=binding["member"],
+                           pending=kind == "binding_status" and reply["first_unread_sequence"] is not None,
+                           reply=kind)
+                if kind != "binding_status":
+                    return {"error": str(reply.get("message", "core error"))}
+                return {"ok": True}
+        # The existing MCP parser, identity checks, receipts and connected-channel
+        # path retain their original response and error handling.
+        return super().handle_request(conn, pid, uid, raw=raw)
+
     def native_identity(self, pid, uid):
         return native.corroborate_native(pid, uid, self.sessions_dir,
                                          claude.procinfo, claude.record_start)

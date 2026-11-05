@@ -136,10 +136,12 @@ class DeviceTests(unittest.TestCase):
         def assert_no_fallback(router, session):
             self.assertIn(session, router.channel_sessions)
             self.assertNotIn(session, router.channels)
-            router.core_call = lambda *_args: {"type": "batch", "reference": "fixture-reference", "items": []}
+            router.core_call = lambda *_args: self.fail("unconnected channel froze an inbox batch")
+            router.wake_status = lambda *_args: {"type": "binding_status", "first_unread_sequence": 7}
             with patch.object(router, "live_socket", side_effect=AssertionError("historical socket lookup")):
                 self.assertEqual(router.notify(session), {"type": "skipped"})
-                self.assertFalse(router.notify(session, force=True)["_notified"])
+                self.assertEqual(router.notify(session, force=True),
+                                 {"type": "binding_status", "first_unread_sequence": 7})
                 self.assertFalse(router.ring(session, "/tmp/must-not-send-role-user.sock"))
         router = device.DeviceRouter(self.args())
         self.addCleanup(self.cleanup_router, router)
@@ -445,6 +447,64 @@ class NativeHttpTests(DeviceTests):
         self.assertEqual(self.router.native_pending, set())
         self.assertIn(CLAUDE, self.router.native_sessions)
         self.assertTrue(self.router.deliver_hint(CLAUDE))
+        self.assertEqual(len(self.calls), 1)
+
+    def mcp_request(self, request):
+        with patch.object(device.claude, "corroborate", return_value=CLAUDE):
+            return self.router.handle_request(None, self.pid, os.getuid(),
+                                              raw=json.dumps(request).encode() + b"\n")
+
+    def test_native_mcp_hello_and_receipt_wake_without_check_or_dead_chat_log(self):
+        self.router.native_sessions.add(CLAUDE)
+        self.state["first_unread_sequence"] = 7
+        events = []
+        calls = []
+        self.router.core_call = lambda grant, request: calls.append(request) or {"type": "receipted"}
+        with patch.object(self.router, "event", side_effect=lambda kind, **fields:
+                          events.append((kind, fields))):
+            generation = self.router.native_generation
+            self.assertEqual(self.mcp_request({"v": 1, "op": "hello"}), {"ok": True})
+            self.assertGreater(self.router.native_generation, generation)
+            generation = self.router.native_generation
+            self.assertEqual(self.mcp_request({"v": 1, "op": "receipt", "reference": "fixture"}),
+                             {"ok": True})
+            self.assertGreater(self.router.native_generation, generation)
+        self.assertEqual(calls, [{"op": "receipt", "reference": "fixture"}])
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual([kind for kind, _fields in events], ["hello", "receipt"])
+
+    def test_native_hello_and_receipt_errors_and_auth_are_preserved(self):
+        self.router.native_sessions.add(CLAUDE)
+        self.state = {"type": "error", "code": "invalid_binding", "message": "revoked"}
+        self.assertEqual(self.mcp_request({"v": 1, "op": "hello"}), {"error": "revoked"})
+        self.router.core_call = lambda *_args: {"type": "error", "message": "receipt rejected"}
+        self.assertEqual(self.mcp_request({"v": 1, "op": "receipt", "reference": "fixture"}),
+                         {"error": "receipt rejected"})
+        self.state = {"type": "error", "message": "offline"}
+        self.assertEqual(self.mcp_request({"v": 1, "op": "hello"}), {"error": "offline"})
+        self.assertEqual(self.mcp_request({"v": 1, "op": "hello", "session": CLAUDE}),
+                         {"error": "invalid request"})
+        count = len(self.calls)
+        with patch.object(device.claude, "corroborate", return_value=None):
+            self.assertIn("error", self.router.handle_request(None, self.pid, os.getuid(),
+                          raw=b'{"v":1,"op":"hello"}\n'))
+        self.assertEqual(len(self.calls), count)
+
+    def test_unconnected_channel_hello_is_non_consuming_and_connected_channel_is_unchanged(self):
+        self.state["first_unread_sequence"] = 7
+        self.assertEqual(self.mcp_request({"v": 1, "op": "hello"}), {"ok": True})
+        self.assertEqual(len(self.calls), 1)
+        self.assertNotIn(CLAUDE, self.router.native_sessions)
+        client, channel = socket.socketpair(socket.AF_UNIX)
+        self.addCleanup(client.close)
+        self.addCleanup(channel.close)
+        self.router.channels[CLAUDE] = (channel, threading.Lock())
+        checks = []
+        self.router.core_call = lambda grant, request: checks.append(request) or {
+            "type": "batch", "reference": "fixture", "items": []}
+        self.assertEqual(self.mcp_request({"v": 1, "op": "hello"}), {"ok": True})
+        self.assertEqual(checks, [{"op": "check"}])
+        self.assertEqual(client.recv(4096), b'{"type":"changed"}\n')
         self.assertEqual(len(self.calls), 1)
 
     def test_revocation_during_wait_and_shutdown_cancel_promptly(self):

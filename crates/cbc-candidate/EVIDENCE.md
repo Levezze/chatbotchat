@@ -39,12 +39,12 @@ The separate native run below does.
 | Suite | Passing tests |
 | --- | ---: |
 | Rust core, isolation, storage, enrollment, settings, owner CLI and socket integration | 112 |
-| Shared device driver | 51 |
+| Shared device driver | 54 |
 | Shared change feed | 13 |
 | Codex MCP adapter | 21 |
 | Claude MCP adapter/router | 53 |
 | Native Claude mod, fake host | 11 |
-| Total | 261 |
+| Total | 264 |
 
 Commands:
 
@@ -158,8 +158,8 @@ The private marketplace and plugin were enabled with **local scope only** in
 `/private/tmp/cbc113-live-aqyctpbd/claude-project`. Its exact socket config is that project's
 `.cbc-candidate-wake.json`; no global plugin option was written. Native `/reload-plugins`
 confirmed re-reading the final mod source from that private folder. Installed CLI strict
-plugin validation passed. New automated coverage passes 51 device tests and 11 mod tests;
-all 137 Python tests passed before the Linux-only response-reader regression added one more passing device test. Rust source is unchanged since the 112-test run above.
+plugin validation passed. The current automated total is 264: 112 Rust, 141 Python and
+11 Node tests, including 54 device tests. Rust source is unchanged since the 112-test run above.
 
 Actual observations:
 
@@ -199,12 +199,51 @@ Sources: [mod support](https://code.claude.com/docs/en/plugins/mods/overview),
 [prompt and network APIs](https://code.claude.com/docs/en/plugins/mods/api),
 [public API declarations](https://github.com/anthropics/claude-code/blob/main/mods/types/claude-code.d.ts).
 
+## Native CLI mod trial
+
+Claude Code CLI 2.1.312 ran interactively in the private project
+`/private/tmp/cbc113-cli-bawqyuqb/claude-project`, with the same public mod transport.
+The session loaded the reviewed mod with `--plugin-dir` and only the project's `cbc113`
+MCP server with `--strict-mcp-config`. Built-in tools were disabled with `--tools ""`.
+The macOS `script` utility supplied the actual terminal because RTK's output capture alone
+did not provide a native interactive terminal. No Desktop handoff, print mode or permission
+mode override was used. Kernel PID/UID/start evidence and the host session record verified
+native session `5c929307-3923-4cff-9144-fdaec228e997`, initially PID 53342, entrypoint `cli`.
+
+The sender was a foreground operator fixture using the provisioned `cli-primarch` binding.
+Only the actual Claude receiver belonged to the shared driver's profile. These sends prove
+native CLI receipt and echo, not another native Codex execution. The separate Desktop pair
+above remains the native Codex-to-Claude proof. Receiver observations used non-consuming
+`binding_status`; the operator never checked or receipted the receiver's inbox.
+
+| Probe | Evidence |
+| --- | --- |
+| Idle delivery | After about 65 seconds idle, `CLI-M1-REQUEST` committed at 2; the native CLI automatically fetched it and echoed at 3; unread then cleared |
+| Native Stop and human rearm | Escape interrupted an active CLI turn. `CLI-M3-REQUEST` committed at 4 and stayed unread for over 85 seconds with last receipt 2. Genuine composer input rearmed the mod; native fetch and echo 5 followed |
+| Shared driver offline/restart | `CLI-M2-REQUEST` committed at 6 while the owned driver was stopped. Restarting with the same profile recovered it automatically and produced echo 7, without another send or manual prompt |
+| CLI exit and operator-initiated resume | `/exit` returned 0 and the old process disappeared from native session records. M4 committed at 8 while absent. Public `--resume` restored the same UUID in verified new PID 85191; an automatic attributed mod notification led to native check/receipt and echo 9, without reprovisioning, another send or manual check |
+| Final receiver state | `first_unread_sequence=null`, `last_receipted_sequence=8` |
+
+Private operator checkpoints and sanitized results remain under the case directory.
+Native-mode MCP hello and post-receipt wake now use non-consuming binding status, so they
+do not freeze the next inbox batch or report a false dead-chat diagnostic. Connected
+channels retain their existing delivery behavior. Three additional device tests cover
+these paths, rejected hello arguments and error propagation.
+
+On resume, the driver recorded hello at Unix time 1793847744.6035, a mod pending event at
+1793847744.692, native check at 1793847747.063 and echo send at 1793847750.910. A positional
+READY-style prompt supplied with resume did not appear, so it is not counted as accepted
+human input or the cause of recovery. The operator explicitly launched `--resume`; this
+proves unread recovery after CLI restart, not autonomous restart of a closed Desktop chat.
+Cleanup revoked both fresh bindings from epoch 1 to 2, exited the owned CLI and stopped
+only the owned candidate core/driver, preserving private history.
+
 ## Remaining native acceptance
 
-The native pair above proves actual automatic fetch/reply through the same core/driver.
-Follow [TESTING.md](TESTING.md) for the remaining matrix: prolonged idle/resource soak,
-native stop/rearm and exited-process/app-restart recovery. CLI mod operation still needs
-its own native run; a mocked host is not a CLI PASS. Native identities, local plugin loading
+The native Desktop pair and CLI trial prove automatic fetch/reply through the shared
+core/driver. Follow [TESTING.md](TESTING.md) for prolonged idle/resource soak and
+Desktop exited-process/app-restart recovery. CLI Stop/rearm and operator-initiated exit/resume
+passed; Desktop Stop/rearm and app quit remain unproven. Native identities, plugin loading
 and actual uptake must stay corroborated. A queued hint is insufficient. Dormant wake
 limitations remain explicit. #113 is not closed by this checkpoint.
 

@@ -3,8 +3,8 @@
 This prototype uses Claude Code's public in-process mods API. It adds no process,
 model polling task, approval hook, MCP server, native permission rule or tool.
 The existing MCP adapter still handles discovery, connection, messages and receipts.
-The approved channel path remains available separately. No plugin installation or
-native Desktop wake is established by the automated tests below.
+The approved channel path remains available separately. Actual Desktop and CLI results
+are recorded in [EVIDENCE.md](../../../EVIDENCE.md). The automated tests below use a fake host.
 
 ## Public contracts
 
@@ -62,6 +62,9 @@ unread item. The mod compares equality only. Older-room backlog may move the
 underlying sequence down. A hint is neither a batch receipt nor proof of model
 uptake. Prompt acceptance advances only the mod's wake cursor; ordinary adapter
 checks and exact receipts advance durable core delivery.
+Native-mode MCP hello and post-receipt wake also use non-consuming binding status.
+They neither prefetch the next batch nor report the missing historical inbox socket as
+a dead native chat. Connected channels keep their existing delivery behavior.
 
 Main-turn interruption and `session.end` cancel scheduled callbacks and invalidate
 late HTTP/prompt results. HTTP has no public abort argument in the inspected
@@ -98,6 +101,20 @@ in user settings. The plugin has no `userConfig`, so it needs no global
 documented plugin reload. Verify actual mod loading and native-generated API types.
 Do not change installed daily CBC, global enablement or native permissions.
 
+## Disposable CLI loading
+
+Load this reviewed directory for one interactive session with `--plugin-dir /ABS/MOD`.
+Use `--strict-mcp-config --mcp-config /ABS/PROJECT/.mcp.json` for the project's adapter
+and `--tools ""` to disable built-ins while keeping MCP. No marketplace installation
+or permission-mode change is needed for this session-scoped load. Supply a real terminal;
+on macOS the native trial used `rtk proxy /usr/bin/script -q /dev/null /ABS/claude`
+followed by those flags and `--ax-screen-reader` because RTK alone captured stdout.
+
+CLI 2.1.312 passed idle fetch/echo, Escape Stop with over 85 seconds of pending unread work,
+genuine composer rearm, driver reconnect and operator-initiated `--resume` after process
+exit. Its sender was an operator fixture, separate from the native Desktop pair's Codex
+sender. See [TESTING.md](../../../TESTING.md#claude-cli-mod-branch) for the bounded procedure.
+
 ## Verification and remaining native gate
 
 ```sh
@@ -121,8 +138,10 @@ Desktop delivery, leave the genuine session idle beyond the observed two-minute
 retirement interval and send a real CBC marker. Capture PID lifetime, fetch/echo,
 receipt, resource usage and absence of extra processes/empty model turns. Also
 test active-turn delivery, Stop cancellation, fresh binding, driver reconnect and
-closed-chat recovery. If Desktop retires the process, report that result; this
-prototype has no private restart or keepalive override.
+closed-chat recovery. The recorded Desktop trial passed automatic delivery after idle;
+its Stop/app-quit behavior remains unproven. CLI operator-initiated resume passed and
+does not establish autonomous Desktop restart. If Desktop retires the process, report
+that result; this prototype has no private restart or keepalive override.
 
 `asyncRewake` is a separate documented command-hook path that wakes on exit code
 2, but it creates a supervised subprocess per hook invocation and enforces its
