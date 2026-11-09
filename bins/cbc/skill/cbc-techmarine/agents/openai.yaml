@@ -1,0 +1,4 @@
+interface:
+  display_name: "CBC Techmarine"
+  short_description: "Techmarine: themed CBC Task Agent alias"
+  default_prompt: "Use $cbc-techmarine to act as the CBC Techmarine."

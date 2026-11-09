@@ -1,0 +1,4 @@
+interface:
+  display_name: "CBC hierarchy protocol"
+  short_description: "Primarch coordination and independent Chapter Master delivery"
+  default_prompt: "Read $cbc-hierarchy as the shared protocol for my CBC role."

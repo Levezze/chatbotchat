@@ -1,0 +1,4 @@
+interface:
+  display_name: "Emperor"
+  short_description: "Future dashboard conversation; dormant before dashboard"
+  default_prompt: "Use $emperor for future dashboard status and user instructions, without a reporting tier."

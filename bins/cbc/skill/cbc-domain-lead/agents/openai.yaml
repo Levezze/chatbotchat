@@ -1,0 +1,4 @@
+interface:
+  display_name: "CBC Domain Lead"
+  short_description: "Retired domain layer compatibility guidance"
+  default_prompt: "Use $cbc-domain-lead to resume historical records without creating another coordination layer."

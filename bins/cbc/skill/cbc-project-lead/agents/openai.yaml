@@ -1,0 +1,4 @@
+interface:
+  display_name: "CBC Project Lead"
+  short_description: "Future dashboard Emperor, outside the reporting chain"
+  default_prompt: "Use $cbc-project-lead for dashboard status and user instructions; remain dormant before the dashboard exists."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "CBC Repo Lead"
+  short_description: "Primarch: repository coordination and priorities"
+  default_prompt: "Use $cbc-repo-lead to coordinate repository features without implementing them."

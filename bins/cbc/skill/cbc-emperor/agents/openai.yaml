@@ -1,0 +1,4 @@
+interface:
+  display_name: "CBC Emperor"
+  short_description: "Emperor: themed CBC Project Lead alias"
+  default_prompt: "Use $cbc-emperor to act as the CBC Emperor."

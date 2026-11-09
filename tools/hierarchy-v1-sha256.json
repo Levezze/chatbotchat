@@ -1,0 +1,52 @@
+{
+  "cbc-chapter-master": {
+    "SKILL.md": "dd6fef103ef855b47ec1579ca93267f5c433d009620cf6625b3d2946c4214491",
+    "agents/openai.yaml": "f1e31edf210ad872e5918a6d29b38bbcb4080e477517eaa4b007ee9c6ac21a86"
+  },
+  "cbc-emperor": {
+    "SKILL.md": "ac24ec0982f4b71f7b8248b52f6ecc7f82ef7b9b3f491104b816ed946755e347",
+    "agents/openai.yaml": "19132b3de25ff7732627e651b390a768034e5fa18298faa768fd87338bbea5cb"
+  },
+  "cbc-feature-lead": {
+    "SKILL.md": "cb3f7a8046d42408b4ef90ca6b363eae22e111b972f505a07434a1f00f41c3c5",
+    "agents/openai.yaml": "deb2dfc52ec9b2c31af77df38bb819ce3222cd3d517dfd62c3d35e1718976c00"
+  },
+  "cbc-handoff": {
+    "SKILL.md": "0b4cf8e1e2d4449bfb2919212c3a168ab4c250d20c231304d5ce95fa4bde585b",
+    "agents/openai.yaml": "2c273461c4011251d63141ad66a66bdbafb7111e4274d4e0af700b37d82655dc",
+    "scripts/handoff.py": "0a87ae2dd935d125f99b025912eba754f3769c2684b07d017d69a96d9d175f25"
+  },
+  "cbc-hierarchy": {
+    "SKILL.md": "691ae913ae9e51a59e50e081633b2b3a6e416303251991719f430c881ba05a4e",
+    "agents/openai.yaml": "626f8c71c0187f49b9ab47a4f2d4fddeeb7a4283e2fded3955d74e42dca017a8",
+    "references/delegation.md": "89afe866103302701f91afb899ed95b1676cc976fd3649d57421d7f259c75a01",
+    "references/rooms.md": "46dd15f5c2d783a678f49eedef87ba77525f39cf87c6c5ef7ebd2371ded97670",
+    "scripts/bootstrap.py": "f75c3fc1e26accee7fbaa47b3ab4c0d4983d80d820063be15bcc37d39cbfced8",
+    "scripts/session_title.py": "88afd83c322e488fcd52d8b5c87f0ba06e3b927bcc9741848d842eb245f4eb2f"
+  },
+  "cbc-primarch": {
+    "SKILL.md": "ea083d5b10de33f6c59fac4cec2eca6784a0e030859133b8c1abddbe3c2760a0",
+    "agents/openai.yaml": "084a3a615fb5f8e077826b864e4fc22a356386ffdf09333689633167357196f9"
+  },
+  "cbc-project-lead": {
+    "SKILL.md": "ed583f119a9a973b993064b3c62c4e6502ea52ce00866b1a549b3e08f57aa504",
+    "agents/openai.yaml": "a5ba161d6c9df4837504f9cd6600d5057b54d2f55b982327c2027b90a00a3cac",
+    "references/project-bootstrap.md": "9c53089757a71dce6e2842b7aaee6d5521fb49770136a4a780e68334cdb16dab"
+  },
+  "cbc-repo-lead": {
+    "SKILL.md": "81f0395377f9f339e611c3d35da41cc843044af6dc2e5e00368da09707819774",
+    "agents/openai.yaml": "0e9b0a2f10a5692a96a1ea3c50802572fcf989cea64d8fc310299674426faa63"
+  },
+  "cbc-task-agent": {
+    "SKILL.md": "a50484364eb332c562ae1d8fa4d9600adf0c95c050538ee41146b330e9223433",
+    "agents/openai.yaml": "80cc6733ada07ddf90697ac0b9475611eab3a77bc835f6d9f7204426d28743d5"
+  },
+  "cbc-techmarine": {
+    "SKILL.md": "435a75cab6c30712ede70154368b046e97171869ec3662dd6f19ec1f2c82b0c6",
+    "agents/openai.yaml": "676d15c6348c5a6527ea7eae3a31f45028e361c3c6e8630633c8ce3897d139f6"
+  },
+  "emperor": {
+    "SKILL.md": "0b22978e152759a6e42dcb09c37f78d36ee17617bad1cdf6f8aca92ac7314655",
+    "agents/openai.yaml": "03cd7cacc576e5df1c803a6fc9e8c4c2a2f5df45e2256083058ca47a17b8900e"
+  }
+}

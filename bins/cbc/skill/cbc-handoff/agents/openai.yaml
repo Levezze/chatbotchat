@@ -1,0 +1,4 @@
+interface:
+  display_name: "CBC role handoff"
+  short_description: "Transfer a CBC lead into a replacement session"
+  default_prompt: "Use $cbc-handoff to prepare or accept a replacement CBC lead session."
