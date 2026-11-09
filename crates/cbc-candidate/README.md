@@ -188,11 +188,13 @@ against the actual candidate store and socket, not native apps. Run feed tests s
 rtk proxy python3 -I crates/cbc-candidate/adapters/shared/test_feed.py -v
 ```
 
-Native integration status as of 2026-11-04: the current shared driver has process-level
-tests, not a real-app PASS. Claude channels require native preview enablement and consent.
-The public Codex controller socket was absent in an earlier read-only check; no daemon was
-started and no private Desktop endpoint was substituted. Current native queue/channel
-uptake, active/idle delivery and reconnect must pass in both apps before closing #113.
+Native integration status: [EVIDENCE.md](EVIDENCE.md) records preliminary real-app
+marker exchanges, bounded foreground probes, Stop/rearm and recovery. Channel
+acceptance and mod-based uptake are separate evidence. These probes and the 300
+candidate tests do not qualify an implementing hierarchy. Stage #113 still needs
+[structured timing and a working-role trial](../../docs/design/message-observability-and-working-pilot.md)
+in both apps. Exited-engine wake remains unresolved; command acceptance is not
+model uptake. Native permissions and daily CBC remain unchanged.
 
 The socket lives inside the private candidate root with mode 0600, checks peer UID, refuses
 existing paths, limits frames/connections/request time and removes only its own inode on shutdown.
@@ -210,6 +212,11 @@ prints only the profile path and room. The secret profile is adapter input, neve
 A failed fixture setup may be partial; use a fresh disposable root rather than retrying it.
 
 ## Required redesign capabilities still to build
+
+First qualify the local working hierarchy and delivery observability in #113.
+The work-map/dashboard capabilities below are the subsequent stage, not a
+prerequisite for that trial. PR observations and optional deployment observations
+follow the [separate-source contract](../../docs/design/work-records-and-external-observations.md).
 
 Internal/outward JSON maps,
 separately owned Primarch notes, questions, controls, shared dashboard projections and durable

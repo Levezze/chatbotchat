@@ -4,6 +4,14 @@ Date: 2026-11-04. Tracks [issue #113](https://github.com/Levezze/chatbotchat/iss
 This checkpoint reuses the earlier isolated candidate foundation. It does not install or
 replace daily CBC. Native acceptance is still open; this document is not a completion claim.
 
+Acceptance clarification, 2026-11-09: the native runs below are preliminary
+transport/capability probes, including bounded foreground fixtures. They are not
+a realistic hierarchy implementing features while coordinating mid-turn. The
+next #113 gate requires structured logging, deterministic delivery timing and a
+[working-role trial](../../docs/design/message-observability-and-working-pilot.md)
+before dashboard/work-map implementation. Exact receipts already exist; the
+comprehensive timed observability model is not implemented by this checkpoint.
+
 The later [lifecycle and room policy](../../docs/design/cbc-agent-lifecycle-and-rooms.md)
 adds saved-environment targeting, standing native lifecycle grants and informational 100/200
 message milestones. This checkpoint implements capless sends and milestone generation.
@@ -308,12 +316,14 @@ for isolated procedures and preserve these capability limits. #113 remains open 
 
 ## Next continuation
 
-Restart the isolated candidate with fresh bindings after actual native corroboration, then
-complete one v2 Claude-origin exchange with automatic Codex queued uptake. Preserve the
-unread-47 evidence while investigating supported dormant recovery: ordinary Codex queue
-timed out, its installed `--resume` is unsupported, and Claude Desktop resume reported success
-without starting an engine. No main merge, daily cutover, Pi deployment or next slice is
-authorized by this checkpoint. Work stops here for tonight as requested.
+Prepare the logging/timing contract and bounded working-trial manifest before
+running the candidate again. Recheck actual native versions and identities, then
+qualify implementing Primarch/Chapter Master sessions under busy/mid-turn, idle,
+restart and Stop conditions. Include v2 Claude-origin delivery and automatic
+Codex uptake. Preserve unread-47 evidence and distinguish busy deferral, exited
+engine activation and explicit Stop rearm. Old CLI/open results are not current
+capability guarantees. Dashboard/work-map stages follow this working gate.
+No main merge, daily cutover or Pi deployment is authorized by the plan update.
 
 No global native settings, permission modes, installed skills, daily service/database or
 active project agents were changed. No candidate service was installed to run persistently.

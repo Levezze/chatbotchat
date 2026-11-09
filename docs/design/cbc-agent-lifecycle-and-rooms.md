@@ -4,6 +4,13 @@ Agreed 2026-11-04. Current requirements for [PRD #112](https://github.com/Levezz
 This supersedes earlier message-budget and environment-by-folder assumptions for the redesign.
 It does not change deployed CBC, installed skills, native permissions or running agents.
 
+Clarified 2026-11-09: CBC is a coordination framework. The immediate gate is an
+[observable working hierarchy trial](message-observability-and-working-pilot.md)
+before dashboard/work-map implementation. Earlier native marker/timing probes
+remain preliminary evidence, not acceptance of an implementing hierarchy. Later
+[work and external-observation records](work-records-and-external-observations.md)
+separate agent assertions, PR facts and optional per-environment deployment facts.
+
 ## Native agent creation and continuation
 
 A Primarch can request a fresh Chapter Master, give its initial role/assignment, message an
@@ -95,11 +102,17 @@ to continue using an authorized room. No immediate action is required by a miles
 ## Slice ownership and acceptance
 
 - #113: uncapped send/delivery, target binding, live milestone policy, private recipient routing
-  and restart/idempotency behavior. Prove sending through 100/200 with no stop or extension.
+  and restart/idempotency behavior, structured debug/delivery timing, and a real
+  isolated role-based implementation trial. Prove sending through 100/200 with no
+  stop or extension. Qualify timely working delivery before dashboard stages.
 - #114: actual native exceptions return through supported decision mechanisms. Milestone
   notices never become decision requests. Standing lifecycle grants avoid routine prompts.
 - #115: server-owned target/count metadata in maps; notices do not change semantic progress.
-- #116: correct native links and optional informational display, without an Emperor wake.
+  Own feature grouping, typed PR/external references, the optional deployment
+  source-ownership contract and independent Primarch notes.
+- #116: actual environment/provider observation integrations, repo/feature views,
+  correct native links and optional informational display, without an Emperor wake
+  for every provider/CI event.
 - #117: complete create/bind/first-assignment/message/resume demonstration in the selected
   saved project/environment, including UI grouping, standing grants and uncertain-result
   recovery. No extra coordination tier or human room-ID courier.
@@ -109,8 +122,16 @@ to continue using an authorized room. No immediate action is required by a miles
 Disposable tests must distinguish wrong environment, unverified placement, unavailable
 adapter, native consent and dormant session. Test standing-grant revocation, duplicate launch
 requests, stale bindings and count-notice recipient isolation without changing daily CBC.
-The 208-test checkpoint in draft #120 predates milestone generation and does not prove this
-new contract or actual environment-aware native creation.
+The 300-test candidate checkpoint and native preliminary probes in draft #120 do
+not prove the newly required working implementation trial, comprehensive timing
+instrumentation or environment-aware zero-click creation.
+
+## Proposals awaiting discussion
+
+- [Optional scope supervisor](../proposals/optional-scope-supervisor.md): draft for
+  2026-11-09. An adversarial feature-scope reviewer outside the execution and
+  approval chain, with a proposed dedicated skill. This is not an agreed extra
+  coordination tier or a change to current slice acceptance.
 
 Sources:
 - [Codex app-server](https://learn.chatgpt.com/docs/app-server)

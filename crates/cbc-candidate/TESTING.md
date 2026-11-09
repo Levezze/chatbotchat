@@ -1,5 +1,12 @@
 # Isolated native test session for #113
 
+Updated acceptance, 2026-11-09: the protocol probes below are preparation, not
+full working-framework acceptance. Follow the
+[observability and working hierarchy trial](../../docs/design/message-observability-and-working-pilot.md)
+for a fresh Primarch with parallel implementing Chapter Masters, correlated
+timestamps, debug deltas and actual mid-turn uptake evidence. Prepare that trial
+before dashboard/work-map work; do not run it merely because these docs changed.
+
 Run this after the candidate's synthetic suites pass. This session qualifies actual Codex and Claude Code apps separately from their CLIs. It does not install CBC, migrate daily rooms or change native permissions. See [device driver](adapters/device/README.md), [Claude adapter](adapters/claude/README.md), and [native mod](adapters/claude/mod/README.md) for protocol details. Historical private-socket experiments in those documents are not supported-channel acceptance.
 
 For the Desktop mod test, install only the candidate plugin in the designated disposable
