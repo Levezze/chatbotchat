@@ -134,6 +134,15 @@ pub struct Connection {
     pub introduction_sequence: i64,
     pub reused: bool,
     pub closed: bool,
+    pub generation: i64,
+    pub supersedes: Option<String>,
+    pub closure: Option<RoomClosure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomClosure {
+    pub by: String,
+    pub reason: String,
 }
 
 fn now() -> Result<i64> {
@@ -323,6 +332,13 @@ impl Store {
             .bind(&evidence.device).bind(&evidence.session).bind(Sha256::digest(binding_token.as_bytes()).to_vec())
             .bind(&context).bind(&member).bind(expected).fetch_optional(&mut *tx).await?;
         let epoch = epoch.context("enrollment was superseded or revoked")?;
+        // T-25: the first enrollment binds the identity; every later one is a handoff of the
+        // same identity to a new native session.
+        let earlier: i64 = sqlx::query_scalar("SELECT count(*) FROM candidate_identity_events WHERE context_id=? AND member_id=? AND kind IN ('enrolled','rebound')")
+            .bind(&context).bind(&member).fetch_one(&mut *tx).await?;
+        sqlx::query("INSERT INTO candidate_identity_events(context_id,member_id,kind,epoch,reason,at_wall_ms) VALUES (?,?,?,?,NULL,?)")
+            .bind(&context).bind(&member).bind(if earlier == 0 { "enrolled" } else { "rebound" })
+            .bind(epoch).bind(crate::facts::wall_ms()).execute(&mut *tx).await?;
         if let (Some(target_json), Some(target_digest)) = (target_json, target_digest) {
             sqlx::query("INSERT INTO candidate_native_targets(context_id,member_id,epoch,host,device_id,native_session_id,target_json,target_digest) VALUES (?,?,?,?,?,?,?,?)")
                 .bind(&context).bind(&member).bind(epoch).bind(evidence.host.as_str())
@@ -405,6 +421,10 @@ impl Store {
         ensure!(changed == 1, "connection grant unavailable");
         sqlx::query("UPDATE candidate_room_members SET active=0 WHERE context_id=? AND room_id IN (SELECT room_id FROM candidate_connections WHERE context_id=? AND first_member=? AND second_member=? AND kind=? AND scope_ref=?)")
             .bind(context).bind(context).bind(first).bind(second).bind(kind.as_str()).bind(scope_ref).execute(&mut *tx).await?;
+        // A revoked room stops being the pair's active room, so it never blocks a later
+        // authorized open (T-26). That open gets a replacement, never the revoked room.
+        sqlx::query("UPDATE candidate_connections SET active=0 WHERE context_id=? AND first_member=? AND second_member=? AND kind=? AND scope_ref=?")
+            .bind(context).bind(first).bind(second).bind(kind.as_str()).bind(scope_ref).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -487,39 +507,52 @@ impl Store {
             .bind(&binding.context_id).bind(&binding.member_id).bind(request_key).fetch_optional(&mut *tx).await? {
             ensure!(row.try_get::<Vec<u8>,_>("fingerprint")?==fingerprint,"connection request key conflicts");
             let room:String=row.try_get("room_id")?;
-            let result=connection_row(&mut tx,&binding.context_id,&room,kind,scope_ref,true).await?;
+            let result=connection_row(&mut tx,&binding.context_id,&room,true).await?;
             ensure!(room_authorized(&mut tx,&binding.context_id,&room,&binding.member_id).await?,"connection room unavailable");
             tx.commit().await?; return Ok(result);
         }
-        let existing:Option<String>=sqlx::query_scalar("SELECT room_id FROM candidate_connections WHERE context_id=? AND first_member=? AND second_member=? AND kind=? AND scope_ref=?")
-            .bind(&binding.context_id).bind(first).bind(second).bind(kind.as_str()).bind(scope_ref).fetch_optional(&mut *tx).await?;
+        // T-26: one active room per unordered pair, whatever the kind or scope. A second open
+        // joins it; after a close the next open creates one replacement that supersedes it.
+        let existing:Option<String>=sqlx::query_scalar("SELECT room_id FROM candidate_connections WHERE context_id=? AND min(first_member,second_member)=min(?,?) AND max(first_member,second_member)=max(?,?) AND active=1")
+            .bind(&binding.context_id).bind(first).bind(second).bind(first).bind(second).fetch_optional(&mut *tx).await?;
         let reused = existing.is_some();
         let room = if let Some(room) = existing {
+            // A revoked membership is never restored by another open, under any scope.
             ensure!(
                 room_authorized(&mut tx, &binding.context_id, &room, &binding.member_id).await?
                     && room_authorized(&mut tx, &binding.context_id, &room, target).await?,
                 "connection room unavailable"
             );
-            let closed: i64 = sqlx::query_scalar(
-                "SELECT closed FROM candidate_rooms WHERE context_id=? AND room_id=?",
-            )
-            .bind(&binding.context_id)
-            .bind(&room)
-            .fetch_one(&mut *tx)
-            .await?;
-            ensure!(
-                closed == 0,
-                "connection room is closed; use an explicit new scope"
-            );
             room
         } else {
-            let hash = Sha256::digest(serde_json::to_vec(&(
-                &binding.context_id,
-                first,
-                second,
-                kind,
-                scope_ref,
-            ))?);
+            let latest = sqlx::query("SELECT room_id,generation FROM candidate_connections WHERE context_id=? AND min(first_member,second_member)=min(?,?) AND max(first_member,second_member)=max(?,?) ORDER BY generation DESC,introduction_sequence DESC LIMIT 1")
+                .bind(&binding.context_id).bind(first).bind(second).bind(first).bind(second).fetch_optional(&mut *tx).await?;
+            let (generation, supersedes) = match latest {
+                Some(row) => (
+                    row.try_get::<i64, _>("generation")? + 1,
+                    Some(row.try_get::<String, _>("room_id")?),
+                ),
+                None => (1, None),
+            };
+            // Generation 1 keeps the pre-T-26 room ID, so existing rooms keep their names.
+            let hash = if generation == 1 {
+                Sha256::digest(serde_json::to_vec(&(
+                    &binding.context_id,
+                    first,
+                    second,
+                    kind,
+                    scope_ref,
+                ))?)
+            } else {
+                Sha256::digest(serde_json::to_vec(&(
+                    &binding.context_id,
+                    first,
+                    second,
+                    kind,
+                    scope_ref,
+                    generation,
+                ))?)
+            };
             let room = format!(
                 "cbc-{}-{}",
                 kind.as_str(),
@@ -549,14 +582,14 @@ impl Store {
                 crate::facts::ItemClass::Introduction,
             )
             .await?;
-            sqlx::query("INSERT INTO candidate_connections(context_id,first_member,second_member,kind,scope_ref,room_id,introduction_sequence) VALUES (?,?,?,?,?,?,?)")
-                .bind(&binding.context_id).bind(first).bind(second).bind(kind.as_str()).bind(scope_ref).bind(&room).bind(sequence).execute(&mut *tx).await?;
+            sqlx::query("INSERT INTO candidate_connections(context_id,first_member,second_member,kind,scope_ref,room_id,introduction_sequence,generation,supersedes_room,active) VALUES (?,?,?,?,?,?,?,?,?,1)")
+                .bind(&binding.context_id).bind(first).bind(second).bind(kind.as_str()).bind(scope_ref).bind(&room).bind(sequence)
+                .bind(generation).bind(supersedes).execute(&mut *tx).await?;
             room
         };
         sqlx::query("INSERT INTO candidate_connection_requests(context_id,member_id,request_key,fingerprint,room_id) VALUES (?,?,?,?,?)")
             .bind(&binding.context_id).bind(&binding.member_id).bind(request_key).bind(fingerprint).bind(&room).execute(&mut *tx).await?;
-        let result =
-            connection_row(&mut tx, &binding.context_id, &room, kind, scope_ref, reused).await?;
+        let result = connection_row(&mut tx, &binding.context_id, &room, reused).await?;
         tx.commit().await?;
         Ok(result)
     }
@@ -580,22 +613,36 @@ async fn room_authorized(
 ) -> Result<bool> {
     Ok(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM candidate_room_members WHERE context_id=? AND room_id=? AND member_id=? AND active=1").bind(context).bind(room).bind(member).fetch_one(conn).await?==1)
 }
+/// The stored room, as created: a reused room reports the kind and scope it was opened for.
 async fn connection_row(
     conn: &mut SqliteConnection,
     context: &str,
     room: &str,
-    kind: ConnectionKind,
-    scope: &str,
     reused: bool,
 ) -> Result<Connection> {
-    let row=sqlx::query("SELECT c.introduction_sequence,r.closed FROM candidate_connections c JOIN candidate_rooms r ON r.context_id=c.context_id AND r.room_id=c.room_id WHERE c.context_id=? AND c.room_id=?")
+    let row=sqlx::query("SELECT c.kind,c.scope_ref,c.introduction_sequence,c.generation,c.supersedes_room,c.closed_by,c.close_reason,r.closed FROM candidate_connections c JOIN candidate_rooms r ON r.context_id=c.context_id AND r.room_id=c.room_id WHERE c.context_id=? AND c.room_id=?")
         .bind(context).bind(room).fetch_one(conn).await?;
+    let kind = match row.try_get::<String, _>("kind")?.as_str() {
+        "report" => ConnectionKind::Report,
+        "peer" => ConnectionKind::Peer,
+        other => anyhow::bail!("unknown connection kind {other}"),
+    };
+    let closure = match (
+        row.try_get::<Option<String>, _>("closed_by")?,
+        row.try_get::<Option<String>, _>("close_reason")?,
+    ) {
+        (Some(by), Some(reason)) => Some(RoomClosure { by, reason }),
+        _ => None,
+    };
     Ok(Connection {
         room: room.into(),
         kind,
-        scope_ref: scope.into(),
+        scope_ref: row.try_get("scope_ref")?,
         introduction_sequence: row.try_get("introduction_sequence")?,
         reused,
         closed: row.try_get::<i64, _>("closed")? != 0,
+        generation: row.try_get("generation")?,
+        supersedes: row.try_get("supersedes_room")?,
+        closure,
     })
 }

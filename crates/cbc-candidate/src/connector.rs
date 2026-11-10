@@ -229,6 +229,11 @@ enum OwnerOperation {
         member: String,
         expected_epoch: i64,
     },
+    RetireMember {
+        context: String,
+        member: String,
+        reason: String,
+    },
     Settings,
     UpdateSettings {
         expected_revision: String,
@@ -269,6 +274,7 @@ enum Operation {
     },
     Close {
         room: String,
+        reason: String,
     },
 }
 #[derive(Serialize, Deserialize)]
@@ -419,6 +425,14 @@ async fn owner_route(
                 .revoke_binding(&context, &member, expected_epoch)
                 .await?;
             Ok(serde_json::json!({"epoch":epoch}))
+        }
+        OwnerOperation::RetireMember {
+            context,
+            member,
+            reason,
+        } => {
+            store.retire_member(&context, &member, &reason).await?;
+            Ok(serde_json::json!({"retired":true}))
         }
         OwnerOperation::Settings => {
             let snapshot = settings
@@ -584,8 +598,8 @@ async fn dispatch(
             store.receipt(&binding, &reference).await?;
             Reply::Receipted
         }
-        Operation::Close { room } => Reply::Closed {
-            sequence: store.close_room(&binding, &room).await?,
+        Operation::Close { room, reason } => Reply::Closed {
+            sequence: store.close_room(&binding, &room, &reason).await?,
         },
     })
 }
@@ -648,6 +662,20 @@ impl<'a> LocalOwnerClient<'a> {
         .await?["epoch"]
             .as_i64()
             .context("invalid candidate revocation result")
+    }
+    /// T-25: end an identity with its session. It can never be bound again.
+    pub async fn retire_member(&self, context: &str, member: &str, reason: &str) -> Result<()> {
+        ensure!(
+            self.call(OwnerOperation::RetireMember {
+                context: context.into(),
+                member: member.into(),
+                reason: reason.into(),
+            })
+            .await?["retired"]
+                == serde_json::Value::Bool(true),
+            "invalid candidate retirement result"
+        );
+        Ok(())
     }
     pub async fn settings(&self) -> Result<SettingsSnapshot> {
         Ok(serde_json::from_value(

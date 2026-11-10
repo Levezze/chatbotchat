@@ -16,6 +16,54 @@ pub const MAX_ESCAPED_BODY_BYTES: usize = 2 * MAX_BODY_BYTES;
 /// Retained for immutable batches and valid rows created before the smaller default budget.
 pub const MAX_BATCH_HARD_BYTES: usize = 128 * 1024;
 pub const DEFAULT_ROOM_NOTICE_INTERVAL: u64 = 100;
+/// A close reason is one short line for the other member, not a message.
+pub const MAX_CLOSE_REASON_CHARS: usize = 200;
+
+pub(crate) fn close_reason(reason: &str) -> Result<String> {
+    let reason = reason.trim();
+    ensure!(!reason.is_empty(), "a close needs a reason");
+    ensure!(
+        reason.chars().count() <= MAX_CLOSE_REASON_CHARS,
+        "close reason is too long"
+    );
+    ensure!(
+        !reason.chars().any(char::is_control),
+        "close reason must be one line of plain text"
+    );
+    Ok(reason.to_owned())
+}
+
+/// Close inside the caller's transaction. Authorization is the caller's job.
+pub(crate) async fn close_on(
+    conn: &mut SqliteConnection,
+    clock: &facts::CoreClock,
+    context: &str,
+    room: &str,
+    by: &str,
+    reason: &str,
+) -> Result<i64> {
+    let existing: Option<i64> = sqlx::query_scalar(
+        "SELECT sequence FROM candidate_items WHERE context_id=? AND room_id=? AND kind='closed'",
+    )
+    .bind(context)
+    .bind(room)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if let Some(sequence) = existing {
+        return Ok(sequence);
+    }
+    let sequence: i64 = sqlx::query_scalar("INSERT INTO candidate_items(context_id,room_id,sender,kind,body) VALUES (?,?,?,'closed',?) RETURNING sequence")
+        .bind(context).bind(room).bind(by).bind(reason).fetch_one(&mut *conn).await?;
+    sqlx::query("UPDATE candidate_rooms SET closed=1 WHERE context_id=? AND room_id=?")
+        .bind(context)
+        .bind(room)
+        .execute(&mut *conn)
+        .await?;
+    facts::record_commit(conn, clock, sequence, ItemClass::Closure).await?;
+    sqlx::query("UPDATE candidate_connections SET active=0,closed_by=?,close_reason=?,closed_wall_ms=? WHERE context_id=? AND room_id=? AND closed_by IS NULL")
+        .bind(by).bind(reason).bind(facts::wall_ms()).bind(context).bind(room).execute(&mut *conn).await?;
+    Ok(sequence)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Item {
@@ -83,26 +131,29 @@ impl Store {
         tx.commit().await?;
         Ok(changes)
     }
-    pub async fn close_room(&self, binding: &SessionBinding, room: &str) -> Result<i64> {
+    /// Unilateral close (T-26). The reason is required, is delivered to the other members as
+    /// the closure body, and is recorded with the actor on a connection room. A repeated close
+    /// returns the first closure and never replaces its actor or reason.
+    pub async fn close_room(
+        &self,
+        binding: &SessionBinding,
+        room: &str,
+        reason: &str,
+    ) -> Result<i64> {
         valid_id(room)?;
+        let reason = close_reason(reason)?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         validate_on(&mut tx, binding).await?;
         authorized_room(&mut tx, binding, room).await?;
-        let existing: Option<i64> = sqlx::query_scalar("SELECT sequence FROM candidate_items WHERE context_id=? AND room_id=? AND kind='closed'")
-            .bind(&binding.context_id).bind(room).fetch_optional(&mut *tx).await?;
-        let sequence = if let Some(sequence) = existing {
-            sequence
-        } else {
-            let sequence = sqlx::query_scalar("INSERT INTO candidate_items(context_id,room_id,sender,kind,body) VALUES (?,?,?,'closed','') RETURNING sequence")
-                .bind(&binding.context_id).bind(room).bind(&binding.member_id).fetch_one(&mut *tx).await?;
-            sqlx::query("UPDATE candidate_rooms SET closed=1 WHERE context_id=? AND room_id=?")
-                .bind(&binding.context_id)
-                .bind(room)
-                .execute(&mut *tx)
-                .await?;
-            facts::record_commit(&mut tx, &self.clock, sequence, ItemClass::Closure).await?;
-            sequence
-        };
+        let sequence = close_on(
+            &mut tx,
+            &self.clock,
+            &binding.context_id,
+            room,
+            &binding.member_id,
+            &reason,
+        )
+        .await?;
         tx.commit().await?;
         Ok(sequence)
     }
@@ -111,9 +162,17 @@ impl Store {
         for id in [context, room, member] {
             valid_id(id)?;
         }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let changed = sqlx::query("UPDATE candidate_room_members SET active=0 WHERE context_id=? AND room_id=? AND member_id=?")
-            .bind(context).bind(room).bind(member).execute(&self.pool).await?.rows_affected();
+            .bind(context).bind(room).bind(member).execute(&mut *tx).await?.rows_affected();
         ensure!(changed == 1, "room membership unavailable");
+        // A connection room missing a member can no longer be the pair's active room (T-26).
+        sqlx::query("UPDATE candidate_connections SET active=0 WHERE context_id=? AND room_id=?")
+            .bind(context)
+            .bind(room)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         Ok(())
     }
     pub async fn receipt(&self, binding: &SessionBinding, reference: &str) -> Result<()> {

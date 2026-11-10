@@ -642,15 +642,23 @@ async fn policy_revoke_cancels_discovery_and_access_and_regrant_does_not_restore
         )
         .await
         .is_err());
-    assert!(store
+    // T-26 (2026-11-10): an open after the regrant creates a replacement room. It never
+    // restores the revoked room, its memberships or its history.
+    let replacement = store
         .connect_members(
             &worker,
             "lead",
             ConnectionKind::Report,
             "feature-a",
             "next",
-            ""
+            "",
         )
+        .await
+        .unwrap();
+    assert_ne!(replacement.room, route.room);
+    assert_eq!(replacement.supersedes.as_deref(), Some(route.room.as_str()));
+    assert!(store
+        .send(&worker, &route.room, "still-denied", "no access")
         .await
         .is_err());
     store.close().await;
@@ -702,7 +710,7 @@ async fn removed_member_does_not_recover_old_route_grants_on_registration() {
 }
 
 #[tokio::test]
-async fn connection_survives_restart_and_closed_retry_does_not_reopen_it() {
+async fn connection_survives_restart_and_a_closed_room_is_replaced_not_reopened() {
     let (_temp, sandbox, store) = fixture().await;
     let worker = bound(&store, "worker").await;
     store
@@ -740,7 +748,10 @@ async fn connection_survives_restart_and_closed_retry_does_not_reopen_it() {
         .await
         .unwrap();
     assert_eq!(retry.room, route.room);
-    store.close_room(&worker, &route.room).await.unwrap();
+    store
+        .close_room(&worker, &route.room, "done")
+        .await
+        .unwrap();
     let closed = store
         .connect_members(
             &worker,
@@ -753,17 +764,22 @@ async fn connection_survives_restart_and_closed_retry_does_not_reopen_it() {
         .await
         .unwrap();
     assert!(closed.closed);
-    assert!(store
+    // T-26 (decided 2026-11-10): a new open after a close never reopens the closed room; it
+    // creates one replacement for the pair that records which room it supersedes.
+    let replacement = store
         .connect_members(
             &worker,
             "lead",
             ConnectionKind::Report,
             "feature-a",
             "second",
-            ""
+            "",
         )
         .await
-        .is_err());
+        .unwrap();
+    assert_ne!(replacement.room, route.room);
+    assert!(!replacement.closed);
+    assert_eq!(replacement.supersedes.as_deref(), Some(route.room.as_str()));
     store.close().await;
 }
 

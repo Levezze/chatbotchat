@@ -168,7 +168,7 @@ impl CoreClock {
     }
 }
 
-fn wall_ms() -> i64 {
+pub(crate) fn wall_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))

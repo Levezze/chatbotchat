@@ -430,7 +430,10 @@ async fn closure_drains_the_final_notice_without_extending_or_reopening_a_room()
         .send_with_notice_interval(&c.child, &c.report_room, "one", "one", 1)
         .await
         .unwrap();
-    c.store.close_room(&c.child, &c.report_room).await.unwrap();
+    c.store
+        .close_room(&c.child, &c.report_room, "done")
+        .await
+        .unwrap();
     let items = drain(&c.store, &c.lead).await;
     assert_eq!(notices(&items).len(), 1);
     assert!(items.iter().any(|i| i.kind == "closed"));

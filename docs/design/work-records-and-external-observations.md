@@ -48,6 +48,64 @@ The optional scope-supervisor [draft](../proposals/optional-scope-supervisor.md)
 remains for discussion outside the execution/approval chain. It is not a
 prerequisite for this store, the trial or ordinary work.
 
+## Record layer plan for the trial (#113, 2026-11-10)
+
+This is the thin slice of #115 that decision T-09 moves ahead of the trial. Much
+of the identity and room machinery already exists in the candidate core, so the
+plan below lists, for each decision, what exists, what is missing, and which PR
+builds it. Only the missing part is built.
+
+| Decision | Already in the candidate core | Missing | PR |
+|---|---|---|---|
+| T-25 identity | The owner assigns a member ID. Enrollment binds it to a device and native session after adapter evidence, and the adapter injects the binding token, so the model never types an identity. A new enrollment against the expected epoch rebinds the same identity to a new session, which is the handoff operation. `unbind_member`, `revoke_binding` and `remove_member` end a binding. | A retired state, distinct from unbound, that a later enrollment can't revive. Handoff and retirement provenance: actor, reason, time. Tests that a new native session can't take over an identity except through the rebind path. | R1 |
+| T-26 peer rooms | Opening is idempotent per pair, kind and `scope_ref`, with a deterministic room ID. Any member can close a room. A closed room refuses to reopen. | Uniqueness per unordered pair, whatever the scope. Close records actor and reason. A replacement room after a close, with a new ID and a link to the room it supersedes. A member's peer rooms go inactive when its identity retires, but not on a handoff. | R1 |
+| T-07, T-09 work items | Nothing. | Work items owned by one member. Revisions as one validated multi-field patch with an expected revision and an idempotency key, committed with one outbox event in the same transaction. A no-op patch produces no event. The HITL flag can be turned on by the user or a repo lead and turned off only on the owner-authenticated route. A feature lead can't change it. | R2 |
+| Outbox | Nothing beyond the inbox. | Outbox events are delivered through the existing inbox as a new item class, so the #113 PR-A delivery facts and waits cover them. No second delivery path. | R2 |
+| T-10, T-12 requests | Nothing. | One canonical request with an owner (who answers) and a callback (who is woken). The answer records its channel. An answer an agent relays from chat is stored as relayed, with the relaying member, and never counts as owner-authenticated (proposed default, for the user's review). The answer wakes the asker through the outbox. | R3 |
+| T-27 waits | First-occurrence commit, offer and receipt facts (#113 PR-A). | A mapping from each wait cause in the trial protocol §6 to the facts it is derived from. CI waits (CM-A's observer), holds (#114) and acted-on (#113 PR-B) can't be observed yet and report `unknown`. The interval calculator itself belongs to the report in #113 C. | R3 |
+
+New routes for work items, requests and answers go in new modules, so the
+connector stays a thin wiring layer.
+
+### R1 as built: identity and peer rooms
+
+Migration 0008 (schema 8). Tests are in `tests/peer_rooms.rs`.
+
+- **One active room per pair.** An open returns the pair's active room whatever
+  the kind or scope, with `reused` set. The open still needs a grant for the
+  scope it names. A pair is only ever eligible for one kind, so report rooms
+  follow the same rule as peer rooms.
+- **Close.** A close needs a reason: one line, at most 200 characters. The
+  reason is the body of the closure item the other member receives. The room's
+  connection record keeps the actor, reason and time. A repeated close returns
+  the first closure unchanged.
+- **Replacement.** After a close, the next open creates one replacement room
+  with a new ID. It records the generation and the room it supersedes.
+  Concurrent opens get the same replacement. Replaying an old request key still
+  returns the old, closed room. A closed room is never reopened.
+- **Revocation and removal.** Revoking a grant, removing a member or revoking a
+  room membership takes the room out of the pair's active slot. A later
+  authorized open gets a replacement, never the revoked room or its history.
+- **Retirement.** `retire_member` is an owner operation, also available on the
+  owner connector route. It closes the member's active rooms in its name with
+  the note `retired: <reason>`, which also fits the 200-character limit. It
+  ends the binding and marks the identity retired. Registration, binding and
+  enrollment all refuse a retired identity, and retiring twice fails.
+  Detecting that a session has ended is not built; that stays with #117.
+- **Identity events.** Enrollment through an invitation records `enrolled` the
+  first time and `rebound` on every later handoff; retirement records
+  `retired` with its reason. `bind_member` is fixture administration and
+  records nothing. A member enrolled before migration 0008 has no earlier
+  event, so its first handoff after the upgrade is recorded as `enrolled`.
+- **Upgrade.** Before 0008 a pair could hold one open room per scope. The
+  newest open one becomes the active room. The others stay open and usable, but
+  an open no longer returns them.
+
+Two existing tests changed contract under T-26, and the PR names both. A
+reopen after a close used to fail; it now creates a replacement. An open after
+a revoke and a regrant used to fail; it now creates a replacement that
+supersedes the revoked room. Neither change restores a closed or revoked room.
+
 ## Registration, controls and eligible merge
 
 A Chapter Master registers its work item (assignment summary, branch/worktree,
