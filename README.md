@@ -12,7 +12,7 @@ The installation and commands below describe daily CBC v1. The isolated replacem
 [native lifecycle and room policy](docs/design/cbc-agent-lifecycle-and-rooms.md).
 Its rooms have no message caps or extension votes; informational milestones never pause work.
 Native project/environment-aware creation is required and qualified separately from CLI cwd.
-The candidate in draft [#120](https://github.com/Levezze/chatbotchat/pull/120) is not a daily cutover.
+The isolated candidate crate (`crates/cbc-candidate`, from [#120](https://github.com/Levezze/chatbotchat/pull/120)) is not a daily cutover.
 
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-000000?logo=rust&logoColor=white" alt="Rust">

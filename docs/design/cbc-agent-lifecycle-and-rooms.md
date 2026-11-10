@@ -123,7 +123,7 @@ to continue using an authorized room. No immediate action is required by a miles
 Disposable tests must distinguish wrong environment, unverified placement, unavailable
 adapter, native consent and dormant session. Test standing-grant revocation, duplicate launch
 requests, stale bindings and count-notice recipient isolation without changing daily CBC.
-The 300-test candidate checkpoint and native preliminary probes in draft #120 do
+The 300-test candidate checkpoint and native preliminary probes from #120 do
 not prove the newly required working implementation trial, comprehensive timing
 instrumentation or environment-aware zero-click creation.
 

@@ -81,9 +81,9 @@ starvation, profile-size mismatch, unbounded reply writes and implicit old Claud
 The initial whole-workspace GitHub CI run stopped under Rust 1.99 on an unchanged legacy
 test at `crates/chatbotchat-core/tests/storage.rs:61`, flagged by
 `clippy::useless_borrows_in_formatting`. That line is also present in base `1c582af`.
-Legacy source and the existing CI workflow remain unchanged. A separate candidate-only
-workflow verifies Rust and all four Python suites on Linux without suppressing that failure.
-Its actual run result is tracked on draft PR #120, separately from the local results above.
+#121 removed that borrow on `main`; the existing CI workflow is otherwise unchanged. A
+separate candidate-only workflow verifies Rust and all four Python suites on Linux.
+Its run results are on PR #120's checks, separately from the local results above.
 
 ## Actual native run, 2026-11-04
 
