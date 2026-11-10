@@ -66,6 +66,24 @@ As checked on 2026-11-04:
 Keep evidence per actual app/CLI/device/version. Unsupported behavior is reported accurately;
 one successful CLI demonstration never qualifies a requested Desktop profile.
 
+## Identity and peer rooms
+
+Decided 2026-11-10 ([T-25, T-26](working-trial-protocol.md#2-decision-record-2026-11-10), [ADR-0011](../decisions/0011-trial-1-decisions.md)):
+
+- The core assigns an agent identity at enrollment and binds it to the native
+  session. Tools inject it; a model never types its own identity. Compaction,
+  resume and app restart keep it; a fork or a new session gets a new one; a
+  finished session's identity is retired. Deliberate handoff is an explicit core
+  rebind, not a reused label.
+- At most one active peer room exists per unordered pair of identities. Opening
+  is idempotent: the second opener gets "a room already exists" with its ID and
+  joins it. Either member may close the room alone, recording actor and reason.
+  Closing frees the pair; the next open creates a replacement that links to the
+  room it supersedes. A retired member's peer rooms become inactive.
+- Creating, joining, using and closing rooms is pre-authorised by the user's
+  launch grant plus project-local allowlists covering only the CBC tools
+  (T-23, T-24). A peer message never carries user authority.
+
 ## Uncapped rooms and informational milestones
 
 Ordinary authorized sends have no lifetime message-count cap, soft/hard communication

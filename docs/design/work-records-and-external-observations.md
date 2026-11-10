@@ -2,6 +2,9 @@
 
 Framework requirements clarified 2026-11-09 for PRD #112 and stages #115–#118.
 These capabilities follow the observable working-hierarchy gate in #113.
+Updated 2026-11-10: a thin slice (registration, atomic work-item revisions,
+requests with callbacks, outbox) and a dashboard skeleton move into #113 ahead
+of the hierarchy trial. See [decisions T-07 to T-12](working-trial-protocol.md#2-decision-record-2026-11-10).
 Stage #115 owns work records, PR observations and attention. It retains typed
 deployment references and their separate ownership contract; actual provider
 and environment observation integrations belong to #116 alongside their views.
@@ -65,7 +68,12 @@ Master checks current controls before affected effects such as a shared push or 
 merge. This adds no per-tool parent permission.
 
 A merge is eligible when repository-configured gates pass for the current head
-and base, declared dependencies are met and no applicable hold exists. Build,
+and base, declared dependencies are met, no applicable hold exists and the work
+item's HITL flag is off. With the flag on, a ready PR waits for the user's
+review. The user or the Primarch may turn the flag on; only the user turns it
+off; the Chapter Master cannot change it (T-07). A user instruction to promote
+against the project's policy is recorded as a fact and the Primarch is notified,
+not asked (T-08). Build,
 test and review run outside a short conditional integration step; a moved base
 revalidates only affected evidence. There is no global feature queue. Target
 branches, environments and review policy are repository configuration. The
