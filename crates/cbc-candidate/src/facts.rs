@@ -223,6 +223,8 @@ pub(crate) async fn record_offer(
 }
 
 /// Record the first receipt of a batch's items. Only called once the receipt is authorized.
+/// A batch offered before these facts existed has no rows yet, so the receipt creates one
+/// (expected=0, offer unknown) rather than being lost.
 pub(crate) async fn record_receipt(
     conn: &mut SqliteConnection,
     clock: &CoreClock,
@@ -230,8 +232,8 @@ pub(crate) async fn record_receipt(
     reference: &str,
 ) -> Result<()> {
     let (mono, wall) = clock.now();
-    sqlx::query("UPDATE candidate_recipient_facts SET receipted_instance=?,receipted_mono_us=?,receipted_wall_ms=? WHERE member_id=? AND receipted_instance IS NULL AND sequence IN (SELECT sequence FROM candidate_batch_items WHERE reference=?)")
-        .bind(&clock.instance).bind(mono).bind(wall).bind(member).bind(reference)
+    sqlx::query("INSERT INTO candidate_recipient_facts(sequence,member_id,expected,receipted_instance,receipted_mono_us,receipted_wall_ms) SELECT sequence,?,0,?,?,? FROM candidate_batch_items WHERE reference=? ON CONFLICT(sequence,member_id) DO UPDATE SET receipted_instance=COALESCE(receipted_instance,excluded.receipted_instance), receipted_mono_us=COALESCE(receipted_mono_us,excluded.receipted_mono_us), receipted_wall_ms=COALESCE(receipted_wall_ms,excluded.receipted_wall_ms)")
+        .bind(member).bind(&clock.instance).bind(mono).bind(wall).bind(reference)
         .execute(conn).await?;
     Ok(())
 }
@@ -355,6 +357,22 @@ impl Store {
                 events.push(event(Stage::Receipted, Some(&recipient.member), at, None));
             }
         }
+        // Oldest first. Instances are ordered by when they opened (one owner at a time), and
+        // stamps within an instance by its monotonic clock, so a wall-clock step cannot reorder.
+        let mut conn = self.pool.acquire().await?;
+        let mut rank = std::collections::HashMap::new();
+        for event in &events {
+            if !rank.contains_key(&event.at.instance) {
+                let order: i64 = sqlx::query_scalar(
+                    "SELECT rowid FROM candidate_core_instances WHERE instance_id=?",
+                )
+                .bind(&event.at.instance)
+                .fetch_one(&mut *conn)
+                .await?;
+                rank.insert(event.at.instance.clone(), order);
+            }
+        }
+        events.sort_by_key(|e| (rank[&e.at.instance], e.at.mono_us));
         Ok(events)
     }
 }

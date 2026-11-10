@@ -276,10 +276,10 @@ async fn system_items_are_classified_and_notices_snapshot_their_own_recipients()
         .room;
     let intro = drain_sequences(&store, &peer).await;
     assert_eq!(intro.len(), 1);
-    assert_eq!(
-        timeline(&store, intro[0]).await.class,
-        Some(ItemClass::Introduction)
-    );
+    let intro_timeline = timeline(&store, intro[0]).await;
+    assert_eq!(intro_timeline.class, Some(ItemClass::Introduction));
+    // Members exist before the introduction commits, so its audience is the other member.
+    assert_eq!(members(&intro_timeline), ["peer"]);
 
     let sent = store
         .send_with_notice_interval(&child, &room, "one", "one", 1)
@@ -401,5 +401,92 @@ async fn events_are_versioned_and_carry_no_body_or_batch_reference() {
     assert!(first[1]["batch_tag"]
         .as_str()
         .is_some_and(|t| t.len() == 16));
+    c.store.close().await;
+}
+
+#[tokio::test]
+async fn a_batch_offered_before_the_migration_still_records_its_receipt() {
+    use sqlx::{sqlite::SqliteConnectOptions, Connection};
+    let Case {
+        _temp,
+        sandbox,
+        store,
+        alice,
+        bob,
+    } = pair().await;
+    let sequence = store.send(&alice, "peer-room", "k1", "old").await.unwrap();
+    let batch = store.check(&bob, 10).await.unwrap().unwrap();
+    store.close().await;
+    // A batch offered before migration 0007 has no fact rows; the receipt arrives after upgrade.
+    let options = SqliteConnectOptions::new()
+        .filename(sandbox.database_path())
+        .create_if_missing(false);
+    let mut fixture = sqlx::SqliteConnection::connect_with(&options)
+        .await
+        .unwrap();
+    for table in ["candidate_recipient_facts", "candidate_item_facts"] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE sequence=?"))
+            .bind(sequence)
+            .execute(&mut fixture)
+            .await
+            .unwrap();
+    }
+    fixture.close().await.unwrap();
+    let store = Store::open(&sandbox).await.unwrap();
+    store
+        .receipt(&bob, batch.reference_for_adapter())
+        .await
+        .unwrap();
+    let item = timeline(&store, sequence).await;
+    let fact = recipient(&item, "bob");
+    assert!(!fact.expected);
+    assert!(fact.offered.is_none(), "the old offer was never observed");
+    assert!(
+        fact.receipted.is_some(),
+        "the observed receipt must not be lost"
+    );
+    store.close().await;
+}
+
+#[tokio::test]
+async fn events_are_ordered_by_when_they_happened_not_by_member() {
+    let c = pair().await;
+    c.store
+        .register_member("project", "carol", Role::Participant)
+        .await
+        .unwrap();
+    c.store
+        .create_room("project", "trio", &["alice", "bob", "carol"])
+        .await
+        .unwrap();
+    let carol = c
+        .store
+        .bind_member("project", "carol", "laptop", "chat-c")
+        .await
+        .unwrap();
+    let sequence = c.store.send(&c.alice, "trio", "k1", "hi").await.unwrap();
+    // Carol sorts after Bob by name but checks and receipts first.
+    for member in [&carol, &c.bob] {
+        let batch = c.store.check(member, 10).await.unwrap().unwrap();
+        c.store
+            .receipt(member, batch.reference_for_adapter())
+            .await
+            .unwrap();
+    }
+    let events = c.store.delivery_events("project", sequence).await.unwrap();
+    let order: Vec<(Stage, Option<&str>)> = events
+        .iter()
+        .map(|e| (e.stage, e.member.as_deref()))
+        .collect();
+    assert_eq!(
+        order,
+        [
+            (Stage::Committed, None),
+            (Stage::InboxOffered, Some("carol")),
+            (Stage::Receipted, Some("carol")),
+            (Stage::InboxOffered, Some("bob")),
+            (Stage::Receipted, Some("bob")),
+        ]
+    );
     c.store.close().await;
 }
