@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/Levezze/chatbotchat/compare/v0.14.9...v0.15.0) (2026-11-10)
+
+
+### Features
+
+* **candidate:** isolated shared core and device delivery ([#120](https://github.com/Levezze/chatbotchat/issues/120)) ([ccdcc94](https://github.com/Levezze/chatbotchat/commit/ccdcc94bb168177e8754aa0e01677e90a7787879))
+
 ## [0.14.9](https://github.com/Levezze/chatbotchat/compare/v0.14.8...v0.14.9) (2026-07-09)
 
 
