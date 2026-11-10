@@ -37,6 +37,8 @@ def slug(value, field, limit=48):
 
 
 def resolve_role(role, *, identity=None, theme=None):
+    if role:
+        role = role.removeprefix("wip-")  # Project-local trial skill names (trial decision T-17).
     aliases = {"cbc-" + names[1]: key for key, names in ROLE_NAMES.items()}
     aliases["emperor"] = "cbc-project-lead"
     aliases["cbc-captain"] = "cbc-feature-lead"  # Compatibility, not another tier.

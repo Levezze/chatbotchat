@@ -35,3 +35,17 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+  skills:
+    name: skill package tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Hierarchy and trial skill tests
+        run: python3 -B -m unittest discover -s tools -p 'test_*.py' -v

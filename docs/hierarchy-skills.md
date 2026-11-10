@@ -77,7 +77,9 @@ status updates and the eventual dashboard. Current owner-written files do not pr
 automation. The dashboard reads shared status and question data directly. Its future Emperor
 discusses that data with the user and sends user instructions to Primarchs. Primarchs may reply
 to clarify those instructions; they send no routine reports or escalations to the Emperor.
-Today's human questions go directly to the user through Primarchs. No Emperor setup, report
+User-owned questions go from their owner straight to the user, never through a Primarch
+(trial decision T-10): in the owner's chat today, as canonical requests once the candidate core
+is adopted. No Emperor setup, report
 receiver or periodic status-chasing is needed before the dashboard exists.
 
 ## Installation and refresh
@@ -145,6 +147,21 @@ relationship. Routine coordination needs no per-message human permission or budg
 The current daemon's numeric caps still require normal consensus extensions; the capless
 messaging core is separate. Do not claim a skill rewrite removed a server-enforced cap.
 
+### Project-local trial copy
+
+For the first working trial, install the same package into one project only, under temporary
+`wip-` names (trial decision T-17):
+```bash
+python3 tools/install_trial_skills.py --check --project <worktree>
+python3 tools/install_trial_skills.py --project <worktree>
+```
+It writes `<worktree>/.claude/skills` and `<worktree>/.agents/skills` and nothing else.
+Claude resolves same-named skills enterprise, then personal, then project, and Codex does not
+document a winner, so a project copy under the original names could be shadowed by the global
+`cbc-*` skills. Every entrypoint starts with a line telling the agent to ignore those. Scripts
+accept the `wip-` role form and record the canonical role. Reruns are no-ops; a hand-edited
+trial skill is refused, not overwritten.
+
 cbc-handoff remains an on-demand session replacement utility, preserving unfinished work and
 preventing two sessions using one identity. It is not the normal assignment, status or phase
 transition mechanism. Legacy cbc-orchestrator and cbc-worker stay untouched.
@@ -152,10 +169,10 @@ transition mechanism. Legacy cbc-orchestrator and cbc-worker stay untouched.
 ## Validation
 
 ```bash
-python3 -B -m unittest discover -s tools -p 'test_hierarchy*.py' -v
+python3 -B -m unittest discover -s tools -p 'test_*.py' -v
 ```
 
-Tests cover names, active role creation, historical record preservation, scoped installation,
+CI runs the same command. Tests cover names, active role creation, the trial copy, historical record preservation, scoped installation,
 rollback and cooperative replacement artifacts. They do not prove agent behavior or native
 app permissions. Monitor actual delivery and shorten instructions when a rule adds ceremony
 without improving the result.

@@ -11,6 +11,15 @@ import sys
 
 
 ROLES = ("cbc-project-lead", "cbc-repo-lead", "cbc-feature-lead")
+# Project-local trial skills carry a temporary "wip-" name (trial decision T-17); records keep the canonical role.
+TRIAL_PREFIX = "wip-"
+
+
+def canonical_role(value):
+    role = value.removeprefix(TRIAL_PREFIX)
+    if role not in ROLES:
+        raise argparse.ArgumentTypeError(f"choose from {', '.join(ROLES)} (optionally {TRIAL_PREFIX}-prefixed)")
+    return role
 
 
 def token(value):
@@ -22,6 +31,7 @@ def token(value):
 def bootstrap(root, context, member, role, theme="default", domain=None):
     token(context)
     token(member)
+    role = role.removeprefix(TRIAL_PREFIX)
     if role not in ROLES or theme not in ("default", "warhammer"):
         raise ValueError("unknown role or theme")
     if domain is not None:
@@ -140,7 +150,7 @@ def main():
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--context", required=True, type=token)
     parser.add_argument("--member", required=True, type=token)
-    parser.add_argument("--role", required=True, choices=ROLES)
+    parser.add_argument("--role", required=True, type=canonical_role)
     parser.add_argument("--theme", default="default", choices=("default", "warhammer"))
     parser.add_argument("--domain", type=token)
     args = parser.parse_args()

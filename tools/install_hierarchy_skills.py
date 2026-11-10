@@ -39,10 +39,10 @@ def manifest(directory):
     return result
 
 
-def install(targets, source=SOURCE, check=False, previous=None, backup=None):
+def install(targets, source=SOURCE, check=False, previous=None, backup=None, names=NAMES):
     """Update only exact reviewed baseline directories; preflight all hosts before writes."""
     expected = {}
-    for name in NAMES:
+    for name in names:
         files = manifest(source / name)
         if "SKILL.md" not in files or "agents/openai.yaml" not in files:
             raise ValueError(f"incomplete skill: {source / name}")
@@ -53,7 +53,7 @@ def install(targets, source=SOURCE, check=False, previous=None, backup=None):
         target = Path(target).expanduser().absolute()
         if target.is_symlink() or (target.exists() and not target.is_dir()):
             raise ValueError(f"target must be a real skills directory: {target}")
-        for name in NAMES:
+        for name in names:
             destination = target / name
             if destination.is_symlink():
                 raise ValueError(f"refusing symlink: {destination}")
