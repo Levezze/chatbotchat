@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/Levezze/chatbotchat/compare/v0.16.0...v0.17.0) (2026-11-10)
+
+
+### Features
+
+* **candidate:** durable first-occurrence delivery facts ([#127](https://github.com/Levezze/chatbotchat/issues/127)) ([0f817a1](https://github.com/Levezze/chatbotchat/commit/0f817a19f2cc6005966a3e3c4e53606fba6e9198))
+
 ## [0.16.0](https://github.com/Levezze/chatbotchat/compare/v0.15.0...v0.16.0) (2026-11-10)
 
 
