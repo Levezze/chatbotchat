@@ -79,6 +79,24 @@ message seen. Failed receipt persistence leaves delivery uncertain and work
 recoverable, not falsely completed. Exact timestamp/schema changes belong to
 implementation and migration review.
 
+### As built in #113 PR-A
+
+Migration 0007 adds:
+
+- `candidate_core_instances`: one row per store open.
+- `candidate_item_facts`: one row per committed item, classed `participant`, `introduction`, `notice` or `closure`.
+- `candidate_recipient_facts`: one row per item and recipient.
+
+Every fact is written inside the existing send, close, connect, check and receipt transactions. So a fact exists exactly when its transaction committed, whatever the log level.
+
+- **Committed.** The commit records the item fact and a snapshot of its recipients from `candidate_delivery_items` (`expected = 1`). A later revocation never shrinks the coverage denominator. A notice's snapshot is taken after its recipients are written, so it is the notice's own audience.
+- **Inbox offered.** The first offer is stored, and `offer_count` counts every offer, including the re-offer of an unchanged pending batch.
+- **Receipted.** The first authorized receipt is stored. A receipt refused as no longer eligible records nothing. A repeated receipt changes nothing.
+- **Items older than the migration.** Their commit, class and snapshot are unknown. Offers and receipts for them create a row with `expected = 0`, so they never error. That includes a batch offered before the upgrade and receipted after it, which records the receipt with the offer left unknown.
+- **Clock.** Each stamp holds the instance ID, a monotonic offset from that open, and wall time. An interval is `exact` only when both stamps share an instance. Otherwise it is an `estimate` from wall time.
+- **Event projection.** `delivery_events` projects the facts into `DeliveryEvent` (`schema: 1`). An event carries no body and no batch reference. The reference is the receipt capability, so events carry only `batch_tag`, the first 8 bytes of SHA-256 over a domain-separated reference. Events come oldest first. Instances are ordered by when they opened and stamps within an instance by the monotonic clock, so a wall-clock step cannot reorder them.
+- **Stages the core cannot observe.** Dispatch, native wake, result written and acted-on are declared in the stage enum but have no write path. They arrive with the authenticated connector route in PR-B.
+
 ## Structured logs and correlation
 
 Use one versioned JSON event schema across core, connector and adapters, with a
