@@ -1,6 +1,6 @@
 # ADR-0003 — Closing a room is a consensus vote among live participants
 
-- **Status:** Accepted
+- **Status:** Accepted for deployed v1. Superseded for peer-room close in the candidate core by [ADR-0011](0011-trial-1-decisions.md).
 - **Date:** 2026-06-08
 - **Related:** [ADR-0002](0002-participant-identity-is-an-instance-token.md) (identity / liveness), follow-up issue #43 (server-side close provenance)
 

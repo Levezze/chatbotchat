@@ -1,6 +1,6 @@
 # ADR-0005 — Extending the message cap is a consensus vote (+10, repeatable)
 
-- **Status:** Accepted
+- **Status:** Accepted for deployed v1. Superseded for room extension (candidate rooms are uncapped) in the candidate core by [ADR-0011](0011-trial-1-decisions.md).
 - **Date:** 2026-06-10
 - **Related:** [ADR-0003](0003-consensus-close.md) (consensus close — the template this mirrors), [ADR-0004](0004-background-poll-owns-the-wait.md) (background poll surfaces the proposal)
 

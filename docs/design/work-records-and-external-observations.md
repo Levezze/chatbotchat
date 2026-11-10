@@ -78,7 +78,7 @@ test and review run outside a short conditional integration step; a moved base
 revalidates only affected evidence. There is no global feature queue. Target
 branches, environments and review policy are repository configuration. The
 Chapter Master executes eligible merges. Semantic, cross-repo, migration and
-resource exceptions go to the Primarch as targeted decisions. Merge is not
+resource exceptions within the Primarch's repository mandate go to the Primarch as targeted decisions. Questions the user owns go to the user as requests, not through the Primarch (T-10). Merge is not
 deployment: an assigned promotion has a named release owner through its observed
 outcome. Native permissions and grants stay separate from any role.
 
