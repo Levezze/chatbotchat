@@ -69,18 +69,23 @@ def install(project, check=False):
 
 
 def unignored(project):
-    """Trial skill paths git would stage in project; empty outside a git work tree."""
+    """Hosts with any trial package file git would stage in project; empty outside a git work tree."""
     project = Path(project).expanduser().absolute()
-    probes = [f"{host}/{trial_name('cbc-hierarchy')}/SKILL.md" for host in HOSTS]
+    with tempfile.TemporaryDirectory(prefix="cbc-trial-skills-") as stage:
+        build(Path(stage))
+        files = sorted(str(path.relative_to(stage)) for path in Path(stage).rglob("*") if path.is_file())
+    probes = {host: [f"{host}/{relative}" for relative in files] for host in HOSTS}
     try:
-        result = subprocess.run(["git", "-C", str(project), "check-ignore", "--no-index", *probes],
+        result = subprocess.run(["git", "-C", str(project), "check-ignore", "--no-index", "--stdin"],
+                                input="\n".join(path for paths in probes.values() for path in paths) + "\n",
                                 capture_output=True, text=True)
     except OSError:
         return []
     if result.returncode not in (0, 1):
         return []  # not a work tree, or git failed: nothing to warn about
     ignored = set(result.stdout.splitlines())
-    return [host for host, probe in zip(HOSTS, probes) if probe not in ignored]
+    # Every file must be ignored: one ignored skill or entrypoint says nothing about its siblings.
+    return [host for host, paths in probes.items() if not ignored.issuperset(paths)]
 
 
 def main():

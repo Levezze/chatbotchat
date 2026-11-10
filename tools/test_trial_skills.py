@@ -134,6 +134,10 @@ class TrialSkillTests(unittest.TestCase):
             ["git", "-C", str(self.project), "rev-parse", "--git-path", "info/exclude"], text=True).strip())
         exclude = exclude if exclude.is_absolute() else self.project / exclude
         exclude.parent.mkdir(parents=True, exist_ok=True)
+        # Ignoring one skill (or only entrypoints) still leaves the rest of the package stageable.
+        exclude.write_text("/.claude/skills/wip-cbc-hierarchy/\n/.agents/skills/wip-cbc-hierarchy/\n")
+        partial = subprocess.run(command + ["--check"], capture_output=True, text=True)
+        self.assertIn("not ignored", partial.stderr)
         exclude.write_text("/.claude/skills/wip-*/\n/.agents/skills/wip-*/\n")
         quiet = subprocess.run(command + ["--check"], capture_output=True, text=True)
         self.assertEqual(quiet.returncode, 0, quiet.stderr)
