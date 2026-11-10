@@ -1,12 +1,13 @@
 # Work independently within the assignment
 
 An implementation assignment authorizes its ordinary planning, edits, native subagents,
-tests, reviews, fixes and PR preparation, subject to the user's scope and native controls.
-Use existing grants for publication, merge, deployment or other consequential effects.
+tests, reviews, fixes, PR and eligible merge, subject to the user's scope and native controls.
+Eligible merge follows the repository-configured gates in the shared protocol. Use existing
+grants for deployment, publication or other consequential effects.
 A scope-limited grant for one operation is not automatically a global ban on unrelated work.
 
-The Chapter Master chooses implementation steps. The Primarch resolves repo-wide conflicts
-and sequencing, not each command. In-scope verified Primarch decisions are operative delegated
+The Chapter Master chooses implementation steps and merges eligible work. The Primarch
+declares repo-wide constraints and resolves flagged conflicts, not each command or merge. In-scope verified Primarch decisions are operative delegated
 authority; do not ask the human to repeat an answered question in another chat.
 
 For a genuinely unresolved decision, keep a compact entry:
@@ -19,6 +20,10 @@ when the next operation requires that server. Do not manufacture global-free pro
 permission packages or whole-feature queues unless the actual user or host requires them.
 Preserve existing explicit holds; identify their real author and affected scope rather than
 turning one narrow permission's exclusions into universal prohibitions.
+
+Holds and constraints are scoped: name the branch or surface, reason and release condition.
+A hold affects that operation only. An advisory note is not a hold. A timeout never becomes
+approval, and a manual hold does not expire into consent.
 
 Native review remains separate from task authority. Inspect actual tool results, including
 isError, before dependent actions. Issue a dependent send or mutation only after the gated
@@ -38,5 +43,5 @@ or proof of untested acceptance conditions. Extra discretionary verification is 
 not an automatic gate on an otherwise qualified deliverable. Preserve actual required gates.
 
 At useful checkpoints the Primarch services pending requests across all active Chapter Masters,
-including aged blockers and ready merges. One conversation does not pause the rest of the repo.
+including aged blockers and flagged merge exceptions. One conversation does not pause the rest of the repo.
 This is working discipline; an instruction alone is not a timer or a background scheduler.

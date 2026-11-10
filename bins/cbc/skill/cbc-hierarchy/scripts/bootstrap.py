@@ -37,8 +37,8 @@ def bootstrap(root, context, member, role, theme="default", domain=None):
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     label = f"{context}--{member}"
     powers = {
-        "cbc-feature-lead": "ordinary assigned implementation and native subagents; existing consequential grants apply",
-        "cbc-repo-lead": "assigned repo coordination; existing merge/release grants apply",
+        "cbc-feature-lead": "ordinary assigned implementation, native subagents and eligible merge under repo-configured gates; existing consequential grants apply",
+        "cbc-repo-lead": "repo context, constraints and exceptions; no routine merge approval; existing release grants apply",
         "cbc-project-lead": "future dashboard status and user instructions; dormant before dashboard",
     }[role]
     routes = {

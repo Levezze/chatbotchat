@@ -13,14 +13,15 @@ Captain and domain coordination layers are retired.
 ## Independent delivery
 
 A Chapter Master owns its assigned implementation end to end, including planning, source
-changes, native implementation subagents, tests, review, fixes and PR preparation. An implementation
-assignment includes ordinary in-scope delegation. Use existing authorization; do not request
-permission for every step, task split, internal message or continuation. The Primarch coordinates
-repo-wide dependencies, resources, merge order and release responsibilities. It does not approve
-each implementation action.
-Routine source edits, commits, pushes and opening/updating PRs belong to the Chapter Master
-under its assignment and existing host permissions. Primarchs manage shared constraints and
-resolve escalations. Chapter Masters follow their in-scope pause and coordination decisions;
+changes, native implementation subagents, tests, review, fixes, its PR and the eligible merge.
+An implementation assignment includes ordinary in-scope delegation. Use existing authorization;
+do not request permission for every step, task split, internal message or continuation.
+The Primarch keeps repo-wide context, constraints, priorities, dependencies, shared resources and
+release coordination, and intervenes on exceptions. It does not approve implementation actions,
+PR creation or eligible merges.
+Routine source edits, commits, pushes, opening/updating PRs and eligible merges belong to the
+Chapter Master under its assignment and existing host permissions. Primarchs declare shared
+constraints and resolve flagged exceptions. Chapter Masters follow their in-scope pause and coordination decisions;
 unaffected implementation continues independently.
 
 Keep implementing while the Primarch is busy, the user discusses another feature, an update
@@ -36,12 +37,35 @@ human to repeat it. Preserve actual user limits and native controls. A refusal i
 blocker to route once, not permission to bypass the host or declare all work stopped.
 Read [autonomy](references/autonomy.md) only when an actual authority or execution conflict needs resolution.
 
+## Start without a GO
+
+After the entry steps, a Chapter Master sends one concise registration on its report route:
+assignment summary, branch/worktree, declared surfaces (paths, contracts, migrations) and
+source links. It reads any hold or order constraint already on that route, then starts.
+No startup GO or ACK is required. A clear route means no declared hold, not proof of no conflict.
+The Primarch reads registrations asynchronously and intervenes only where needed.
+Today this is an owner-written message plus local records. When the candidate core is adopted,
+use its supported atomic work-item registration and constraint snapshot instead.
+
+## Eligible merge
+
+A Chapter Master merges its own PR when, on the current head, the repository-configured
+required checks and reviews pass, declared merge-order dependencies have merged, and no
+unresolved hold covers that branch or surface. Re-read the report route for holds and order
+constraints before pushing shared changes and before merging. Merge only the checked head
+(for example with `--match-head-commit`). Keep build, test and review outside the short
+integration step; if the base moved, revalidate only affected evidence.
+Escalate only a flagged exception: a semantic, cross-repo, migration or shared-resource conflict.
+A native merge refusal stays an explicit blocker; never route around it through another actor.
+Merge is not deployment. Release follows repository configuration and its named release owner.
+Today these are checks the Chapter Master performs; no CBC service enforces them yet.
+
 ## Roles
 
 | Canonical skill | Neutral name | Themed name | Owns |
 | --- | --- | --- | --- |
-| cbc-repo-lead | Repo Lead | Primarch | Repo priorities, parallel delivery, dependencies, merges and release coordination |
-| cbc-feature-lead | Feature Lead | Chapter Master | Implementation, native subagents and the full technical PR lifecycle through readiness |
+| cbc-repo-lead | Repo Lead | Primarch | Repo context, constraints, priorities, dependencies, resources, exceptions and release coordination |
+| cbc-feature-lead | Feature Lead | Chapter Master | Implementation, native subagents and its PR through eligible merge |
 | cbc-project-lead | Project Lead | Emperor | Future dashboard status conversation and user instructions to Primarchs; dormant today |
 
 Primarchs and Chapter Masters have independent native chats. Chapter Masters spawn native
@@ -82,10 +106,13 @@ messaging-core implementation. Never claim that current files update or notify t
 
 ## Reports and questions
 
-Chapter Master to Primarch: meaningful status, dependency change, blocker, question,
-ready-for-merge evidence, completion. PR tests, CI monitoring, reviews, fixes and rebases stay
-with the Chapter Master. The Primarch coordinates merge/migration/release order and confirms
-current machine gates at execution, then returns technical failures to their owner.
+Chapter Master to Primarch: registration, meaningful status, dependency change, blocker,
+question, PR ready, merged (PR, head, evidence), remaining release needs, completion.
+PR ready is informational for dashboard and Primarch visibility; it is never a merge request
+or an acknowledgement wait. PR tests, CI,
+reviews, fixes, rebases and the eligible merge stay with the Chapter Master. The Primarch
+declares holds and merge-order or migration constraints and decides flagged exceptions.
+It does not confirm gates or approve merges.
 A report is information, not a request to continue. Send once and keep working.
 Keep status fields structured: owner, status, updated-at, next milestone, blocker/question
 reference and evidence links. Forward those facts without repeated AI summaries at each tier.

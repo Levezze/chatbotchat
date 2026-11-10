@@ -1,6 +1,6 @@
 ---
 name: cbc-chapter-master
-description: Own an implementation as a CBC Chapter Master. Plan, code, spawn native implementation subagents, test and review independently under a Primarch.
+description: Own an implementation as a CBC Chapter Master. Plan, code, spawn native implementation subagents, test, review and merge eligible work independently under a Primarch.
 ---
 
 # CBC Chapter Master

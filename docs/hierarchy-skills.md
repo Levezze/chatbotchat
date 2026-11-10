@@ -4,7 +4,7 @@ Two operational roles. A future dashboard Emperor sits outside their reporting c
 
 | Invocation | Neutral name | Owns |
 | --- | --- | --- |
-| /cbc-primarch | Repo Lead | Parallel delivery across Chapter Masters, repo priorities, dependencies, resource allocation, merge order and release coordination |
+| /cbc-primarch | Repo Lead | Repo context, constraints, priorities, dependencies, resource allocation, exceptions and release coordination |
 | /cbc-chapter-master | Feature Lead | One implementation end to end, including direct coding and native implementation subagents |
 | /cbc-emperor or /emperor | Project Lead | Future dashboard status conversation and user instructions to Primarchs; dormant before the dashboard |
 
@@ -32,20 +32,21 @@ and host permissions directly. The Primarch manages dependencies, access excepti
 resources, without becoming a per-PR approval gate. Its in-scope pause or reconsideration
 instructions apply to the affected work; other work continues.
 
-The Chapter Master owns its PR after opening it: tests, CI monitoring and diagnosis, reviews,
-fixes, rebases and renewed validation until the current head is technically ready.
-The Primarch discusses repo-level scope, resolves dependencies and sequences ready merges,
-migrations and releases. At execution it confirms the reported head and required machine
-gates. A failed gate goes back to its Chapter Master; the Primarch moves to other actionable
-work instead of entering a PR's logs, code or fix/watch loop. Independent work stays parallel.
+The Chapter Master registers once and starts without a GO. It owns its PR after opening it:
+tests, CI monitoring and diagnosis, reviews, fixes, rebases, renewed validation and the merge,
+once the repository-configured gates pass on the current head, declared dependencies have
+merged and no hold covers it. The Primarch discusses repo-level scope, declares holds and
+merge-order or migration constraints, and decides flagged exceptions. It does not confirm
+gates or approve merges, and it never enters a PR's logs, code or fix/watch loop.
+Merge is not deployment; any release has a named owner. Independent work stays parallel.
 
 Only an affected action waits for a real dependency, conflicting write, explicit hold or native
 gate. A scarce server or heavy test slot limits its actual operation. It does not serialize
 source implementation, require every feature to enter a laptop queue or stop independent work.
 Actual resource limits still matter; scheduling belongs at the operation that consumes them.
 
-Reports are meaningful status, dependency changes, genuine blockers/questions, readiness and
-completion. Task splitting and review/fix churn stay local. Native subagents need bounded write
+Reports are registration, meaningful status, dependency changes, genuine blockers/questions,
+merge and completion. Task splitting and review/fix churn stay local. Native subagents need bounded write
 ownership and results, not their own CBC role maps, report rooms or handoff rituals.
 Use peer rooms for relevant implementation contracts, and Primarch peers for repo sequencing.
 

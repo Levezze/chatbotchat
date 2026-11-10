@@ -1,4 +1,4 @@
 interface:
   display_name: "CBC Feature Lead"
-  short_description: "Chapter Master: implementation and native subagents"
-  default_prompt: "Use $cbc-feature-lead to deliver this implementation independently under its Primarch."
+  short_description: "Chapter Master: implementation through eligible merge"
+  default_prompt: "Use $cbc-feature-lead to deliver this implementation through eligible merge under its Primarch."

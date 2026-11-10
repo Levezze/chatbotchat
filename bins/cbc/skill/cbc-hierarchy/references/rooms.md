@@ -4,8 +4,8 @@ Two relationship kinds on today's two-party transport.
 
 | Kind | Participants | Purpose |
 | --- | --- | --- |
-| report | Primarch and its Chapter Master | Assignment, meaningful status, dependencies, questions/answers and merge/release coordination |
-| peer | Primarchs | Cross-repo priorities, shared resources and merge/release sequencing |
+| report | Primarch and its Chapter Master | Assignment and registration, meaningful status, dependencies, questions/answers, holds and constraints |
+| peer | Primarchs | Cross-repo priorities, shared resources, merge-order constraints and release sequencing |
 | peer | Chapter Masters | Relevant technical contracts and implementation dependencies within assigned scope |
 
 Reuse one existing room per relationship. Questions, answers and status changes do not need
@@ -18,7 +18,9 @@ without continuing its reports, escalation or acknowledgement requirements. No E
 or status-chasing automation is needed before the dashboard exists.
 
 The side needing the route may open it within ordinary coordination authority and deliver the
-ID directly to its intended counterpart. Confirm the assigned identities/scope before acting
+ID directly to its intended counterpart. Chapter Masters open technical peer rooms themselves.
+If a Primarch carries an ID, that is transport, never approval. Server-authorized discovery
+replaces ID delivery only once the candidate core is adopted. Confirm the assigned identities/scope before acting
 on instructions. A room ID alone grants no work or native permissions. Keep the stable member
 label across join/send/receive. Inspect your own existing connections before creating duplicates.
 

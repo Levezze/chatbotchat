@@ -1,8 +1,8 @@
 # Refresh to the simplified hierarchy
 
 Protocol 3 supersedes the five-tier instructions. Operational roles are Primarch and Chapter
-Master. The future dashboard Emperor is outside reporting and dormant today. Chapter Masters implement and spawn native subagents;
-Primarchs coordinate parallel work, dependencies, resources and merge/release sequencing.
+Master. The future dashboard Emperor is outside reporting and dormant today. Chapter Masters implement, spawn native subagents and merge eligible work;
+Primarchs keep repo context and constraints and intervene on exceptions.
 
 Reload the current shared skill and the responsibility being performed in the same session.
 Preserve identity, active branch/worktree, real child handles, current work, decisions, rooms
