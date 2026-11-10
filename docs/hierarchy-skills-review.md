@@ -50,7 +50,7 @@ No native app wakeup, cross-app creation, idle poll recovery, server permissions
 
 ## Local installation
 
-The five skills were added to both `/Users/levezze/.claude/skills` and `/Users/levezze/.codex/skills`. Scoped synchronization includes only these new names and their metadata/helper. No legacy skill or global host instruction was replaced. Final verification checks installed bytes against repository sources and the before/after hashes of 43 protected legacy/metadata/Cargo.lock files. The running daemon remained PID 87994 on loopback port 8484.
+The five skills were added to both `~/.claude/skills` and `~/.codex/skills`. Scoped synchronization includes only these new names and their metadata/helper. No legacy skill or global host instruction was replaced. Final verification checks installed bytes against repository sources and the before/after hashes of 43 protected legacy/metadata/Cargo.lock files. The running daemon was not restarted.
 
 ### Themed aliases
 
@@ -95,7 +95,7 @@ and map privacy are still instruction conventions, not server-enforced types or 
 The scoped installed update matched all fourteen existing destination files to their starting
 bytes before changing them, then added the shared reference in both host roots. The installed
 package matches source with zero differences. All 42 protected legacy files remain unchanged,
-and the existing daemon is still PID 87994 on loopback port 8484. The deferred migration
+and the existing daemon was not restarted. The deferred migration
 automation remains paused. No running agent was renamed, reassigned, stopped or migrated.
 
 ### Communication policy and upper-tier context boundaries
@@ -170,8 +170,8 @@ remaining blockers. This was a peer instruction walkthrough, not an independent 
 compliance test. After that review, fourteen existing installed files were byte-matched to
 their pre-edit baseline and updated in the Codex and Claude skill roots. The complete installed
 package matches source, all eleven entries validate, and 43 helper/packaging tests pass.
-All 42 protected legacy files remain byte-for-byte unchanged. The existing daemon remains
-PID 87994 on loopback port 8484. Existing chats must explicitly reread the updated role and
+All 42 protected legacy files remain byte-for-byte unchanged. The existing daemon was
+not restarted. Existing chats must explicitly reread the updated role and
 shared protocol; installation alone does not refresh instructions already in context.
 
 ## 2026-10-26: Optional domain leads and independent feature execution
@@ -223,14 +223,14 @@ Claude's final independent recheck in CBC38704 accepts the corrected v2 package 
 remaining blockers and independently reports all 53 tests passing. Installation then updated
 seven recognized hierarchy directories and added two new directories per host in Claude and
 Codex, eighteen operations total. Backups are at
-`/Users/levezze/.cbc-skill-backups/domain-v2-20261026`, outside discovery. Re-running preflight
+`~/.cbc-skill-backups/domain-v2-20261026`, outside discovery. Re-running preflight
 requires zero changes. No app restart, global configuration, server or legacy skill was changed.
 
 Installed origin is the uncommitted `codex/cbc-hierarchy-skills` worktree package, 35 files.
 SHA-256 of compact sorted JSON mapping package skill names and relative files to their SHA-256:
 `c13b8c047bc475530ab64bbc3ed19e94edfcc173d9db3862ea2428bfda475033`.
 Both installed roots independently match that exact source manifest. All 42 protected legacy
-skill files match their pre-install hashes. The daily listener remains PID 87994 on 8484;
+skill files match their pre-install hashes. The daily listener was not restarted;
 the main checkout still has only its pre-existing Cargo.lock change.
 
 After reading the current native chats, owner-run refresh notices were delivered through the

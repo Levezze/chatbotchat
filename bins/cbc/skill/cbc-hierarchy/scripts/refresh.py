@@ -16,6 +16,14 @@ FIELDS = {
 ROLES = ("cbc-project-lead", "cbc-repo-lead", "cbc-domain-lead", "cbc-feature-lead", "cbc-task-agent")
 
 
+def canonical_role(value):
+    """Accept the project-local trial skill form (trial decision T-17); records keep the canonical role."""
+    role = value.removeprefix("wip-")
+    if role not in ROLES:
+        raise argparse.ArgumentTypeError(f"choose from {', '.join(ROLES)} (optionally wip-prefixed)")
+    return role
+
+
 def refresh(directory, role):
     directory = Path(directory)
     if directory.is_symlink() or role not in ROLES:
@@ -73,7 +81,7 @@ def refresh(directory, role):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", required=True, type=Path)
-    parser.add_argument("--role", required=True, choices=ROLES)
+    parser.add_argument("--role", required=True, type=canonical_role)
     args = parser.parse_args()
     try:
         print(refresh(args.state_dir, args.role))

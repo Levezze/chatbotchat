@@ -16,6 +16,8 @@ Codex supplies its native ID in the command environment. With Claude use
 Never guess an ID from a title or enroll a Chapter Master. The registry under the host's
 `cbc-hierarchy/primarch-sessions/` stores only native IDs and role, not work or authority.
 New/replacement sessions enroll separately; a fork does not inherit enrollment.
+A project-local `wip-` trial copy refuses enrollment, because the hook reloads the globally
+installed role; after compaction a trial Primarch rereads its own role and this protocol.
 
 The one-time hook configuration is installed separately with
 `tools/install_primarch_compaction.py --host <codex|claude> --backup-root <new-private-directory>`

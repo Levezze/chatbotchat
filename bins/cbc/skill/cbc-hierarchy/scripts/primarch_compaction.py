@@ -96,6 +96,10 @@ def main():
     root = host_root(args.host)
     try:
         if args.action == "register":
+            if Path(__file__).resolve().parents[1].name.startswith("wip-"):
+                # The hook reloads the globally installed role, never this project copy (trial decision T-17).
+                raise ValueError("trial copy: do not enroll the compaction hook; it would reload the global "
+                                 "role. After compaction, reread wip-cbc-repo-lead and wip-cbc-hierarchy yourself.")
             session = args.session_id
             if not session and args.host == "codex":
                 session = os.environ.get("CODEX_THREAD_ID") or os.environ.get("CODEX_SESSION_ID")

@@ -84,9 +84,27 @@ class TrialSkillTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         record = (workspace / ".cbc/hierarchy/trial-one/primarch/state.md").read_text()
         self.assertRegex(record, r"(?m)^role: cbc-repo-lead$")
+        refreshed = subprocess.run(
+            [sys.executable, "-B", "-I", str(scripts / "refresh.py"), "--state-dir",
+             str(workspace / ".cbc/hierarchy/trial-one/primarch"), "--role", "wip-cbc-repo-lead"],
+            capture_output=True, text=True)
+        self.assertEqual(refreshed.returncode, 0, refreshed.stderr)
         titles = load("trial_titles", scripts / "session_title.py")
         self.assertEqual(titles.resolve_role("wip-cbc-primarch"), ("cbc-repo-lead", "warhammer"))
         self.assertEqual(titles.resolve_role("wip-cbc-feature-lead"), ("cbc-feature-lead", "default"))
+
+    def test_trial_copy_refuses_global_compaction_enrollment(self):
+        # The hook reloads the globally installed role, so a trial Primarch must not enroll (T-17).
+        trial.install(self.project)
+        home = Path(self.temp.name) / "codex-home"
+        home.mkdir()
+        script = self.targets()[1] / trial.trial_name("cbc-hierarchy") / "scripts/primarch_compaction.py"
+        result = subprocess.run(
+            [sys.executable, "-B", "-I", str(script), "register", "--host", "codex", "--session-id", "trial-1"],
+            capture_output=True, text=True, env={"CODEX_HOME": str(home), "PATH": "/usr/bin:/bin"})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("wip-cbc-repo-lead", result.stderr)
+        self.assertEqual(list(home.iterdir()), [])
 
     def test_rerun_is_idempotent_and_other_project_skills_survive(self):
         for target in self.targets():
