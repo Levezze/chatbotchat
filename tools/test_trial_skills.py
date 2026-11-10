@@ -106,6 +106,39 @@ class TrialSkillTests(unittest.TestCase):
         self.assertIn("wip-cbc-repo-lead", result.stderr)
         self.assertEqual(list(home.iterdir()), [])
 
+    def test_trial_copy_names_an_existing_global_enrollment(self):
+        # Refusing new enrollment cannot undo an old one; the session must be replaced (Codex review, PR #124).
+        trial.install(self.project)
+        home = Path(self.temp.name) / "codex-home"
+        registry = home / "cbc-hierarchy/primarch-sessions/trial-1.json"
+        registry.parent.mkdir(parents=True)
+        registry.write_text('{"schema": 1, "role": "cbc-repo-lead", "session_id": "trial-1"}\n')
+        script = self.targets()[1] / trial.trial_name("cbc-hierarchy") / "scripts/primarch_compaction.py"
+        result = subprocess.run(
+            [sys.executable, "-B", "-I", str(script), "register", "--host", "codex", "--session-id", "trial-1"],
+            capture_output=True, text=True, env={"CODEX_HOME": str(home), "PATH": "/usr/bin:/bin"})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("already enrolled", result.stderr)
+        self.assertIn("new session", result.stderr)
+        self.assertTrue(registry.is_file())
+
+    def test_cli_warns_when_trial_skills_are_not_git_ignored(self):
+        # A routine `git add -A` in a Chapter Master worktree would otherwise commit the trial copy.
+        subprocess.run(["git", "init", "-q", str(self.project)], check=True)
+        command = [sys.executable, "-B", str(ROOT / "tools/install_trial_skills.py"), "--project", str(self.project)]
+        warned = subprocess.run(command + ["--check"], capture_output=True, text=True)
+        self.assertEqual(warned.returncode, 0, warned.stderr)
+        self.assertIn("not ignored", warned.stderr)
+        self.assertIn("info/exclude", warned.stderr)
+        exclude = Path(subprocess.check_output(
+            ["git", "-C", str(self.project), "rev-parse", "--git-path", "info/exclude"], text=True).strip())
+        exclude = exclude if exclude.is_absolute() else self.project / exclude
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("/.claude/skills/wip-*/\n/.agents/skills/wip-*/\n")
+        quiet = subprocess.run(command + ["--check"], capture_output=True, text=True)
+        self.assertEqual(quiet.returncode, 0, quiet.stderr)
+        self.assertNotIn("not ignored", quiet.stderr)
+
     def test_rerun_is_idempotent_and_other_project_skills_survive(self):
         for target in self.targets():
             (target / PRESERVED).mkdir(parents=True)

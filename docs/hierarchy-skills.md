@@ -162,6 +162,15 @@ document a winner, so a project copy under the original names could be shadowed 
 accept the `wip-` role form and record the canonical role. Reruns are no-ops; a hand-edited
 trial skill is refused, not overwritten.
 
+Two trial-only behaviours:
+- The trial copy refuses to enroll the Primarch compaction hook, because the hook reloads the
+  globally installed role. A session already enrolled globally is reported, not unenrolled; run
+  the trial in a new session.
+- The installer warns on stderr when the trial skill paths are not git-ignored in the project.
+
+Known gap (#125): hierarchy records live under `.cbc/hierarchy/` and are not read by the v1
+Stop-hook poll advisory.
+
 cbc-handoff remains an on-demand session replacement utility, preserving unfinished work and
 preventing two sessions using one identity. It is not the normal assignment, status or phase
 transition mechanism. Legacy cbc-orchestrator and cbc-worker stay untouched.

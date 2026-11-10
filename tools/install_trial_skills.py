@@ -10,6 +10,7 @@ import argparse
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -67,6 +68,21 @@ def install(project, check=False):
                                  names=tuple(trial_name(name) for name in hierarchy.NAMES))
 
 
+def unignored(project):
+    """Trial skill paths git would stage in project; empty outside a git work tree."""
+    project = Path(project).expanduser().absolute()
+    probes = [f"{host}/{trial_name('cbc-hierarchy')}/SKILL.md" for host in HOSTS]
+    try:
+        result = subprocess.run(["git", "-C", str(project), "check-ignore", "--no-index", *probes],
+                                capture_output=True, text=True)
+    except OSError:
+        return []
+    if result.returncode not in (0, 1):
+        return []  # not a work tree, or git failed: nothing to warn about
+    ignored = set(result.stdout.splitlines())
+    return [host for host, probe in zip(HOSTS, probes) if probe not in ignored]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", required=True, type=Path, help="project or worktree root")
@@ -80,6 +96,11 @@ def main():
           "Matching skills unchanged; differing skills refused.")
     for path in changes:
         print(path)
+    exposed = unignored(args.project)
+    if exposed:
+        print(f"warning: {', '.join(exposed)}/{PREFIX}* not ignored by git; a routine `git add -A` would commit "
+              "the trial copy. Add `/.claude/skills/wip-*/` and `/.agents/skills/wip-*/` to the file named by "
+              "`git rev-parse --git-path info/exclude`.", file=sys.stderr)
 
 
 if __name__ == "__main__":

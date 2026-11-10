@@ -96,13 +96,22 @@ def main():
     root = host_root(args.host)
     try:
         if args.action == "register":
-            if Path(__file__).resolve().parents[1].name.startswith("wip-"):
-                # The hook reloads the globally installed role, never this project copy (trial decision T-17).
-                raise ValueError("trial copy: do not enroll the compaction hook; it would reload the global "
-                                 "role. After compaction, reread wip-cbc-repo-lead and wip-cbc-hierarchy yourself.")
             session = args.session_id
             if not session and args.host == "codex":
                 session = os.environ.get("CODEX_THREAD_ID") or os.environ.get("CODEX_SESSION_ID")
+            if Path(__file__).resolve().parents[1].name.startswith("wip-"):
+                # The hook reloads the globally installed role, never this project copy (trial decision T-17).
+                message = ("trial copy: do not enroll the compaction hook; it would reload the global role. "
+                           "After compaction, reread wip-cbc-repo-lead and wip-cbc-hierarchy yourself.")
+                try:
+                    enrolled = bool(session) and registry_path(root, session).exists()
+                except ValueError:
+                    enrolled = False
+                if enrolled:
+                    # Refusing cannot undo an earlier enrollment, and this script never deletes one.
+                    message += (" This session is already enrolled globally, so compaction will still inject the "
+                                "legacy role: run the trial in a new session.")
+                raise ValueError(message)
             print(register(root, session_token(session)))
         else:
             raw = sys.stdin.read(MAX_INPUT + 1)

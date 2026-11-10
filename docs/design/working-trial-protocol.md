@@ -119,7 +119,7 @@ Two fresh peers on the pinned build, with no hierarchy and no assignments. The p
 1. Both peers try to open a peer room at the same moment, and exactly one room results. The second opener is told the room exists and joins it.
 2. Messages flow both ways, including while the recipient is busy with a longer tool call.
 3. One peer closes the room alone, with a reason. The next open creates a replacement that links to the closed room.
-4. Each peer's identity survives a compaction and an app restart. A forked session gets a new identity.
+4. Each peer's identity survives a compaction and an app restart. A forked session gets a new identity. The trial copy refuses to enroll the Primarch compaction hook, because that hook reloads the globally installed legacy role. After a compaction the agent rereads `wip-cbc-repo-lead` and `wip-cbc-hierarchy` itself, so this check tests core-bound identity plus the agent's own reread, not the hook.
 5. After setup, the user clicks zero CBC-related approval prompts.
 6. Every committed item reaches a receipt or an explicit failure.
 
@@ -147,6 +147,8 @@ Each item is recorded in the run manifest before the go.
 - [ ] Core build pinned. Record the commit, the binary hash and the state directory. Record that no agent has write access to that binary or directory path through its allowlist.
 - [ ] Candidate settings recorded: recovery interval, log level, and fallback **off** (T-05).
 - [ ] `wip-cbc-*` skills installed project-local in each trial worktree, for both Claude and Codex. Record the skill source commit.
+- [ ] The trial skill paths are git-ignored in every trial worktree, so a routine `git add -A` cannot put them into a Chapter Master's PR. The installer warns when they are not. Add `/.claude/skills/wip-*/` and `/.agents/skills/wip-*/` to the file named by `git rev-parse --git-path info/exclude`. In a linked worktree that file is shared by every worktree of the repository, so record the change and remove it after the run.
+- [ ] Every seat is a brand-new session. No seat may already be enrolled in the global Primarch compaction hook, because refusing new enrollment cannot undo an old one. The trial installer's `primarch_compaction.py register` reports an existing enrollment.
 - [ ] Project-local allowlists written (T-24). Record their exact contents.
 - [ ] Worktrees created from `origin/main`, one per Chapter Master, plus the Primarch's read-only checkout.
 - [ ] Launch sheet: each seat's first message, verbatim, including the grant.
@@ -259,6 +261,7 @@ Each trial changes as few variables as possible relative to the last one, and it
 - Two repositories with one Primarch each, plus a cross-repository contract between Chapter Masters.
 - The fallback turned on deliberately, measured against a native-only baseline.
 - Longer runs with compaction under real load.
+- A trial-aware compaction reload, so identity-across-compaction tests the hook rather than the agent's own reread (trial 1 refuses the hook; see phase 1, item 4).
 - A second device, once #118 exists.
 - Responsibility attention (#115) and the Emperor (#116), once built.
 
