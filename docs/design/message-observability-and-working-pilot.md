@@ -147,6 +147,11 @@ approval requirement. Review baseline data and criteria before final qualificati
 3. Trace every sent item to receipt, failure or still-pending state. Verify native
    uptake and actual relevant response/work separately. Measure duplicate hints,
    delivery attempts and independent progress while another lane is waiting.
+   Include a ready request addressed to the busy Primarch: distinguish receipt
+   from an actionable disposition and subsequent execution. Record waiting age
+   without interpreting it as transport loss. A tool error cannot be a delivered
+   send. The [release follow-through case](../case-studies/2026-11-09-release-follow-through.md)
+   motivates this scenario; full durable owner obligations remain in #115.
 4. Exercise driver/core restart, re-entry after compaction, explicit Stop and an
    exited engine. Record native setup/approval cases distinctly. Do not assume
    a successful queue/open command means the model restarted.

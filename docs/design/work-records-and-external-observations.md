@@ -27,6 +27,15 @@ maintains timestamps, room/read state, routing and projections deterministically
 Transport activity does not reset the age of meaningful progress. Routine CI or
 receipt bookkeeping does not require another model-authored summary.
 
+A coordinator-owned action survives a read receipt, an unrelated conversation
+or completion of a status report. Preserve its owner, ready/request time, next
+action, disposition and outcome evidence; a last-poll timestamp cannot reset its
+age or resolve it. Classify actual native pending/refusal separately from agent
+interpretation, product decisions, resource conflict and routine coordination.
+An unattempted native action has an unknown verdict. The
+[release follow-through case](../case-studies/2026-11-09-release-follow-through.md)
+supplies concrete qualification scenarios without adding another approval tier.
+
 The optional scope-supervisor [draft](../proposals/optional-scope-supervisor.md)
 remains for discussion outside the execution/approval chain. It is not a
 prerequisite for this store, the trial or ordinary work.
