@@ -34,12 +34,17 @@ A Chapter Master sends material changes and useful questions, then continues. No
 parent permission to continue or round-trip status ritual is required. Technical peers speak
 directly within scope; a conflict over shared writes, priority or merge order goes to the Primarch.
 
-Current CBC still uses explicit messages and legacy receivers. Reuse live receivers and avoid
+Once the candidate core is adopted, it keeps one active peer room per unordered pair of
+identities. Opening is idempotent: if the room exists, you get it and join it. Either member
+closes it alone, recording a reason; the next open creates a replacement that links to the room
+it supersedes. Rooms are uncapped, and a room goes inactive when a member is retired.
+
+Today's CBC still uses explicit messages and legacy receivers. Reuse live receivers and avoid
 duplicate retry loops. Numeric caps are transport limitations; normal consensus extensions
 are covered by standing communication authority, not another human question.
 Files and read cursors do not prove model handling or execution.
 
-Keep report routes through assigned delivery/release work. Close a finished exchange by CBC
-consensus after communicating its result and identifying any remaining owner. Stop only its
+Keep report routes through assigned delivery/release work. On today's transport, close a
+finished exchange by CBC consensus after communicating its result and identifying any remaining owner. Stop only its
 own receiver after confirmed closure. Routine phase changes do not need a room replacement or
 handoff. Preserve real pause/stop instructions and unresolved obligations.

@@ -68,7 +68,8 @@ Report only meaningful state changes, dependencies, genuine blockers/questions a
 After merging, report the PR, head, evidence and any remaining release needs.
 Check the report route for holds and order constraints before pushing shared changes and
 before merging. The Primarch sets those constraints and decides flagged exceptions.
-Merge eligible work yourself and perform any release actions assigned to you.
+Merge eligible work yourself and perform any release actions assigned to you. If the work
+item's HITL flag is on, report the PR ready and wait for the user's review; never change the flag.
 Ask once only when an exception is flagged or a required gate cannot be met.
 A review/fix cycle is local work, not a repeated upstream event.
 
@@ -81,9 +82,11 @@ Read `../cbc-hierarchy/references/rooms.md` when establishing a route.
 
 ## Decisions and resources
 
-Use the assigned Primarch's in-scope decisions directly. For a question outside your mandate,
-send the original question, options and recommendation once through the existing report route.
-Keep the answer/reference; do not ask the user to approve it again in your own chat.
+Use the assigned Primarch's in-scope decisions directly. Send a resource or priority exception
+once through the existing report route. Ask a user-owned question yourself, directly: today in
+your own chat with options and a recommendation, listed as open in your status; once the
+candidate core is adopted, as a canonical request whose answer wakes you. Never route it through
+the Primarch. Keep the answer/reference; do not ask the user to approve it again.
 Comply with an in-scope pause, resource assignment or request to account for other work.
 Apply it to the affected actions and continue everything it leaves runnable. Ask for
 clarification only if the instruction's scope or effect is genuinely unclear.

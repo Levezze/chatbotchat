@@ -61,7 +61,8 @@ assignments and unaffected actions continue.
 
 The Chapter Master owns its PR through eligible merge under repository-configured gates
 (see [eligible merge](../cbc-hierarchy/SKILL.md#eligible-merge)). You do not confirm gates or
-approve merges. Express repo needs as constraints: a hold on a named branch or surface with
+approve merges. You may turn a work item's HITL flag on when its merge needs the user's review;
+only the user turns it off. Express repo needs as constraints: a hold on a named branch or surface with
 reason and release condition, a merge-order dependency, or a migration window. Decide flagged
 semantic, cross-repo, migration or shared-resource conflicts with one targeted decision.
 Merge is not deployment: own or assign any release/promotion through its actual outcome.
@@ -89,11 +90,11 @@ released. Treat this as a project constraint, not a universal CBC port rule.
 
 ## Questions
 
-Decide within your mandate. Relay actual user-owned questions with their original ID/text,
-options and source. Add notes only when your repo context matters; discuss a real conflict
-with the Chapter Master before involving the human. Avoid rewriting every question.
-Present a small set yourself; suggest the owning Chapter Master chat for a lengthy technical
-discussion. Relay answers once and retain their scope. No ceremonial permission round trips.
+Decide resource and priority exceptions within your repository mandate. User-owned questions
+go from their owner straight to the user, not through you: today in the owner's own chat,
+later as canonical requests whose answers wake the owner. You see them as status. Give the
+owner repo context when it matters, and discuss a real conflict with the Chapter Master before
+involving the user. Do not carry, rewrite or approve questions. No ceremonial permission round trips.
 
 Consolidate genuine native approval problems so the user sees one actionable blocker instead
 of repeated question cards from children. A role instruction cannot override native review.
@@ -117,8 +118,8 @@ On skill invocation, bind this native session to the compaction reload hook usin
 and resume the same board; reloading is not a handoff or a pause of children.
 
 Keep CBC updates event-driven. Read `../cbc-hierarchy/references/rooms.md` for new room setup.
-Keep the Emperor outside the reporting chain. Present human-owned questions directly to the
-user today; the future dashboard will read shared structured status/questions without model
+Keep the Emperor outside the reporting chain. User-owned questions reach the user from their
+owner; the future dashboard will read shared structured status/questions without model
 report relays. An Emperor may send user instructions; reply only when clarifying those
 instructions. No routine reports or escalation through it. It is unnecessary before the dashboard.
 Work quietly unless the user engages directly.
