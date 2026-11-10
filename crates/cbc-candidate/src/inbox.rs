@@ -1,6 +1,7 @@
 //! Durable member-bound inbox. Provisioning methods are trusted fixture administration only.
 use crate::{
     bindings::{valid_id, validate_on, SessionBinding},
+    facts::{self, ItemClass},
     store::Store,
 };
 use anyhow::{ensure, Result};
@@ -99,6 +100,7 @@ impl Store {
                 .bind(room)
                 .execute(&mut *tx)
                 .await?;
+            facts::record_commit(&mut tx, &self.clock, sequence, ItemClass::Closure).await?;
             sequence
         };
         tx.commit().await?;
@@ -140,6 +142,7 @@ impl Store {
                 .bind(reference)
                 .execute(&mut *tx)
                 .await?;
+            facts::record_receipt(&mut tx, &self.clock, &binding.member_id, reference).await?;
         }
         tx.commit().await?;
         Ok(())
@@ -264,10 +267,11 @@ impl Store {
         let sequence = sqlx::query("INSERT INTO candidate_items(context_id,room_id,sender,kind,body,request_key) VALUES (?,?,?,'message',?,?) RETURNING sequence")
             .bind(&binding.context_id).bind(room).bind(&binding.member_id).bind(body).bind(key)
             .fetch_one(&mut *tx).await?.try_get("sequence")?;
+        facts::record_commit(&mut tx, &self.clock, sequence, ItemClass::Participant).await?;
         let count: i64 = sqlx::query_scalar("UPDATE candidate_rooms SET participant_message_count=participant_message_count+1 WHERE context_id=? AND room_id=? AND participant_message_count<9223372036854775807 RETURNING participant_message_count")
             .bind(&binding.context_id).bind(room).fetch_one(&mut *tx).await?;
         if count % interval as i64 == 0 {
-            emit_room_notice(&mut tx, binding, room, count).await?;
+            emit_room_notice(&mut tx, &self.clock, binding, room, count).await?;
         }
         tx.commit().await?;
         Ok(sequence)
@@ -283,6 +287,15 @@ impl Store {
         if let Some(reference) = pending {
             if batch_authorized(&mut tx, binding, &reference).await? {
                 let items = batch_items(&mut tx, binding, &reference).await?;
+                let sequences: Vec<i64> = items.iter().map(|i| i.sequence).collect();
+                facts::record_offer(
+                    &mut tx,
+                    &self.clock,
+                    &binding.member_id,
+                    &reference,
+                    &sequences,
+                )
+                .await?;
                 tx.commit().await?;
                 return Ok(Some(Batch { items, reference }));
             }
@@ -370,6 +383,15 @@ impl Store {
             }
             sqlx::query("INSERT INTO candidate_inbox_state(context_id,member_id,last_room) VALUES (?,?,?) ON CONFLICT(context_id,member_id) DO UPDATE SET last_room=excluded.last_room")
                 .bind(&binding.context_id).bind(&binding.member_id).bind(&items.last().expect("nonempty batch").room).execute(&mut *tx).await?;
+            let sequences: Vec<i64> = items.iter().map(|i| i.sequence).collect();
+            facts::record_offer(
+                &mut tx,
+                &self.clock,
+                &binding.member_id,
+                &reference,
+                &sequences,
+            )
+            .await?;
             Some(Batch { items, reference })
         };
         tx.commit().await?;
@@ -409,6 +431,7 @@ async fn batch_items(
 
 async fn emit_room_notice(
     conn: &mut SqliteConnection,
+    clock: &facts::CoreClock,
     binding: &SessionBinding,
     room: &str,
     count: i64,
@@ -433,7 +456,8 @@ async fn emit_room_notice(
             .execute(&mut *conn)
             .await?;
     }
-    Ok(())
+    // After the recipients exist, so the snapshot is the notice's own audience.
+    facts::record_commit(conn, clock, sequence, ItemClass::Notice).await
 }
 
 async fn authorized_room(

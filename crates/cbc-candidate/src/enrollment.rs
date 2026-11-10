@@ -542,6 +542,13 @@ impl Store {
             )?;
             let sequence:i64=sqlx::query_scalar("INSERT INTO candidate_items(context_id,room_id,sender,kind,body) VALUES (?,?,?,'message',?) RETURNING sequence")
                 .bind(&binding.context_id).bind(&room).bind(&binding.member_id).bind(body).fetch_one(&mut *tx).await?;
+            crate::facts::record_commit(
+                &mut tx,
+                &self.clock,
+                sequence,
+                crate::facts::ItemClass::Introduction,
+            )
+            .await?;
             sqlx::query("INSERT INTO candidate_connections(context_id,first_member,second_member,kind,scope_ref,room_id,introduction_sequence) VALUES (?,?,?,?,?,?,?)")
                 .bind(&binding.context_id).bind(first).bind(second).bind(kind.as_str()).bind(scope_ref).bind(&room).bind(sequence).execute(&mut *tx).await?;
             room

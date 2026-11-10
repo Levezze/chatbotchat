@@ -20,6 +20,7 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 #[must_use = "call close().await before deliberately transferring candidate database ownership"]
 pub struct Store {
     pub(crate) pool: SqlitePool,
+    pub(crate) clock: crate::facts::CoreClock,
     lease: Option<OwnerLease>,
 }
 
@@ -92,8 +93,16 @@ impl Store {
             pool.close().await;
             return Err(error);
         }
+        let clock = match start_clock(&pool).await {
+            Ok(clock) => clock,
+            Err(error) => {
+                pool.close().await;
+                return Err(error);
+            }
+        };
         Ok(Self {
             pool,
+            clock,
             lease: Some(OwnerLease {
                 file: Some(lease),
                 may_release: false,
@@ -179,6 +188,11 @@ async fn apply_migrations(pool: &SqlitePool) -> Result<()> {
             .await?;
     }
     Ok(())
+}
+
+async fn start_clock(pool: &SqlitePool) -> Result<crate::facts::CoreClock> {
+    let mut conn = pool.acquire().await?;
+    crate::facts::CoreClock::start(&mut conn).await
 }
 
 async fn connect(path: &Path, journal: SqliteJournalMode) -> Result<SqlitePool> {

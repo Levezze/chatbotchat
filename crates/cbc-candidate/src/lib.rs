@@ -2,6 +2,7 @@
 pub mod bindings;
 pub mod connector;
 pub mod enrollment;
+pub mod facts;
 pub mod inbox;
 pub mod native_target;
 pub mod owner;
@@ -33,7 +34,7 @@ const FILES: [&str; 14] = [
     "owner.key",
 ];
 pub const APPLICATION_ID: u32 = 0x43424332;
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
