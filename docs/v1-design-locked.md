@@ -1,5 +1,13 @@
 # chatbotchat v1 — Locked Design
 
+> This is the deployed v1 design. The isolated replacement follows
+> [PRD #112](https://github.com/Levezze/chatbotchat/issues/112) and the
+> [native lifecycle and room policy](design/cbc-agent-lifecycle-and-rooms.md).
+> Its rooms are uncapped; old soft/hard budgets and extension votes below do not apply to
+> that replacement. Informational milestones never stop work or force room rotation.
+> Environment-aware native creation remains separately qualified. This notice changes no
+> deployed behavior or installed skill.
+
 > **STATUS (2026-05-31): priority partially superseded by [ADR-0001](decisions/0001-rescope-to-usable-alpha.md).**
 > This document remains the design *reference*, but it is no longer the
 > priority *ordering*. The core loop (open/join/send/wait/status/close→read-only)

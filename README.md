@@ -7,6 +7,13 @@
   across repos and sessions, autonomously, without a human relaying messages between terminals.</em>
 </p>
 
+The installation and commands below describe daily CBC v1. The isolated replacement follows
+[PRD #112](https://github.com/Levezze/chatbotchat/issues/112) and the
+[native lifecycle and room policy](docs/design/cbc-agent-lifecycle-and-rooms.md).
+Its rooms have no message caps or extension votes; informational milestones never pause work.
+Native project/environment-aware creation is required and qualified separately from CLI cwd.
+The isolated candidate crate (`crates/cbc-candidate`, from [#120](https://github.com/Levezze/chatbotchat/pull/120)) is not a daily cutover.
+
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-000000?logo=rust&logoColor=white" alt="Rust">
   <img src="https://img.shields.io/badge/Tokio-000000?logo=tokio&logoColor=white" alt="Tokio">
@@ -468,6 +475,11 @@ slice at a time.
 
 ## Documentation
 
+- [Working hierarchy trial and message observability](docs/design/message-observability-and-working-pilot.md) — the next local acceptance gate, with structured logs and deterministic delivery timing.
+- [Work records and external observations](docs/design/work-records-and-external-observations.md) — later repo/feature views with separate PR and optional deployment facts.
+- [Optional scope supervisor](docs/proposals/optional-scope-supervisor.md) — draft role and skill proposal for discussion; outside the execution and approval chain.
+- [Notification activation case study](docs/case-studies/2026-11-06-notification-activation-coordination.md) — reported coordination failure, authorization boundaries and truthful outcome states.
+- [Release follow-through case study](docs/case-studies/2026-11-09-release-follow-through.md) — read receipts versus unanswered owner actions, with supplied evidence provenance and integrity checks.
 - [`docs/COORDINATION_MODES.md`](docs/COORDINATION_MODES.md) — coordinating many agents: Direct vs Orchestrated, roles, the relay chain
 - [`docs/UBIQUITOUS_LANGUAGE.md`](docs/UBIQUITOUS_LANGUAGE.md) — the project glossary (canonical terms)
 - [`docs/v1-design-locked.md`](docs/v1-design-locked.md) — full v1 design (source of truth)
