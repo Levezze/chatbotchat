@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/Levezze/chatbotchat/compare/v0.15.0...v0.16.0) (2026-11-10)
+
+
+### Features
+
+* **skills:** two-role hierarchy package with a project-local trial copy ([#124](https://github.com/Levezze/chatbotchat/issues/124)) ([46f4669](https://github.com/Levezze/chatbotchat/commit/46f4669891f61d50b2a04dafaeb9af6a5ce79c8b))
+
 ## [0.15.0](https://github.com/Levezze/chatbotchat/compare/v0.14.9...v0.15.0) (2026-11-10)
 
 
