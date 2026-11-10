@@ -1,0 +1,4 @@
+interface:
+  display_name: "CBC Chapter Master"
+  short_description: "Own implementation through eligible merge independently"
+  default_prompt: "Use $cbc-chapter-master to act as the CBC Chapter Master."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "CBC Primarch"
+  short_description: "Primarch: themed CBC Repo Lead alias"
+  default_prompt: "Use $cbc-primarch to act as the CBC Primarch."

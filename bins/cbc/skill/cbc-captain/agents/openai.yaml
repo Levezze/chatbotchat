@@ -1,0 +1,4 @@
+interface:
+  display_name: "CBC Captain compatibility alias"
+  short_description: "Compatibility alias for implementation-owning Chapter Master"
+  default_prompt: "Use $cbc-captain as the cbc-chapter-master compatibility alias for this implementation."

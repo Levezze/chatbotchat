@@ -1,0 +1,4 @@
+interface:
+  display_name: "CBC Task Agent"
+  short_description: "Techmarine: bounded implementation under a lead"
+  default_prompt: "Use $cbc-task-agent to implement a bounded assignment under my Feature Lead."

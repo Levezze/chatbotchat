@@ -1,0 +1,4 @@
+interface:
+  display_name: "CBC Repo Lead"
+  short_description: "Primarch: repo constraints, priorities and exceptions"
+  default_prompt: "Use $cbc-repo-lead to keep repository context and constraints and handle exceptions, without implementing or approving routine merges."
