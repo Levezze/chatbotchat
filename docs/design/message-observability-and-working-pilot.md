@@ -3,6 +3,10 @@
 Requirements clarified 2026-11-09 for PRD #112 and stage #113. This is a design
 and acceptance update, not implemented logging or a completed trial.
 
+Updated 2026-11-10: the [working trial protocol](working-trial-protocol.md) holds
+the decision record (T-01 to T-27), the trial setup, the measurements and the run
+log. Where it differs from this document, the protocol is newer and wins.
+
 ## First framework acceptance gate
 
 The existing native runs are preliminary transport probes. Marker exchanges,
@@ -14,7 +18,8 @@ one Repo Lead/Primarch and at least two implementation-owning Feature Leads/
 Chapter Masters. Use actual bounded coding, testing and review assignments in
 candidate-only workspaces. Include Codex and Claude native apps; qualify CLI
 profiles separately. Native helpers remain Chapter Master subagents, not another
-mandatory CBC reporting tier.
+mandatory CBC reporting tier. Trial 1 seats both Chapter Masters in Claude Code
+and the Primarch in Codex (T-13).
 
 Chapter Masters own their assignments through eligible merge: worktree,
 implementation, native helpers, tests, CI, reviews, PR and merge under
@@ -30,8 +35,11 @@ implementing, running tools and discussing another assignment.
 Record the assignments, versions, native identities, actual role instructions,
 configuration revision and isolated resources before the trial. Do not migrate
 daily agents or use another product's work as a test. Standard one-time native
-setup consent is distinct from repeated coordination approvals. No dashboard,
-Emperor, new supervisor role or full work-map service is a prerequisite.
+setup consent is distinct from repeated coordination approvals. No Emperor, new
+supervisor role or full work-map service is a prerequisite. By decision T-09 and
+T-11, the record layer (registration, work-item revisions, requests, outbox) and
+a dashboard skeleton are built before the hierarchy phase, so that the trial
+measures the intended topology rather than status passed by chat.
 
 ## Delivery facts and the meaning of seen
 
@@ -222,7 +230,12 @@ Keep #113 as one runnable stage with three focused implementation PRs:
 - B: connector/adapter/mod correlation and bounded logging, live filters,
   diagnostic failure behavior, scoped activity proxy and core-directed shared
   recovery path. The full responsibility scheduler stays in #115.
-- C: reproducible manifest and deterministic timing/coverage/pending report,
+- Record layer (moved forward from #115, T-09): core-bound identity (T-25),
+  one active peer room per pair (T-26), work items with the HITL flag (T-07),
+  atomic revisions, requests with callbacks, outbox and fact-derived waits.
+- Dashboard skeleton (moved forward from #116, T-11, T-12): work items, open
+  requests and the outbox timeline, with answers through a browser session.
+- C: reproducible manifest and deterministic timing/coverage/pending/wait report,
   then the working-role trial using needed candidate improvements still open
   at trial time, with disjoint ownership.
 

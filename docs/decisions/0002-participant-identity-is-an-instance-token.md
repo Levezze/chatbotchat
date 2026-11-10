@@ -1,6 +1,6 @@
 # ADR-0002 — Participant identity is an instance token, not the (repo, model, cwd) tuple
 
-- **Status:** Accepted
+- **Status:** Accepted for deployed v1. Superseded for identity resolution in the candidate core by [ADR-0011](0011-trial-1-decisions.md).
 - **Date:** 2026-06-02
 - **Supersedes the Identity section of:** [`docs/v1-design-locked.md`](../v1-design-locked.md)
 
