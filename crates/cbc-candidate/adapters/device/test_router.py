@@ -42,7 +42,7 @@ class DeviceTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="cbc-device-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        verified = patch.object(device.DeviceRouter, "verify_target_registry", return_value=None)
+        verified = patch.object(device.DeviceRouter, "verify_target_registry", return_value=set())
         verified.start()
         self.addCleanup(verified.stop)
         os.chmod(self.root, 0o700)
@@ -164,6 +164,44 @@ class DeviceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 router.refresh_profile()
         self.assertEqual(router.all_bindings, original)
+
+    def revoked_status(self, revoked):
+        agreed = {"type": "binding_status", "native_target": None,
+                  "last_receipted_sequence": 0, "first_unread_sequence": None}
+        # Accepts a bound or unbound call: (router, grant, timeout) or (grant, timeout).
+        return lambda *call: ({"type": "error", "code": "invalid_binding", "message": "revoked"}
+                              if call[-2]["session"] in revoked else dict(agreed))
+
+    def test_startup_quarantines_a_revoked_binding_instead_of_aborting_the_device(self):
+        with patch.object(device.DeviceRouter, "verify_target_registry", VERIFY_TARGET_REGISTRY), \
+                patch.object(device.DeviceRouter, "read_wake_status", self.revoked_status({SESSION})):
+            router = device.DeviceRouter(self.args())
+        self.addCleanup(self.cleanup_router, router)
+        self.assertEqual(router.quarantined, {SESSION})
+        self.assertEqual(router.feed.keys, {("project", "claude")})
+        self.assertEqual(set(router.bindings), {CLAUDE})
+        self.assertIsNone(router.native_binding(SESSION))
+
+    def test_refresh_quarantines_a_revoked_binding_instead_of_rejecting_the_profile(self):
+        router = device.DeviceRouter(self.args())
+        self.addCleanup(self.cleanup_router, router)
+        router.verify_target_registry = VERIFY_TARGET_REGISTRY.__get__(router)
+        with patch.object(router, "read_wake_status", self.revoked_status({CLAUDE})):
+            router.refresh_profile()
+        self.assertEqual(router.quarantined, {CLAUDE})
+        self.assertEqual(router.feed.keys, {("project", "codex")})
+        self.assertEqual(set(router.bindings), set())
+
+    def test_target_disagreement_still_rejects_startup_beside_a_revoked_binding(self):
+        mismatch = {"type": "binding_status", "native_target": execution_target(self.root, "desktop")}
+        def status(_router, grant, _timeout):
+            if grant["session"] == SESSION:
+                return {"type": "error", "code": "invalid_binding"}
+            return mismatch
+        with patch.object(device.DeviceRouter, "verify_target_registry", VERIFY_TARGET_REGISTRY), \
+                patch.object(device.DeviceRouter, "read_wake_status", status), \
+                self.assertRaisesRegex(ValueError, "core binding authority"):
+            device.DeviceRouter(self.args())
 
     def test_profile_edit_and_v1_downgrade_cannot_weaken_persisted_epoch_target(self):
         persisted = execution_target(os.path.realpath(self.root), "desktop")

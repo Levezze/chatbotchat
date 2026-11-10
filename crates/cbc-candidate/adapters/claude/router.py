@@ -185,13 +185,18 @@ def read_frame(conn):
 
 class Router:
     def __init__(self, args):
-        self.core, self.bindings, self.native_targets = load_profile(args.profile, with_targets=True)
-        self.verify_target_registry(self.bindings, self.native_targets)
+        self.core, bindings, self.native_targets = load_profile(args.profile, with_targets=True)
+        # A revoked binding is quarantined, not fatal: one stale grant in the
+        # profile must not take every other chat on this device down with it.
+        self.revoked = self.verify_target_registry(bindings, self.native_targets)
+        self.bindings = {s: b for s, b in bindings.items() if s not in self.revoked}
         self.sessions_dir = args.sessions_dir
         self.log_path = os.path.join(args.log_dir, "router-events.jsonl") if args.log_dir else None
         self.bells = 0
         self.rung = {}  # session -> reference of the pending batch last rung for
         self.lock = threading.Lock()
+        if self.revoked:
+            self.event("bindings_quarantined", count=len(self.revoked))
         self.slots = threading.BoundedSemaphore(MAX_CLIENTS)
         self.channels = {}
         self.channel_sessions = set()
@@ -207,10 +212,16 @@ class Router:
     def verify_target_registry(self, bindings, targets):
         # Epoch targets are immutable in the core. This handshake is cached by
         # the installed in-memory registry until a fully verified profile refresh.
+        # Returns the sessions the core definitively revoked; any other
+        # disagreement, including an unreachable core, still fails closed.
+        revoked = set()
         for session, binding in bindings.items():
             status = self.core_call(binding, {"op": "binding_status"})
-            if not native_target.target_agrees(targets[session]["target"], status):
+            if native_target.is_revoked(status):
+                revoked.add(session)
+            elif not native_target.target_agrees(targets[session]["target"], status):
                 raise ValueError("native target disagrees with core binding authority")
+        return revoked
 
     def event(self, kind, **fields):
         if not self.log_path:

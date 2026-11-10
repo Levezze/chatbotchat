@@ -73,6 +73,7 @@ class FakeCore:
         self.rooms = rooms
         self.items, self.pending, self.done, self.keys, self.requests = [], {}, {}, {}, []
         self.operations = []
+        self.revoked = set()
         self.watches, self.watch_error = [], False  # one (members, after) per watch connection
         self.budget = MAX_BATCH_BYTES
         self.feed = threading.Condition()
@@ -150,6 +151,8 @@ class FakeCore:
         if self.tokens.get(member) != auth["token"]:
             return {"type": "error", "message": "candidate operation rejected"}
         if name == "binding_status":
+            if member in self.revoked:
+                return {"type": "error", "code": "invalid_binding", "message": "revoked"}
             return {"type": "binding_status", "native_target": None,
                     "first_unread_sequence": None, "last_receipted_sequence": 0}
         if name in ("watch", "watch_members"):
@@ -260,6 +263,22 @@ class RouterTests(unittest.TestCase):
     def stop_router(self):
         self.router.terminate()
         self.router.wait()
+
+    def test_restart_with_one_revoked_binding_still_serves_the_others(self):
+        self.stop_router()
+        if os.path.exists(self.router_sock):  # existence must prove the new router
+            os.unlink(self.router_sock)
+        self.core.revoked.add("gamma")
+        self.router = subprocess.Popen(
+            [sys.executable, "-I", os.path.join(HERE, "router.py"), "--profile", self.profile,
+             "--listen", self.router_sock,
+             "--sessions-dir", self.sessions, "--log-dir", self.tmp, "--ttl", "60"])
+        self.assertTrue(self.wait_for(lambda: os.path.exists(self.router_sock), secs=15),
+                        "one revoked binding aborted the router for every chat")
+        log = os.path.join(self.tmp, "router-events.jsonl")
+        self.assertTrue(self.wait_for(lambda: os.path.exists(log) and any(
+            json.loads(line).get("event") == "bindings_quarantined" and json.loads(line).get("count") == 1
+            for line in open(log)), secs=5), "revoked binding was not reported as quarantined")
 
     def inbox(self, name):
         if name not in self.inboxes:

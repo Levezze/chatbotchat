@@ -102,6 +102,12 @@ def match_target(target, observation):
         return False
 
 
+def is_revoked(status):
+    """The core's definitive answer that this epoch's grant no longer exists."""
+    return (isinstance(status, dict) and status.get("type") == "error"
+            and status.get("code") == "invalid_binding")
+
+
 def target_agrees(expected, status):
     """Explicit epoch-bound core authority, including explicit null for legacy grants."""
     if (not isinstance(status, dict) or status.get("type") != "binding_status"

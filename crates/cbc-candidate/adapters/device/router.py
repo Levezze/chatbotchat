@@ -95,14 +95,15 @@ class DeviceRouter(claude.Router):
                     raise ValueError("an explicit Codex executable is required for Codex targets")
                 queued[session] = codex.QueueDelivery(args.codex_executable, session)
         super().__init__(args)
-        if self.core != core or self.bindings != bindings or self.native_targets != native_targets:
+        active = {s: b for s, b in bindings.items() if s not in self.revoked}
+        if self.core != core or self.bindings != active or self.native_targets != native_targets:
             self.wake_read.close()
             self.wake_write.close()
             raise ValueError("device profile changed during startup")
         self.targets = targets
         # The inherited local request server handles only corroborated Claude shims.
         # Codex's existing MCP adapter continues to call the core directly.
-        self.bindings = {session: binding for session, binding in bindings.items()
+        self.bindings = {session: binding for session, binding in active.items()
                          if targets[session] == "claude"}
         # This driver supports the documented channel path only, including before a
         # shim subscribes. Never let a missing channel select the historical socket probe.
@@ -112,7 +113,7 @@ class DeviceRouter(claude.Router):
         self.codex_executable = args.codex_executable
         self.queued = queued
         self.all_bindings = bindings
-        self.quarantined = set()
+        self.quarantined = set(self.revoked)
         self.native_ready = threading.Condition()
         self.native_generation = 0
         self.native_sessions = set()
@@ -145,6 +146,9 @@ class DeviceRouter(claude.Router):
 
         self.feed = shared.ChangeFeed(core, bindings.values(), handlers, self.event,
                                       policy_provider=policy, reconcile=self.reconcile_bindings)
+        if self.quarantined:
+            with self.registry_lock:
+                self.install_registry()
 
     def event(self, kind, **fields):
         # The one watch already emits this after durable changes. Waking HTTP
@@ -236,10 +240,15 @@ class DeviceRouter(claude.Router):
             return self.all_bindings.get(session)
 
     def verify_target_registry(self, bindings, targets):
+        """Returns definitively revoked sessions; any other disagreement fails closed."""
+        revoked = set()
         for session, binding in bindings.items():
             status = self.read_wake_status(binding, 2.0)
-            if not claude.native_target.target_agrees(targets[session]["target"], status):
+            if claude.native_target.is_revoked(status):
+                revoked.add(session)
+            elif not claude.native_target.target_agrees(targets[session]["target"], status):
                 raise ValueError("native target disagrees with core binding authority")
+        return revoked
 
     def wake_status(self, binding, timeout):
         status = self.read_wake_status(binding, timeout)
@@ -443,7 +452,7 @@ class DeviceRouter(claude.Router):
         core, bindings, targets, native_targets = load_targets(self.profile_path, with_native=True)
         if core != self.core:
             raise ValueError("profile refresh cannot change the core endpoint")
-        self.verify_target_registry(bindings, native_targets)
+        revoked = self.verify_target_registry(bindings, native_targets)
         queued, handlers = {}, {}
         with self.registry_lock:
             for session, binding in bindings.items():
@@ -460,8 +469,10 @@ class DeviceRouter(claude.Router):
                     queued[session] = handlers[key] = callback
             self.all_bindings, self.targets, self.queued, self.handlers = bindings, targets, queued, handlers
             self.native_targets = native_targets
-            self.quarantined = set()
+            self.quarantined = set(revoked)
             self.install_registry()
+        if revoked:
+            self.event("bindings_quarantined", count=len(revoked))
         self.event("profile_refreshed", targets=len(bindings))
 
     def handle(self, conn, raw=None, credentials=None):
