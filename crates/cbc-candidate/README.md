@@ -224,7 +224,9 @@ deadline/checkpoint attention are required parts of this redesign. They are succ
 slices, not optional plugins. The shared context/member identity and epoch are their ownership
 basis. Expected-revision checks and atomic state-plus-notification commits must accompany
 their implementation. One core will own scheduling; no per-agent timers or empty AI ticks.
-The active working hierarchy is Primarch to implementation-owning Chapter Master. Historical
+The active working hierarchy is Primarch to implementation-owning Chapter Master. Chapter
+Masters own their work through eligible merge; the Primarch keeps constraints and handles
+exceptions without routine merge approval. Historical
 Domain Lead/Task Agent classifications remain readable for compatibility; they do not require
 extra coordination tiers. The future Emperor reads dashboard data and is outside reporting;
 no current connector route should depend on an Emperor report or approval.

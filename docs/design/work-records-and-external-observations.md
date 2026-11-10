@@ -27,6 +27,11 @@ maintains timestamps, room/read state, routing and projections deterministically
 Transport activity does not reset the age of meaningful progress. Routine CI or
 receipt bookkeeping does not require another model-authored summary.
 
+A work-item update is one validated multi-field patch carrying an expected
+revision and idempotency key. The service commits it as one work revision and one
+outbox event; an equal or no-op patch produces no wake. Relevance and batching
+apply on top. Status hints may coalesce; action and control records never do.
+
 A coordinator-owned action survives a read receipt, an unrelated conversation
 or completion of a status report. Preserve its owner, ready/request time, next
 action, disposition and outcome evidence; a last-poll timestamp cannot reset its
@@ -39,6 +44,39 @@ supplies concrete qualification scenarios without adding another approval tier.
 The optional scope-supervisor [draft](../proposals/optional-scope-supervisor.md)
 remains for discussion outside the execution/approval chain. It is not a
 prerequisite for this store, the trial or ordinary work.
+
+## Registration, controls and eligible merge
+
+A Chapter Master registers its work item (assignment summary, branch/worktree,
+declared surfaces and source links), receives the current constraint snapshot and
+begins ordinary granted work without a startup GO or acknowledgement. A clear
+snapshot means no declared hold at that revision, not proof of no conflict.
+Advisory overlap metadata combines declared paths and contracts with bounded
+changed-path/base/head facts collected on the execution device or by the PR
+observer. The core does not clone repositories, read all code or impose blanket
+file locks, and disjoint paths do not prove safety.
+
+Primarch controls are structured records: continue, note, hold or stop, each with
+scope, actor, revision, reason and release condition. An advisory note does not
+become a hold. A hold affects only its operation, not independent work, and a
+timeout never becomes approval. Record requested, received and applied
+separately; delivery to a busy host is not immediate cancellation. The Chapter
+Master checks current controls before affected effects such as a shared push or a
+merge. This adds no per-tool parent permission.
+
+A merge is eligible when repository-configured gates pass for the current head
+and base, declared dependencies are met and no applicable hold exists. Build,
+test and review run outside a short conditional integration step; a moved base
+revalidates only affected evidence. There is no global feature queue. Target
+branches, environments and review policy are repository configuration. The
+Chapter Master executes eligible merges. Semantic, cross-repo, migration and
+resource exceptions go to the Primarch as targeted decisions. Merge is not
+deployment: an assigned promotion has a named release owner through its observed
+outcome. Native permissions and grants stay separate from any role.
+
+Controls belong to #114; work items and PR observations to #115. Until those are
+implemented, Chapter Masters perform these eligibility checks themselves through
+their existing tools and records; no CBC service enforces them yet.
 
 ## PR observations
 

@@ -15,7 +15,7 @@ separate agent assertions, PR facts and optional per-environment deployment fact
 
 A Primarch can request a fresh Chapter Master, give its initial role/assignment, message an
 existing child and resume it within a standing scoped grant. Chapter Masters own finite
-implementation tasks and native implementation subagents. Apps and supported CLI profiles
+implementation tasks, native implementation subagents and their PRs through eligible merge. Apps and supported CLI profiles
 remain first-class targets; native chat creation, messaging, wake/resume, steering, history
 reading and permission return are independent capabilities.
 
@@ -115,7 +115,8 @@ to continue using an authorized room. No immediate action is required by a miles
   for every provider/CI event.
 - #117: complete create/bind/first-assignment/message/resume demonstration in the selected
   saved project/environment, including UI grouping, standing grants and uncertain-result
-  recovery. No extra coordination tier or human room-ID courier.
+  recovery. Registration returns the current constraint snapshot and the Chapter Master
+  starts without a startup GO. No extra coordination tier or human room-ID courier.
 - #118: same targets/grants across devices; the Pi core does not launch a local substitute.
 - #119: bounded history reads navigate verified bindings without activating the model.
 

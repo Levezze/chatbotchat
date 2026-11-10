@@ -16,9 +16,14 @@ candidate-only workspaces. Include Codex and Claude native apps; qualify CLI
 profiles separately. Native helpers remain Chapter Master subagents, not another
 mandatory CBC reporting tier.
 
-The Primarch coordinates dependencies, merge order and shared resources. Chapter
-Masters own their implementations, native helpers and PR lifecycle within their
-grants. A held test port blocks that test operation, not unrelated source work.
+Chapter Masters own their assignments through eligible merge: worktree,
+implementation, native helpers, tests, CI, reviews, PR and merge under
+repository-configured gates and their existing grants. Each registers its work
+and starts without a startup GO; the Primarch sees registrations asynchronously.
+The Primarch maintains context, constraints, priorities, dependencies, shared
+resources and release coordination, and intervenes on exceptions. It does not
+approve routine PRs or merges. See
+[eligible merge](work-records-and-external-observations.md#registration-controls-and-eligible-merge). A held test port blocks that test operation, not unrelated source work.
 Test direct peer and parent-report communication while the recipients are busy
 implementing, running tools and discussing another assignment.
 
