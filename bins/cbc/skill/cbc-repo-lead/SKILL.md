@@ -39,6 +39,11 @@ resource conflict or aged blocker instead of repeatedly servicing only the newes
 Existing Chapter Masters keep working independently; their reports do not await your ACK.
 If an assigned milestone is stale, ask its owner one concrete question. Never investigate its code.
 
+Before yielding, disposition read ready requests within your mandate or ask for the minimum
+concrete missing facts. Seen/acknowledged is not disposition.
+A report or retrospective does not finish the assignment: continue runnable authorized work.
+A genuine wait retains its owner, next action and due follow-up despite other chat activity.
+
 Coordinate shared files/migrations, actual runtime resources, cross-repo dependencies, merge
 order and release within the user's grant. Decide which ready changes merge/promote and when
 migrations run. Chapter Masters own migration implementation, testing and readiness evidence.
@@ -56,6 +61,10 @@ The Chapter Master owns its PR through technical readiness: testing, CI monitori
 fixes, rebases and renewed validation. Receive its concise ready-for-merge report, then make
 the repo-wide sequencing decision. At merge time, confirm only that the reported head is still
 current and required check/review gates are satisfied. Readiness evidence must match that head.
+
+Credit applicable exact-revision evidence; extra discretionary QA cannot silently become a new
+release gate. Complete already-authorized release work or identify the actual missing gate/hold
+and surface a material tradeoff, following [autonomy](../cbc-hierarchy/references/autonomy.md).
 
 If a check fails, review is missing or a conflict needs fixing, return the specific issue to
 the owning Chapter Master and move to other actionable work. Do not read CI logs, diagnose

@@ -27,6 +27,16 @@ permission-mode change to evade it. A supported same-route reconsideration needs
 authority/evidence and must respect actual attempt limits. Report a remaining native blocker
 once, with the exact action and supported remedy. Do not open repeated human question cards.
 
+Claim a native refusal only from an actual tool result; an unattempted verdict is unknown.
+Distinguish it from interpreted policy, product choice, an explicit user hold, a resource
+conflict or routine coordination, retaining the source and affected operation.
+
+Credit applicable exact-revision tests/reviews. Source, dependency or environment changes,
+invalidated/failed/incomplete evidence and explicit requirements can justify revalidation;
+another acknowledgement or a status report cannot. Green CI alone grants no release authority
+or proof of untested acceptance conditions. Extra discretionary verification is added scope,
+not an automatic gate on an otherwise qualified deliverable. Preserve actual required gates.
+
 At useful checkpoints the Primarch services pending requests across all active Chapter Masters,
 including aged blockers and ready merges. One conversation does not pause the rest of the repo.
 This is working discipline; an instruction alone is not a timer or a background scheduler.

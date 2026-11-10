@@ -48,9 +48,16 @@ resolve findings and conflicts, and repeat validation after changes. Opening a P
 a fix is not a handoff to the Primarch. Keep driving the technical work until the current head
 is ready. If sequencing requires a rebase or new validation, you own that work too.
 
+Reuse current exact-revision validation until relevant changes or incomplete/invalid evidence
+justify rerunning it. Keep extra verification within the assignment's scope; use
+[autonomy](../cbc-hierarchy/references/autonomy.md) for evidence and authority boundaries.
+
 Continue until the assigned result is delivered or a real blocker prevents all useful work.
 After sending an update or asking a question, continue independent work. Do not wait for a
 Primarch ACK, next-step permission, attention, or a server before source implementation.
+A report does not finish the assignment; continue runnable authorized work before yielding.
+Label genuine waits accurately: coding, code complete, validation pending and waiting for
+coordination are different owner assertions, separate from observed PR/deployment facts.
 
 ## Coordinate briefly
 

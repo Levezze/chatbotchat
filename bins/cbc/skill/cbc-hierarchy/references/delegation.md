@@ -22,6 +22,7 @@ attach instruction. Continue other work rather than repeatedly probing creation.
 A lead assignment needs only: goal, repository/workspace, scope and acceptance criteria,
 context/member, Primarch/report route, source links and relevant existing authority/holds.
 State the smallest deliverable, non-goals and done evidence within that assignment.
+Include verification scope: additional test machinery after gates pass is still added work.
 Put worthwhile unrelated follow-ups aside; raise a material scope expansion once rather
 than quietly turning it into the current implementation.
 Within the user's delegation, ordinary task splitting and subagent creation need no fresh approval.
