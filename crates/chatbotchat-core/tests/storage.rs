@@ -58,7 +58,7 @@ async fn get_room_returns_none_for_missing() {
 fn sample_participant(room_id: &str, cwd: &str) -> Participant {
     let now = OffsetDateTime::now_utc();
     Participant {
-        handle: format!("smoke-test-opus47-{}", &cwd.len()),
+        handle: format!("smoke-test-opus47-{}", cwd.len()),
         room_id: room_id.into(),
         repo: "smoke-test".into(),
         model: "opus47".into(),
