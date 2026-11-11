@@ -71,18 +71,28 @@ pub async fn serve(
     // has stopped reading, and nothing outlives the loop holding the store.
     let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     let mut connections = JoinSet::new();
+    let mut backoff = Duration::from_millis(25);
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
             _ = &mut shutdown => break,
             _ = connections.join_next(), if !connections.is_empty() => {}
             accepted = listener.accept() => {
+                // The socket listener's policy: back off from a transient failure, stop on any other.
                 let stream = match accepted {
-                    Ok((stream, _)) => stream,
-                    Err(error) => {
-                        eprintln!("dashboard accept failed: {}", error.kind());
-                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    Ok((stream, _)) => {
+                        backoff = Duration::from_millis(25);
+                        stream
+                    }
+                    Err(error) if crate::connector::transient_accept(&error) => {
+                        eprintln!("dashboard accept temporarily unavailable: {}", error.kind());
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(Duration::from_secs(1));
                         continue;
+                    }
+                    Err(error) => {
+                        connections.abort_all();
+                        return Err(error.into());
                     }
                 };
                 let Ok(permit) = slots.clone().try_acquire_owned() else {
@@ -205,8 +215,8 @@ async fn home(
     }
 }
 
-/// One context's page, or a page of contexts with the first page of each; plus, when the
-/// page of contexts is full, the last one shown, for a link to the next page.
+/// One context's page, or a page of contexts with the first page of each; plus, when more
+/// contexts follow, the last one shown, for a link to the next page.
 async fn panels(
     store: &Store,
     context: Option<String>,
@@ -219,12 +229,14 @@ async fn panels(
             (vec![context], None)
         }
         None => {
-            let contexts = store
-                .contexts(contexts_after.as_deref().unwrap_or(""), MAX_CONTEXTS)
+            // One past the page says whether a next page exists, so no link leads to an empty one.
+            let mut contexts = store
+                .contexts(contexts_after.as_deref().unwrap_or(""), MAX_CONTEXTS + 1)
                 .await?;
-            let more = (contexts.len() == MAX_CONTEXTS as usize)
-                .then(|| contexts.last().cloned())
-                .flatten();
+            let more = (contexts.len() > MAX_CONTEXTS as usize).then(|| {
+                contexts.truncate(MAX_CONTEXTS as usize);
+                contexts[contexts.len() - 1].clone()
+            });
             (contexts, more)
         }
     };

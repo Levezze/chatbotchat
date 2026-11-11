@@ -472,8 +472,8 @@ outbox timeline are D1b.
 - **The page.** Each context gets a panel with one page of its waiting
   requests: open or relayed, at most `MAX_REQUEST_PAGE`. A full page links to
   the next one (`/?context=…&after=…`). A page lists at most 20 contexts, in
-  ID order; a full one links to the next (`/?contexts_after=…`), so no context
-  is out of reach.
+  ID order; when more follow, it links to the next (`/?contexts_after=…`), so
+  no context is out of reach and no link leads to an empty page.
 - **Connections.** The dashboard runs its own accept loop rather than
   `axum::serve`.
   - Each connection is a task the loop owns. On shutdown the loop stops
@@ -483,6 +483,8 @@ outbox timeline are D1b.
   - At most 16 connections are open at once; past that a new one is closed
     unanswered. A connection that doesn't finish its request headers within
     10 seconds is closed.
+  - A transient accept failure backs off as the socket listener's does; any
+    other stops the dashboard.
   - If the dashboard stops early, the core logs it at once and returns the
     error when it exits.
 

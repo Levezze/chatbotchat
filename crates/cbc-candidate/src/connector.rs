@@ -188,7 +188,7 @@ impl LocalConnector {
     }
 }
 
-fn transient_accept(error: &std::io::Error) -> bool {
+pub(crate) fn transient_accept(error: &std::io::Error) -> bool {
     matches!(
         error.kind(),
         std::io::ErrorKind::Interrupted

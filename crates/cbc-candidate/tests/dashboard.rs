@@ -465,6 +465,26 @@ async fn contexts_come_in_pages() {
     assert_eq!(second.status, 200);
     assert!(second.body.contains("In project?"));
     assert!(!second.body.contains("ctx-00"));
+    assert!(
+        !second.body.contains("contexts_after"),
+        "the last page links nowhere"
+    );
+    stop(case).await;
+}
+
+/// Exactly a page of contexts has no next page.
+#[tokio::test]
+async fn a_full_last_page_of_contexts_links_nowhere() {
+    let extra: Vec<String> = (1..cbc_candidate::dashboard::MAX_CONTEXTS)
+        .map(|n| format!("ctx-{n:02}"))
+        .collect();
+    let extra: Vec<&str> = extra.iter().map(String::as_str).collect();
+    let case = running_with(true, &extra).await;
+    let cookie = case.login().await;
+    let page = case.get("/", Some(&cookie)).await;
+    assert_eq!(page.status, 200);
+    assert!(page.body.contains("project"));
+    assert!(!page.body.contains("contexts_after"));
     stop(case).await;
 }
 

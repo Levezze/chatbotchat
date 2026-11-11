@@ -33,7 +33,7 @@ pub fn page(title: &str, body: &str) -> String {
     )
 }
 
-/// `more` is the last context shown when there may be more after it.
+/// `more` is the last context shown when more follow it.
 pub fn home(panels: &[Panel], more: Option<&str>) -> String {
     let mut body = String::from("<h1>CBC dashboard</h1><h2>Pending requests</h2>");
     if panels.is_empty() {
