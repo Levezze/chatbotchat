@@ -79,12 +79,14 @@ async function receive($, state) {
       catch { stop(state); return; }
       if (hint === null || Array.isArray(hint) || typeof hint !== 'object'
           || Object.keys(hint).sort().join(',') !== 'cursor,type,v'
-          || hint.v !== 1 || hint.type !== 'pending'
+          || hint.v !== 1 || (hint.type !== 'pending' && hint.type !== 'recovery')
           || typeof hint.cursor !== 'string' || !/^[0-9a-f]{64}$/.test(hint.cursor)) {
         stop(state);
         return;
       }
-      if (hint.cursor === state.cursor) {
+      // A recovery re-hints overdue work whose cursor has not moved; a repeated
+      // pending cursor is only a reconnect and spends no model turn.
+      if (hint.cursor === state.cursor && hint.type === 'pending') {
         delay = 1000;
       } else {
         // Await only outside a hook. The API queues until idle and attributes

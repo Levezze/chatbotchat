@@ -410,8 +410,11 @@ and a positive first unread sequence:
 - Codex: `QueueDelivery.recover`, which shares the feed worker's lock and
   bypasses the latch once.
 - Claude with a channel: a forced ring, the same call a channel hello makes.
-- Claude native: a one-shot flag that makes the next wait answer `pending`
-  even with an unchanged cursor.
+- Claude native: a one-shot flag that makes the next wait answer `recovery`
+  instead of `pending`. The mod drops a repeated `pending` cursor (a reconnect)
+  but submits its hint on `recovery` even when the cursor is unchanged. A mod
+  older than this change rejects `recovery` and stops until human input, so
+  the driver and the mod ship together.
 - Anything else: a `recovery_skipped` event.
 
 The core counts recovery attempts from wake reports, and reports can be lost.
@@ -505,6 +508,11 @@ Mutants, each run against the full crate suite (17):
   it, `failed` with `mod_write_failed` when the write fails. The test (red
   first) closes the mod's end of a real socket pair during the final status
   check.
+- Codex's seventh review found that native recovery never reached Claude: the
+  wait answered `pending` with the cursor the mod already held, and the mod
+  drops a repeated cursor. The driver now answers `recovery`, which the mod
+  submits regardless of the cursor. Tests on both sides went red first: the
+  driver's response type and the mod's second prompt.
 - Not tested: the clamp on `attempt_wall_us`, which needs a receipt more than
   ten minutes old.
 - Not tested: the fail-soft path of `recovery_due` in `binding_status`. It needs

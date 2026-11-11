@@ -1152,7 +1152,8 @@ class NativeHttpTests(DeviceTests):
         self.router.read_wake_status = lambda grant, _timeout: dict(
             self.state, recovery_due=grant["member"] == "claude")
         self.assertEqual(self.router.recover_once(), 1)
-        self.assertEqual(self.exchange(request), (200, body))
+        # Codex review 7: the mod drops a repeated pending cursor, so a recovery says so.
+        self.assertEqual(self.exchange(request), (200, dict(body, type="recovery")))
         self.assertEqual(self.wake_reports(), [("claude", {"through": 4, "kind": "claude_mod",
             "outcome": "accepted", "recovery": True})])
         self.assertEqual(self.exchange(request), (204, None), "one recovery, one re-hint")

@@ -57,6 +57,7 @@ current binding epoch. Audit labels cannot supply missing saved project/environm
 | --- | --- |
 | 204, after at most 25 seconds parked | Renew transport after one second; no prompt |
 | 200, exact `{"v":1,"type":"pending","cursor":"<hex64>"}` | Submit one fixed, attributed, content-free `cbc_check` hint for a changed cursor |
+| 200, exact `{"v":1,"type":"recovery","cursor":"<hex64>"}` | Submit the same hint even if the cursor is unchanged: the driver is re-hinting overdue unread work |
 | 401 or other unexpected status | Stop until accepted human input |
 | 429, 503 or network failure | Retry transport with bounded 1-30 second backoff; no prompt |
 | Invalid, body-bearing or over-256-character 200 payload | Stop; no prompt |

@@ -540,7 +540,10 @@ class DeviceRouter(claude.Router):
                 # hearing of it; serve reports the outcome once the write has succeeded or failed.
                 if wake is not None:
                     wake.append((binding, through, recovery, time.time_ns() // 1000))
-                return native.response(200, {"v": 1, "type": "pending", "cursor": token})
+                # A recovery is marked as such: the mod drops a repeated pending cursor, and a
+                # recovery often has one. (Codex review 7.)
+                return native.response(200, {"v": 1, "type": "recovery" if recovery else "pending",
+                                             "cursor": token})
             with self.native_ready:
                 if generation != self.native_generation:
                     continue
