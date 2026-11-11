@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.21.0](https://github.com/Levezze/chatbotchat/compare/v0.20.0...v0.21.0) (2026-11-11)
+
+
+### Features
+
+* **candidate:** work-item follow-ups ([#113](https://github.com/Levezze/chatbotchat/issues/113) R2c) ([#138](https://github.com/Levezze/chatbotchat/issues/138)) ([9bb5787](https://github.com/Levezze/chatbotchat/commit/9bb5787a97169576036ca2acd1966c0f807b5786))
+
+
+### Bug Fixes
+
+* **candidate:** rooms set aside by the T-26 upgrade are drain-only ([#113](https://github.com/Levezze/chatbotchat/issues/113) R1b) ([#137](https://github.com/Levezze/chatbotchat/issues/137)) ([512a249](https://github.com/Levezze/chatbotchat/commit/512a2496f1e93ba3fd33cf1f9b75674665de6a81))
+
 ## [0.20.0](https://github.com/Levezze/chatbotchat/compare/v0.19.0...v0.20.0) (2026-11-11)
 
 
