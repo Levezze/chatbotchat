@@ -139,7 +139,7 @@ class PinTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
             source, binary = fake_source(base)
-            deep = base / ("d" * 90)
+            deep = base / ("d" * 90) / "c1"
             with self.assertRaisesRegex(ValueError, "socket path"):
                 setup.pin(source, binary, deep)
 
@@ -239,7 +239,7 @@ class PrepareTest(unittest.TestCase):
             self.assertEqual(sorted(ignored), sorted(probes))
             self.assertEqual(git(project, "status", "--porcelain"), "")
             exclude = Path(git(project, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude").strip())
-            self.assertEqual(exclude.read_text().count("# cbc-trial c1 begin"), 1)
+            self.assertEqual(exclude.read_text().count(setup.exclude_block(case.dir).splitlines()[0]), 1)
 
     def test_prepare_is_idempotent(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -302,7 +302,7 @@ class PrepareTest(unittest.TestCase):
             case = Case(base)
             project = fake_project(base)
             exclude = Path(git(project, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude").strip())
-            exclude.write_text("# cbc-trial c1 begin\n/.mcp.json\n# cbc-trial c1 end\n")
+            exclude.write_text(setup.exclude_block(case.dir).splitlines()[0] + "\n/.mcp.json\n")
             with self.assertRaisesRegex(ValueError, "edited"):
                 case.prepare(project, "cm-a", "claude")
             self.assertFalse((project / ".mcp.json").exists())
@@ -390,7 +390,7 @@ class TeardownTest(unittest.TestCase):
             case.prepare(worktree, "primarch", "codex")
             exclude = Path(git(project, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude").strip())
             setup.teardown(case.dir, "cm-a")
-            self.assertIn("# cbc-trial c1 begin", exclude.read_text())
+            self.assertIn(setup.exclude_block(case.dir), exclude.read_text())
             setup.teardown(case.dir, "primarch")
             self.assertNotIn("cbc-trial", exclude.read_text())
 
@@ -425,6 +425,31 @@ class PathSafetyTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "shell"):
                 case.prepare(project, "cm-a", "claude")
             self.assertFalse((project / ".mcp.json").exists())
+
+    def test_case_names_that_cannot_form_a_run_id_are_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp).resolve()
+            source, binary = fake_source(base)
+            for name in ("case+1", "a" * 41, "Case"):
+                with self.assertRaisesRegex(ValueError, "case name"):
+                    setup.pin(source, binary, base / name)
+                self.assertFalse((base / name).exists())
+
+    def test_cases_sharing_a_basename_keep_separate_exclude_blocks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp).resolve()
+            (base / "x").mkdir()
+            (base / "y").mkdir()
+            first, second = Case(base / "x"), Case(base / "y")
+            self.assertEqual(first.dir.name, second.dir.name)
+            project = fake_project(base, "main")
+            linked = base / "linked"
+            git(project, "worktree", "add", "-q", "-b", "linked", str(linked))
+            first.prepare(project, "cm-a", "claude")
+            second.prepare(linked, "cm-a", "claude")
+            setup.teardown(first.dir, "cm-a")
+            self.assertEqual(git(linked, "status", "--porcelain"), "")
+            self.assertEqual(git(project, "status", "--porcelain"), "")
 
     def test_rendered_setup_commands_run_through_python(self):
         with tempfile.TemporaryDirectory() as temp:

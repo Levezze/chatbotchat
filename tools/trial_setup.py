@@ -43,6 +43,9 @@ SOCKET_LIMIT = 104
 SOCKETS = ("connector.sock", "device.sock")
 LEGACY_SKILL = re.compile(r"^(?:cbc|cbc-.+|emperor)$")
 SEAT_NAME = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+# The case name becomes the context `trial-<name>` and the run `trial-<name>-run1`; a run id is 1 to 64
+# letters, digits, '-', '_' or '.'.
+CASE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
 HOSTS = ("claude", "codex")
 PHASES = {1: {"peer-a": "claude", "peer-b": "codex"},
           2: {"primarch": "codex", "cm-a": "claude", "cm-b": "claude"}}
@@ -76,6 +79,12 @@ def core(case):
 def canonical(path):
     """The real path: the core writes canonical socket paths, and the driver compares them literally."""
     return Path(path).expanduser().resolve()
+
+
+def check_case_name(case):
+    if not CASE_NAME.match(Path(case).name):
+        raise ValueError(f"case name must be 1 to 40 lowercase letters, digits, '.', '_' or '-', starting with a "
+                         f"letter or digit, so it can form the run id: {Path(case).name!r}")
 
 
 def shell_safe(*paths):
@@ -114,6 +123,7 @@ def stage_pin(source, binary, stage):
 def pin(source, binary, case):
     """Copy the adapters and the core binary from a clean checkout into CASE/pin. Idempotent."""
     source, binary, case = (canonical(path) for path in (source, binary, case))
+    check_case_name(case)
     shell_safe(case)
     check_sockets(case)
     if git(source, "status", "--porcelain", "--", ADAPTERS):
@@ -198,7 +208,8 @@ def codex_files(case, python):
 
 
 def exclude_block(case):
-    name = Path(case).name
+    # The digest of the canonical case path keeps two cases that share a basename apart in one repository.
+    name = f"{Path(case).name} {hashlib.sha256(str(case).encode()).hexdigest()[:12]}"
     return "\n".join([f"# cbc-trial {name} begin", *EXCLUDES, f"# cbc-trial {name} end"]) + "\n"
 
 
@@ -222,6 +233,7 @@ def seat_path(case, seat):
 def prepare(case, project, seat, host, python, claude_skills_dir=Path.home() / ".claude/skills"):
     """Write one seat's project-local wiring. Nothing is written unless every check passes."""
     case, project = canonical(case), canonical(project)
+    check_case_name(case)
     shell_safe(case, project, python)
     if not SEAT_NAME.match(seat):
         raise ValueError(f"seat names are lowercase words and hyphens: {seat!r}")
