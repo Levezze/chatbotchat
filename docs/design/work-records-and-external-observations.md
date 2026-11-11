@@ -66,6 +66,7 @@ builds it. Only the missing part is built.
 | Inactive rooms | R1. | A room set aside by the 0008 upgrade could still be written to, so a pair could keep several writable rooms. It is now drain-only: read and receipt, no send. | R1b |
 | T-10, T-12 requests | Nothing. | One canonical request with an owner (who answers) and a callback (who is woken). The answer records its channel. An answer an agent relays from chat is stored as relayed, with the relaying member, and never counts as owner-authenticated (proposed default, for the user's review). The answer wakes the asker through the outbox. | R3 |
 | T-27 waits | First-occurrence commit, offer and receipt facts (#113 PR-A). | A mapping from each wait cause in the trial protocol §6 to the facts it is derived from. CI waits (CM-A's observer), holds (#114) and acted-on (#113 PR-B) can't be observed yet and report `unknown`. The interval calculator itself belongs to the report in #113 C. | R3 |
+| Request routes | R3. | Connector member routes to open, answer, withdraw, mark applied and read; the owner route to answer and read; waking watchers when a request event commits. | R3b |
 
 New routes for work items, requests and answers go in new modules, so the
 connector stays a thin wiring layer.
@@ -243,6 +244,110 @@ Mutation checks:
 - Labelling a replay as new fails the replay test.
 - Skipping the catch-up, including finished items in it, or counting it as a
   delivery each fail the catch-up test.
+
+### R3 as built: requests and the waits mapping
+
+Migration 0011 (schema 11). The code is in `src/requests.rs` and
+`src/waits.rs`, plus one call in `retire_member`; tests are in
+`tests/requests.rs` and `tests/waits.rs`. Routes come in R3b, so this layer is
+reached only through the store.
+
+- **One row per question.** A request has an ID, a callback (the member that
+  asked and is woken by the answer), an owner (the user or one member), an
+  optional work item, and the question. The work item must be one the asker
+  can read under the R2b rule (its owner, or a repo lead); any other gets the
+  same refusal as a missing item, so a request can't be used to probe for
+  another tree's items. Its state is `open`,
+  `relayed`, `answered` or `withdrawn`. Opening is idempotent per asker and
+  key; the same key for a different question is refused.
+- **The server picks the ID.** An ID is `req-` and 128 random bits. With
+  caller-chosen IDs, two members picking the same one would collide, and the
+  refusal would tell one about the other's request. For the same reason a
+  member who is neither the asker nor the owner gets "unknown request" for a
+  member's request, exactly as for one that doesn't exist, and so does anyone
+  but the asker who tries to withdraw a request or mark an answer applied.
+- **The route decides the channel.** The owner route records `owner`. The
+  owner member's own binding records `member`. Any other member records
+  `relayed`, with the relaying member. Nothing the caller sends can choose the
+  channel.
+- **Relays (proposed default, for the user's review).** The policy is one
+  function, `relay_allowed`. Only a question for the user can be relayed, and
+  only until the user has answered it on the owner route. Any active member
+  may relay, the asker included. A relay moves the request to `relayed`, never
+  to `answered`, and the user's own answer is still accepted afterwards. A
+  question for a member is answered by that member only; nobody relays for a
+  member.
+- **Who hears what.** A question for a member needs the pair's active room,
+  where the owner receives an `opened` event; with no such room the request is
+  refused and nothing is stored. A question for the user needs no room and
+  sends no event. An answer wakes the asker, unless the asker is the one
+  relaying: in the room shared with the owner member if it is still active,
+  otherwise in the asker's first active room, report rooms first. With no room
+  the answer is recorded and undelivered. Each event goes to one named
+  recipient and has its own delivery class, `request_event`, so the #113 PR-A
+  facts cover it.
+- **Answers are append-only.** Once a request is `answered`, every further
+  answer is refused, whatever its channel, and so is any answer to a withdrawn
+  request, with the withdrawal reason in the error. Answers already recorded
+  are never changed. A retried key returns the first answer
+  before any state check, so a retry still succeeds after the request has
+  moved on.
+- **Applied is separate.** Answered, delivered and applied are three facts.
+  Only the asker marks an answer applied, and the first time is kept.
+- **Withdrawal and retirement.** Only the asker withdraws, with a reason, and
+  only while the request is open or relayed; the owner of a member's request
+  is told if their room is still active.
+  Retirement withdraws every open request the member asked or owns, with
+  `retired: <reason>`, in the retirement's transaction. It sends no request
+  events, because the member's rooms close in the same transaction and say
+  why.
+- **HITL is untouched.** A request never sets or clears the HITL flag.
+- **Waits mapping (T-27).** `WaitCause` lists the eight §6 causes in the
+  protocol's own wording, and a test checks them against the §6 table, so the
+  two can't drift apart. Each cause states how much the records carry:
+  - known: waiting on the user, on another Chapter Master, on delivery;
+  - partial: human review (the HITL flag exists, the PR observation doesn't);
+    the Primarch (open requests are derived, holds wait for #114);
+  - unknown: a resource (#114), CI (PR observations), ready but idle (acted-on
+    facts, #113 PR-B).
+
+  `waits_now` lists a member's current waits: each open request it asked,
+  classified by its owner (the user; a repo lead is the Primarch; a feature
+  lead is another Chapter Master; any other role has no cause and reports as
+  `unknown`), and each item not yet receipted, as waiting on delivery. A
+  relayed request is not a wait, because the asker has an answer to act on.
+  `open_requests`, by contrast, lists it, since the user has not answered it.
+  The interval calculator stays in #113 C.
+- **Upgrade.** 0011 rebuilds the delivery-facts table to admit the new class.
+  A test builds a schema-10 database with a work-event fact and checks it
+  survives. Another checks that, after every migration, no schema object
+  still refers to a renamed-and-dropped table and no foreign key is violated.
+
+Mutation checks:
+- A relay that sets `answered`, or a relay allowed after the user's answer,
+  fails the relay test.
+- Accepting a second owner answer, or a second member answer, fails the
+  owner-route or member-owner test.
+- A distinguishable refusal for a request the member can't see, on answer or
+  withdraw, fails the member-owner or withdrawal test.
+- A fixed request ID fails the idempotency test and two others.
+- A non-owner member answering a member's request, or the owner route
+  answering one, fails the member-owner test.
+- Storing a member's request with no room fails the room test.
+- Waking the relaying asker fails the relay test.
+- Letting anyone withdraw, withdrawing an answered request, or answering a
+  withdrawn request fails the withdrawal test.
+- Skipping the retirement hook, or withdrawing only the asker's side, fails the
+  retirement test.
+- Letting anyone mark an answer applied, or overwriting the first applied
+  time, fails the applied test.
+- Checking state before the key, so a retry fails, fails the idempotency test.
+- Skipping the work-item check, or letting any member name any item, fails
+  the item test.
+- Recording the wrong delivery class fails the delivery-facts test.
+- Counting relayed requests, swapping the Primarch and Chapter Master, dropping
+  delivery waits, changing a label or claiming CI is known each fail a waits
+  test.
 
 ## Registration, controls and eligible merge
 
