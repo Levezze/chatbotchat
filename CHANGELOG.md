@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.29.0](https://github.com/Levezze/chatbotchat/compare/v0.28.1...v0.29.0) (2026-11-11)
+
+
+### Features
+
+* **candidate:** the trial report over a manifest and an end snapshot (C2) ([#154](https://github.com/Levezze/chatbotchat/issues/154)) ([9a6e503](https://github.com/Levezze/chatbotchat/commit/9a6e5038a0fca875349f11093d3b2948591927ce))
+
 ## [0.28.1](https://github.com/Levezze/chatbotchat/compare/v0.28.0...v0.28.1) (2026-11-11)
 
 
