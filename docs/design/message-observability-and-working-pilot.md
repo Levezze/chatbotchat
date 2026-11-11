@@ -379,8 +379,13 @@ activity operation (discover, connect, send, close, work, request) takes
 `BEGIN IMMEDIATE` and stamps `active_*` and `active_operation` on each of the
 member's receipted recipient facts in that context that have no activity yet.
 The stamp is the request's start on the core clock, taken before it waits for
-the store, and only receipts committed before that start count. A request that
-was already queued behind a receipt did not follow it. A receipt from an
+the store. Only receipts whose transaction had already committed at that start
+count: the core keeps, in memory, the newest committed receipt stamp of its
+instance, raised only after the commit returns, and each request reads it as it
+starts. A request that started while a receipt was waiting for the store or
+still being written did not follow it. A request that starts in the instant
+between a commit and the raise misses that receipt; the member's next activity
+records it, so the error is only ever late, never early. A receipt from an
 earlier core instance always counts.
 It is recorded before the operation, so a refused send still counts: the member
 acted through CBC. The classification is an exhaustive match, so a new
@@ -408,6 +413,13 @@ and a positive first unread sequence:
 - Claude native: a one-shot flag that makes the next wait answer `pending`
   even with an unchanged cursor.
 - Anything else: a `recovery_skipped` event.
+
+The core counts recovery attempts from wake reports, and reports can be lost.
+So once the driver has recovered a binding, it does not recover that binding's
+same oldest unread item again until the core has acknowledged a recovery report
+for it (a `woken` reply). It emits `recovery_unacknowledged` instead. A move of
+the oldest unread item lifts the hold. A lost report therefore costs at most
+the one recovery it described, and `recovery_attempts` stays a real bound.
 
 A recovery report's `through` is what that path actually covered, as for any
 wake: the batch's highest sequence for a channel, the higher of the first
@@ -459,6 +471,15 @@ Mutants, each run against the full crate suite (17):
   as a later attempt was covered; stamps are now in microseconds and the
   comparison is strict. The new core test builds the tie from the stored
   receipt stamp rather than the clock, so it cannot race.
+- Codex's third review found two more, both fixed with a test that failed
+  first. Recovery attempts were counted only through lossy reports, so a run of
+  lost reports re-woke the same item every loop; the driver now waits for an
+  acknowledged recovery report or a moved unread item. And a request that
+  started after a receipt's clock read but before its commit counted as
+  post-receipt activity; requests now compare against committed receipts only.
+  The core test interleaves a receipt with request starts on one task, five
+  rounds, and checks that the last start taken before the receipt returned does
+  not count.
 - Not tested: the clamp on `attempt_wall_us`, which needs a receipt more than
   ten minutes old.
 - Not tested: the fail-soft path of `recovery_due` in `binding_status`. It needs

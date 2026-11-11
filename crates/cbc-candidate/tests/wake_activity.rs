@@ -261,6 +261,54 @@ async fn activity_that_started_before_the_receipt_is_not_post_receipt() {
     c.store.close().await;
 }
 
+/// A request that started while a receipt was still being written did not start after it.
+/// The two run on one task so every await interleaves: the spinner takes request starts until
+/// the receipt call returns, and the last of them must not count.
+#[tokio::test]
+async fn activity_that_started_while_the_receipt_was_in_flight_is_not_post_receipt() {
+    let c = pair().await;
+    for round in 0..5 {
+        let sequence = c
+            .store
+            .send(&c.alice, "peer-room", &format!("k{round}"), "x")
+            .await
+            .unwrap();
+        let batch = c.store.check(&c.bob, 10).await.unwrap().expect("a batch");
+        let done = std::cell::Cell::new(false);
+        let starts = std::cell::RefCell::new(Vec::new());
+        tokio::join!(
+            async {
+                c.store
+                    .receipt(&c.bob, batch.reference_for_adapter())
+                    .await
+                    .unwrap();
+                done.set(true);
+            },
+            async {
+                while !done.get() {
+                    starts.borrow_mut().push(c.store.request_start());
+                    tokio::task::yield_now().await;
+                }
+            }
+        );
+        let last = *starts
+            .borrow()
+            .last()
+            .expect("a start while the receipt ran");
+        c.store
+            .record_activity_since(&c.bob, "send", &last)
+            .await
+            .unwrap();
+        assert!(
+            bob_in(&c.store, sequence).await.active.is_none(),
+            "round {round}: a start before the receipt returned counted"
+        );
+        c.store.record_activity(&c.bob, "send").await.unwrap();
+        assert!(bob_in(&c.store, sequence).await.active.is_some());
+    }
+    c.store.close().await;
+}
+
 /// A failed attempt is a dispatch, never a wake. The outcome and its failure class must agree.
 #[tokio::test]
 async fn a_failed_wake_is_a_dispatch_without_a_wake() {

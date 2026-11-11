@@ -311,6 +311,40 @@ class DeviceTests(unittest.TestCase):
         self.assertTrue(router.flush_wake_reports(2))
         self.assertEqual(reports, [("codex", 3, "codex_queue", True)])
 
+    def test_a_recovery_is_not_repeated_until_the_core_acknowledges_its_report(self):
+        # Codex review 3: the core counts recovery attempts from wake reports. A lost report
+        # must not let the driver re-wake the same item every loop.
+        recoveries, replies = [], []
+        class FakeQueue:
+            def __init__(self, executable, session, event=None):
+                self.session = session
+            def __call__(self, hint):
+                return True
+            def recover(self, hint):
+                recoveries.append(hint["sequence"])
+                self.reporter(hint["sequence"], "accepted", None, True, 1)
+                return True
+        with patch.object(device.codex, "QueueDelivery", FakeQueue):
+            router = device.DeviceRouter(self.args())
+        self.addCleanup(self.cleanup_router, router)
+        status = {"first": 3}
+        router.read_wake_status = lambda grant, _timeout: {
+            "type": "binding_status", "first_unread_sequence": status["first"],
+            "recovery_due": grant["member"] == "codex"}
+        router.wake_sender = lambda grant, request: replies.pop(0)
+        replies.append({"type": "error", "code": "busy"})
+        self.assertEqual(router.recover_once(), 1)
+        self.assertTrue(router.flush_wake_reports(2))
+        self.assertEqual(router.recover_once(), 0, "the lost report was not acknowledged")
+        self.assertEqual(recoveries, [3])
+        status["first"] = 4
+        replies.append({"type": "woken", "covered": 1})
+        self.assertEqual(router.recover_once(), 1, "the member moved on")
+        self.assertTrue(router.flush_wake_reports(2))
+        replies.append({"type": "woken", "covered": 1})
+        self.assertEqual(router.recover_once(), 1, "acknowledged: the core's budget decides")
+        self.assertEqual(recoveries, [3, 4, 4])
+
     def test_claude_is_channel_only_before_subscribe_after_refresh_and_restart(self):
         def assert_no_fallback(router, session):
             self.assertIn(session, router.channel_sessions)

@@ -123,6 +123,10 @@ class DeviceRouter(claude.Router):
         # #113 B1. Reports leave the delivery path through one bounded queue and one worker,
         # so a slow or absent core can never delay or fail a delivery.
         self.wake_reports = queue.Queue(maxsize=256)
+        # The core counts recovery attempts from wake reports. Until it acknowledges one for a
+        # binding, that binding's oldest unread item is not recovered again (Codex review 3).
+        self.recovery_lock = threading.Lock()
+        self.recovery_unacked = {}
         self.wake_sender = lambda grant, request: self.bounded_call(grant, request, 2.0)
         self.latest_hint = {}
         self.native_recover = set()
@@ -201,6 +205,9 @@ class DeviceRouter(claude.Router):
                 reply = self.wake_sender(grant, request)
                 if not isinstance(reply, dict) or reply.get("type") != "woken":
                     self.event("wake_report_failed", member=grant["member"], reason="rejected")
+                elif request.get("recovery") is True:
+                    with self.recovery_lock:
+                        self.recovery_unacked.pop((grant["context"], grant["member"]), None)
             except Exception as error:  # a lost report must never reach a delivery path
                 self.event("wake_report_failed", member=grant["member"],
                            reason=type(error).__name__)
@@ -250,6 +257,12 @@ class DeviceRouter(claude.Router):
             if (status.get("type") != "binding_status" or status.get("recovery_due") is not True
                     or type(first) is not int or first < 1):
                 continue
+            key = (binding["context"], binding["member"])
+            with self.recovery_lock:
+                unacked = self.recovery_unacked.get(key) == first
+            if unacked:
+                self.event("recovery_unacknowledged", member=binding["member"])
+                continue
             hint = {"context": binding["context"], "member": binding["member"], "sequence": first}
             done = False
             if host == "codex":
@@ -264,6 +277,8 @@ class DeviceRouter(claude.Router):
                 elif not channel_missing:
                     done = self.notify(session, force=True, recovery=True).get("_notified") is True
             if done:
+                with self.recovery_lock:
+                    self.recovery_unacked[key] = first
                 count += 1
             else:
                 self.event("recovery_skipped", member=binding["member"])

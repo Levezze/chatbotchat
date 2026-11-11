@@ -12,6 +12,7 @@ use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqliteConnection};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub const EVENT_SCHEMA: u32 = 1;
@@ -224,12 +225,19 @@ const MAX_REPORT_DELAY_US: i64 = 600_000_000;
 pub struct RequestStart {
     mono_us: i64,
     wall_ms: i64,
+    /// The newest receipt of this instance whose transaction had committed when the request
+    /// started, as its monotonic stamp. A receipt still in flight is not before the request.
+    receipts_through: i64,
 }
 
 /// One per Store::open: a random instance ID and a monotonic origin.
 pub(crate) struct CoreClock {
     instance: String,
     origin: Instant,
+    /// The largest `receipted_mono_us` of this instance whose transaction has committed, or -1.
+    /// Raised only after the commit returns, so a request that starts while a receipt is still
+    /// being written never sees it.
+    receipts_committed: AtomicI64,
 }
 
 impl CoreClock {
@@ -239,6 +247,7 @@ impl CoreClock {
         let clock = Self {
             instance: hex(&random),
             origin: Instant::now(),
+            receipts_committed: AtomicI64::new(-1),
         };
         sqlx::query(
             "INSERT INTO candidate_core_instances(instance_id,started_wall_ms) VALUES (?,?)",
@@ -253,6 +262,11 @@ impl CoreClock {
     fn now(&self) -> (i64, i64) {
         let (mono, wall_us) = self.now_us();
         (mono, wall_us.div_euclid(1000))
+    }
+
+    /// Called after a receipt's transaction commits, with the stamp `record_receipt` returned.
+    pub(crate) fn receipt_committed(&self, mono_us: i64) {
+        self.receipts_committed.fetch_max(mono_us, Ordering::SeqCst);
     }
 
     /// One reading, with the wall clock in microseconds.
@@ -325,19 +339,20 @@ pub(crate) async fn record_offer(
 
 /// Record the first receipt of a batch's items. Only called once the receipt is authorized.
 /// A batch offered before these facts existed has no rows yet, so the receipt creates one
-/// (expected=0, offer unknown) rather than being lost.
+/// (expected=0, offer unknown) rather than being lost. Returns the monotonic stamp, which the
+/// caller passes to `CoreClock::receipt_committed` once its transaction commits.
 pub(crate) async fn record_receipt(
     conn: &mut SqliteConnection,
     clock: &CoreClock,
     member: &str,
     reference: &str,
-) -> Result<()> {
+) -> Result<i64> {
     let (mono, wall_us) = clock.now_us();
     let wall = wall_us.div_euclid(1000);
     sqlx::query("INSERT INTO candidate_recipient_facts(sequence,member_id,expected,receipted_instance,receipted_mono_us,receipted_wall_ms,receipted_wall_us) SELECT sequence,?,0,?,?,?,? FROM candidate_batch_items WHERE reference=? ON CONFLICT(sequence,member_id) DO UPDATE SET receipted_instance=COALESCE(receipted_instance,excluded.receipted_instance), receipted_mono_us=COALESCE(receipted_mono_us,excluded.receipted_mono_us), receipted_wall_ms=COALESCE(receipted_wall_ms,excluded.receipted_wall_ms), receipted_wall_us=CASE WHEN receipted_instance IS NULL THEN excluded.receipted_wall_us ELSE receipted_wall_us END")
         .bind(member).bind(&clock.instance).bind(mono).bind(wall).bind(wall_us).bind(reference)
         .execute(conn).await?;
-    Ok(())
+    Ok(mono)
 }
 
 fn stamp(row: &sqlx::sqlite::SqliteRow, prefix: &str) -> Result<Option<Stamp>> {
@@ -409,8 +424,13 @@ impl Store {
 
     /// The core clock at the moment a request starts, before it waits for the store.
     pub fn request_start(&self) -> RequestStart {
+        let receipts_through = self.clock.receipts_committed.load(Ordering::SeqCst);
         let (mono_us, wall_ms) = self.clock.now();
-        RequestStart { mono_us, wall_ms }
+        RequestStart {
+            mono_us,
+            wall_ms,
+            receipts_through,
+        }
     }
 
     /// Mark each of the member's receipted items that has no activity yet with this operation.
@@ -430,12 +450,14 @@ impl Store {
         ensure!(valid_label(operation), "invalid operation name");
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         validate_on(&mut tx, binding).await?;
-        // Stamped with the request's start, and only receipts committed before it count: a
-        // request that was already waiting for the store when a receipt landed did not follow it.
-        // A receipt from an earlier core instance always came first.
+        // Stamped with the request's start, and only receipts whose transaction had committed
+        // when it started count: a request that started while a receipt was waiting for the
+        // store or still being written did not follow it. A receipt committed just before the
+        // watermark is raised is missed by that one request, never counted early. A receipt
+        // from an earlier core instance always came first.
         sqlx::query("UPDATE candidate_recipient_facts SET active_instance=?, active_mono_us=?, active_wall_ms=?, active_operation=? WHERE member_id=? AND receipted_instance IS NOT NULL AND (receipted_instance<>? OR receipted_mono_us<=?) AND active_instance IS NULL AND EXISTS (SELECT 1 FROM candidate_items i WHERE i.sequence=candidate_recipient_facts.sequence AND i.context_id=?)")
             .bind(&self.clock.instance).bind(started.mono_us).bind(started.wall_ms).bind(operation)
-            .bind(&binding.member_id).bind(&self.clock.instance).bind(started.mono_us)
+            .bind(&binding.member_id).bind(&self.clock.instance).bind(started.receipts_through)
             .bind(&binding.context_id)
             .execute(&mut *tx).await?;
         tx.commit().await?;

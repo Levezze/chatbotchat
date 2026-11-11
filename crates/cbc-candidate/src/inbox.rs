@@ -201,7 +201,11 @@ impl Store {
                 .bind(reference)
                 .execute(&mut *tx)
                 .await?;
-            facts::record_receipt(&mut tx, &self.clock, &binding.member_id, reference).await?;
+            let stamped =
+                facts::record_receipt(&mut tx, &self.clock, &binding.member_id, reference).await?;
+            tx.commit().await?;
+            self.clock.receipt_committed(stamped);
+            return Ok(());
         }
         tx.commit().await?;
         Ok(())
