@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.0](https://github.com/Levezze/chatbotchat/compare/v0.23.0...v0.24.0) (2026-11-11)
+
+
+### Features
+
+* **candidate:** dashboard sign-in and the pending-requests page (D1) ([#141](https://github.com/Levezze/chatbotchat/issues/141)) ([66cdec1](https://github.com/Levezze/chatbotchat/commit/66cdec1506ad51d9bf4024c6f7fcb891b51b2610))
+
 ## [0.23.0](https://github.com/Levezze/chatbotchat/compare/v0.22.0...v0.23.0) (2026-11-11)
 
 
