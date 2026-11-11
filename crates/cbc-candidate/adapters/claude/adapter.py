@@ -54,7 +54,10 @@ TOOLS = [
                                     "scope_ref": {"type": "string", "maxLength": 128},
                                     "key": {"type": "string", "maxLength": 128},
                                     "explanation": {"type": "string", "maxLength": 600}}}},
-] + record_tools.definitions()
+]
+# A record page (seven 4,000-character answers or questions) can escape past Claude Code's
+# 50,000-character inline limit; keep it inline as cbc_check does.
+TOOLS += [{**tool, "_meta": {"anthropic/maxResultSizeChars": 200000}} for tool in record_tools.definitions()]
 
 
 def dumps(value):

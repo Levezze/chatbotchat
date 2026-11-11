@@ -962,3 +962,12 @@ at once would count every process twice.
     not sampler output is refused without echoing its content; a normal file
     and a debug file, given in either order, are both named and both measured,
     and two files that overlap in time are refused.
+
+### S1: model tools (2026-11-11)
+
+Found after C3, while checking each trial step against the tools a model can actually call. The record layer, R1 to R3, put room closing, work items and requests into the core, but no adapter exposed them. A trial agent could check, send, discover and connect, and nothing else.
+
+S1 adds twelve tools to both adapters from one table, `adapters/shared/tools.py`. The full record is piece 6 of the [working trial protocol](working-trial-protocol.md#model-tools-piece-6), with a reachability matrix by trial step. Two of its points affect this document's measurements:
+
+- **Work events need a report room.** A revision reaches the Primarch only through the owner's open report room. With none, the revision commits with an empty delivery list. A Chapter Master that registers before connecting therefore produces a work event with no recipient. The report shows that as missing delivery facts, not as a wait.
+- **Refusals are opaque.** A refused record operation reaches the model as one generic message. At debug, the core's `request` log lines (B2) count refusals by operation. They do not record the cause.

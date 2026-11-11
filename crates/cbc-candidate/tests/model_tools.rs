@@ -451,3 +451,91 @@ fn identity_in_arguments_never_reaches_the_core() {
         adapter.refused("cm-a", name, arguments);
     }
 }
+
+/// The bodies of the core's own events in one `cbc_check`, which the adapter then receipts.
+fn events(adapter: &mut Adapter, member: &str) -> Vec<Value> {
+    let batch = adapter.ok(member, "cbc_check", json!({}));
+    batch["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{member} check: {batch}"))
+        .iter()
+        .filter(|item| item["sender"] == "cbc")
+        .map(|item| serde_json::from_str(item["body"].as_str().unwrap()).unwrap())
+        .collect()
+}
+
+#[test]
+fn the_primarch_hears_a_registration_only_through_an_open_report_room() {
+    let (core, profile) = Core::provisioned();
+    let mut adapter = Adapter::start(&core, &profile);
+    // Phase 2.2's precondition: with no report room, a revision commits and reaches no one.
+    adapter.ok(
+        "cm-b",
+        "cbc_work_register",
+        json!({"item":"view","summary":"Feature timeline view","key":"register-b"}),
+    );
+    assert!(
+        !events(&mut adapter, "pri")
+            .iter()
+            .any(|event| event["item"] == "view"),
+        "a registration with no report room must not reach the Primarch"
+    );
+
+    adapter.ok(
+        "cm-a",
+        "cbc_connect",
+        json!({"target":"pri","kind":"report","scope_ref":"observer","key":"report-a"}),
+    );
+    adapter.ok(
+        "cm-a",
+        "cbc_work_register",
+        json!({"item":"observer","summary":"PR and CI observer","key":"register-a"}),
+    );
+    let heard = events(&mut adapter, "pri");
+    assert!(
+        heard
+            .iter()
+            .any(|event| event["item"] == "observer" && event["revision"] == 1),
+        "{heard:?}"
+    );
+    // The adapter receipted the batch once the result was written: nothing is delivered twice.
+    assert!(
+        !events(&mut adapter, "pri")
+            .iter()
+            .any(|event| event["item"] == "observer"),
+        "a receipted work event was delivered again"
+    );
+}
+
+#[test]
+fn an_answer_reaches_the_asker_as_a_pending_item() {
+    let (core, profile) = Core::provisioned();
+    let mut adapter = Adapter::start(&core, &profile);
+    adapter.ok(
+        "cm-b",
+        "cbc_connect",
+        json!({"target":"pri","kind":"report","scope_ref":"view","key":"report-1"}),
+    );
+    let opened = adapter.ok(
+        "cm-b",
+        "cbc_request_open",
+        json!({"to":"pri","question":"May I take port 3000?","key":"ask-1"}),
+    );
+    let id = opened["request"]["request"]["request"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    events(&mut adapter, "cm-b"); // clear the connection's own items
+    adapter.ok(
+        "pri",
+        "cbc_request_answer",
+        json!({"request":id,"body":"Yes.","key":"answer-1"}),
+    );
+    let heard = events(&mut adapter, "cm-b");
+    assert!(
+        heard
+            .iter()
+            .any(|event| event.to_string().contains(id.as_str())),
+        "the asker was not told of the answer: {heard:?}"
+    );
+}

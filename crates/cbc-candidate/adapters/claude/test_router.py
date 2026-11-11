@@ -720,6 +720,12 @@ class RouterTests(unittest.TestCase):
         limit = tools["cbc_check"].get("_meta", {}).get("anthropic/maxResultSizeChars", 50000)
         self.assertGreaterEqual(limit, LEGACY_BATCH_BYTES + 8192)
         self.assertLessEqual(limit, 500000)
+        # A page of seven 4,000-character answers or questions, each character escaping to two,
+        # must stay inline too, or the model may never open the file it is moved to.
+        for name in tools_module.NAMES:
+            limit = tools[name].get("_meta", {}).get("anthropic/maxResultSizeChars", 50000)
+            self.assertGreaterEqual(limit, tools_module.MAX_PAGE * 2 * 4000 + 8192, name)
+            self.assertLessEqual(limit, 500000, name)
 
     def test_discover_and_connect_use_corroborated_binding_without_receipts(self):
         p = self.member(ALPHA, extra_env={"CBC_CANDIDATE_CHANNEL": "1"})

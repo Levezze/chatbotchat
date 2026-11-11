@@ -120,8 +120,8 @@ Reachability, by trial step:
 
 **Tests.**
 
-- `tests/model_tools.rs` drives the real Codex adapter against a real core, with a provisioned Primarch and two Chapter Masters. It covers registration and revision, HITL on-only, a relayed user question, a request to the Primarch from opening through answer, read, applied and withdraw, a close and its replacement, and identity in arguments.
-- `adapters/claude/test_router.py` checks that each Claude tool reaches the core as one exact operation and that bad arguments never reach it.
+- `tests/model_tools.rs` drives the real Codex adapter against a real core, with a provisioned Primarch and two Chapter Masters. It covers registration and revision, HITL on-only, a relayed user question, a request to the Primarch from opening through answer, read, applied and withdraw, a close and its replacement, and identity in arguments. It also pins delivery: a registration reaches the Primarch's `cbc_check` only through an open report room and is receipted once, and an answer reaches the asker as a pending item.
+- `adapters/claude/test_router.py` checks that each Claude tool reaches the core as one exact operation, that bad arguments never reach it, and that a full record page stays inline in Claude Code.
 - `adapters/shared/test_tools.py` checks that the declared schema is the enforced one and mirrors each core field rule.
 
 Explicitly not built before the trial:
