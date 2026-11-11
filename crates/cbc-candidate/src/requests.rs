@@ -8,7 +8,7 @@
 //! own answer is still accepted afterwards. Which relays are allowed is decided in one place,
 //! [`relay_allowed`].
 use crate::{
-    bindings::{validate_on, SessionBinding},
+    bindings::{validate_on, Role, SessionBinding},
     facts::{self, ItemClass},
     store::Store,
 };
@@ -153,7 +153,7 @@ impl Store {
             "op": "open", "owner": owner, "item": item, "question": question,
         }));
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        validate_on(&mut tx, binding).await?;
+        let status = validate_on(&mut tx, binding).await?;
         let context = &binding.context_id;
         let me = &binding.member_id;
         let prior = sqlx::query("SELECT request_id,fingerprint FROM candidate_requests WHERE context_id=? AND callback_member=? AND request_key=?")
@@ -171,14 +171,19 @@ impl Store {
             return Ok(current);
         }
         if let Some(item) = item {
-            let known: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM candidate_work_items WHERE context_id=? AND item_id=?",
+            // The work-item read rule: the item's owner or a repo lead. Anyone else gets the
+            // same refusal as for a missing item.
+            let owner: Option<String> = sqlx::query_scalar(
+                "SELECT owner_member FROM candidate_work_items WHERE context_id=? AND item_id=?",
             )
             .bind(context)
             .bind(item)
-            .fetch_one(&mut *tx)
+            .fetch_optional(&mut *tx)
             .await?;
-            ensure!(known == 1, "unknown work item");
+            ensure!(
+                owner.is_some_and(|owner| owner == *me || status.role == Role::RepoLead),
+                "unknown work item"
+            );
         }
         let room = match owner {
             RequestOwner::User => None,
@@ -493,12 +498,11 @@ impl Store {
                     "answer": id,
                     "body": body,
                 });
-                let sender = actor.unwrap_or(&request.callback);
                 self.emit(
                     conn,
                     context,
                     &room,
-                    sender,
+                    &request.callback,
                     &request.request,
                     "answered",
                     Some(id),
@@ -527,7 +531,8 @@ impl Store {
         body: &serde_json::Value,
         recipient: &str,
     ) -> Result<()> {
-        // The stored sender is a real member for the item's foreign keys; readers see 'cbc'.
+        // The stored sender is the asker, a member of every room an event goes to, for the
+        // item's foreign keys; readers see 'cbc'.
         let sequence: i64 = sqlx::query_scalar("INSERT INTO candidate_items(context_id,room_id,sender,kind,body) VALUES (?,?,?,'message',?) RETURNING sequence")
             .bind(context).bind(room).bind(sender).bind(body.to_string())
             .fetch_one(&mut *conn).await?;

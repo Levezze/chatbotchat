@@ -254,7 +254,10 @@ reached only through the store.
 
 - **One row per question.** A request has an ID, a callback (the member that
   asked and is woken by the answer), an owner (the user or one member), an
-  optional work item, which must exist, and the question. Its state is `open`,
+  optional work item, and the question. The work item must be one the asker
+  can read under the R2b rule (its owner, or a repo lead); any other gets the
+  same refusal as a missing item, so a request can't be used to probe for
+  another tree's items. Its state is `open`,
   `relayed`, `answered` or `withdrawn`. Opening is idempotent per asker and
   key; the same key for a different question is refused.
 - **The server picks the ID.** An ID is `req-` and 128 random bits. With
@@ -339,7 +342,8 @@ Mutation checks:
 - Letting anyone mark an answer applied, or overwriting the first applied
   time, fails the applied test.
 - Checking state before the key, so a retry fails, fails the idempotency test.
-- Skipping the work-item check fails the item test.
+- Skipping the work-item check, or letting any member name any item, fails
+  the item test.
 - Recording the wrong delivery class fails the delivery-facts test.
 - Counting relayed requests, swapping the Primarch and Chapter Master, dropping
   delivery waits, changing a label or claiming CI is known each fail a waits

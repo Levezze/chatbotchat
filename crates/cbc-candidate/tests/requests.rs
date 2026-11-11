@@ -152,17 +152,19 @@ async fn a_relay_is_recorded_as_one_and_never_locks_the_user_out() {
     );
 }
 
-/// A relay by someone other than the asker wakes the asker.
+/// A relay by someone other than the asker wakes the asker, even when the relaying member
+/// shares no room with it.
 #[tokio::test]
 async fn a_relay_by_another_member_wakes_the_asker() {
     let case = fixture().await;
     let id = ask(&case, &case.worker, &RequestOwner::User, "k-1").await;
     case.store
-        .answer_request(&case.lead, &id, "The user said yes.", "r-1")
+        .answer_request(&case.other, &id, "The user said yes.", "r-1")
         .await
         .unwrap();
     let events = requests_for(&case.store, &case.worker).await;
     assert_eq!(events.len(), 1);
+    assert_eq!(events[0].0, case.report_room);
     assert_eq!(events[0].1["channel"], "relayed");
 }
 
@@ -452,9 +454,34 @@ async fn a_request_names_an_existing_work_item_or_none() {
         )
         .await
         .unwrap_err();
-    assert!(message(refused).contains("unknown work item"));
+    let missing = message(refused);
+    assert!(missing.contains("unknown work item"));
     case.store
         .register_work_item(&case.worker, "feat-login", "Login", "reg-1")
+        .await
+        .unwrap();
+    // Another feature lead can't use a request to learn that the item exists.
+    let hidden = case
+        .store
+        .open_request(
+            &case.other,
+            &RequestOwner::User,
+            Some("feat-login"),
+            "?",
+            "k-1",
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(message(hidden), missing);
+    // A repo lead sees every item.
+    case.store
+        .open_request(
+            &case.lead,
+            &RequestOwner::User,
+            Some("feat-login"),
+            "?",
+            "k-1",
+        )
         .await
         .unwrap();
     let request = case
