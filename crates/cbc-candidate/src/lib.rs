@@ -8,6 +8,7 @@ pub mod native_target;
 pub mod owner;
 pub mod settings;
 pub mod store;
+pub mod work;
 use anyhow::{anyhow, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -34,7 +35,7 @@ const FILES: [&str; 14] = [
     "owner.key",
 ];
 pub const APPLICATION_ID: u32 = 0x43424332;
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

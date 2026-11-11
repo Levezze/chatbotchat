@@ -61,6 +61,7 @@ builds it. Only the missing part is built.
 | T-26 peer rooms | Opening is idempotent per pair, kind and `scope_ref`, with a deterministic room ID. Any member can close a room. A closed room refuses to reopen. | Uniqueness per unordered pair, whatever the scope. Close records actor and reason. A replacement room after a close, with a new ID and a link to the room it supersedes. A member's peer rooms go inactive when its identity retires, but not on a handoff. | R1 |
 | T-07, T-09 work items | Nothing. | Work items owned by one member. Revisions as one validated multi-field patch with an expected revision and an idempotency key, committed with one outbox event in the same transaction. A no-op patch produces no event. The HITL flag can be turned on by the user or a repo lead and turned off only on the owner-authenticated route. A feature lead can't change it. | R2 |
 | Outbox | Nothing beyond the inbox. | Outbox events are delivered through the existing inbox as a new item class, so the #113 PR-A delivery facts and waits cover them. No second delivery path. | R2 |
+| Work-item routes | Nothing. | Connector member routes for register, patch and HITL on; the owner route for HITL on and off; waking watchers when a work event commits. | R2b |
 | T-10, T-12 requests | Nothing. | One canonical request with an owner (who answers) and a callback (who is woken). The answer records its channel. An answer an agent relays from chat is stored as relayed, with the relaying member, and never counts as owner-authenticated (proposed default, for the user's review). The answer wakes the asker through the outbox. | R3 |
 | T-27 waits | First-occurrence commit, offer and receipt facts (#113 PR-A). | A mapping from each wait cause in the trial protocol §6 to the facts it is derived from. CI waits (CM-A's observer), holds (#114) and acted-on (#113 PR-B) can't be observed yet and report `unknown`. The interval calculator itself belongs to the report in #113 C. | R3 |
 
@@ -111,6 +112,53 @@ Two existing tests changed contract under T-26, and the PR names both. A
 reopen after a close used to fail; it now creates a replacement. An open after
 a revoke and a regrant used to fail; it now creates a replacement that
 supersedes the revoked room. Neither change restores a closed or revoked room.
+
+### R2 as built: work items and the outbox
+
+Migration 0009 (schema 9). The store operations are in `src/work.rs` and the
+tests in `tests/work_items.rs`. This PR is the record layer. The connector's
+member and owner routes, and waking a watcher when a work event commits, follow
+in their own PR before the trial.
+
+- **Ownership.** Only a feature lead registers a work item, and it becomes the
+  owner. Only the owner patches it. An item ID is unique in its context, so a
+  second registration under a new key fails with `already registered`.
+- **Revisions.** Registration is revision 1, recorded as `["registered"]`. A
+  patch names any of `stage`, `summary`, `next_action`, `blocked_operation` and
+  `branch`, carries the revision it was read at, and commits as one revision
+  that lists the fields that actually changed, sorted. A stale revision fails
+  with `revision conflict` and changes nothing. A patch that changes nothing
+  returns `NoOp` and records nothing, and an empty patch is refused.
+- **Stages.** `planning`, `implementing`, `in_review`, `ready_to_merge`,
+  `merged`, `abandoned`. Any stage can follow any other: the record keeps what
+  the owner reports, and checking it against the PR is #115's observation
+  work.
+- **Idempotency.** A key belongs to its actor. Retrying the same request with
+  the same key returns the first result: the revision for a patch, the item as
+  it is now for a registration. The same key with a different request fails
+  with `idempotency key conflicts`. A `NoOp` records nothing, so its key stays
+  unused.
+- **HITL (T-07).** A repo lead can turn it on. Only the user turns it off,
+  through the owner route. The owner can't change it either way, and a content
+  patch never touches it. Any active repo lead in the context qualifies; tying
+  that to the item's own report line is left for the hierarchy work.
+- **Text bounds.** The summary is trimmed and must be 1 to 500 characters.
+  `next_action` is at most 500 characters and may be empty; both may hold line
+  breaks but no other control characters. `branch` and `blocked_operation` are
+  one line of 1 to 200 characters, or cleared. Every error names its field.
+- **Outbox.** Each revision writes one inbox item to each open report room of
+  the owner, in the same transaction. Readers see sender `cbc` and kind
+  `work_event`, and the body is JSON: `item`, `revision`, `actor` (the member,
+  or `user`), `changed`, `stage` and `hitl`. The acting member is not woken by
+  its own change; a change by the user reaches every member of the room. A
+  work event is a new delivery-fact class, `work_event`, so the PR-A commit,
+  offer and receipt facts cover it with no second delivery path.
+- **No room, no wait.** With no open report room the revision still commits,
+  and `work_revisions` shows an empty `delivered_to`. The record never waits on
+  transport.
+- **Upgrade.** 0009 rebuilds the delivery-facts table to admit the new class
+  and copies every existing fact. A test builds a schema-8 database with a
+  recorded fact and checks it survives unchanged.
 
 ## Registration, controls and eligible merge
 
