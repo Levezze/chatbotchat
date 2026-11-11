@@ -88,7 +88,7 @@ Each piece goes through the normal PR process (T-19).
 | 4 | Dashboard skeleton | #113, moved from #116 | Work items, open requests and the outbox timeline, plus answering through a browser session (T-11, T-12). |
 | 5 | Instrumentation and report | #113 B and C | Connector instrumentation, bounded recovery, the run manifest, and the deterministic report, including the wait and prompt measurements. |
 | 6 | Model tools | #113, found 2026-11-11 | Tools that let a model close a room and use work items and requests. Pieces 3 to 5 built these operations in the core, but no adapter exposed them, so the agents could not reach them. See [model tools](#model-tools-piece-6). |
-| 7 | Trial setup | #113 | The pinned build (T-15), local skills and allowlists (T-17, T-24), the launch sheet (T-20). |
+| 7 | Trial setup | #113 | The pinned build (T-15), local skills and allowlists (T-17, T-24), the launch sheet (T-20). The local skills carry a [transport notice](#trial-transport-notice-piece-7) that settles every legacy-or-candidate fork in their text. |
 
 ### Model tools (piece 6)
 
@@ -123,6 +123,27 @@ Reachability, by trial step:
 - `tests/model_tools.rs` drives the real Codex adapter against a real core, with a provisioned Primarch and two Chapter Masters. It covers registration and revision, HITL on-only, a relayed user question, a request to the Primarch from opening through answer, read, applied and withdraw, a close and its replacement, and identity in arguments. It also pins delivery: a registration reaches the Primarch's `cbc_check` only through an open report room and is receipted once, and an answer reaches the asker as a pending item.
 - `adapters/claude/test_router.py` checks that each Claude tool reaches the core as one exact operation, that bad arguments never reach it, and that a full record page stays inline in Claude Code.
 - `adapters/shared/test_tools.py` checks that the declared schema is the enforced one and mirrors each core field rule.
+
+### Trial transport notice (piece 7)
+
+**Why it was added.** The trial skills are the canonical hierarchy package under `wip-` names. That package is written for two transports at once. Its legacy rules cover "today's transport": receivers and polls, read cursors, the `connections:` state section, numeric caps, and closing by consensus. Its candidate rules apply "once the candidate core is adopted". It also says to use the base CBC skill for transport. The package never names a legacy tool, so the risk is prose, not tool names. Left alone, a trial agent would follow the legacy rules, load the global `cbc` skill, and reach the live daemon through the `chatbotchat` server. Two candidate tools, `cbc_send` and `cbc_close`, share bare names with legacy tools, and the legacy `cbc_close` is a consensus vote, not a close.
+
+**What it adds.** `tools/install_trial_skills.py` inserts a transport notice into every installed Markdown file. References get it too, because an agent reads `references/rooms.md` only when it needs it. The notice:
+
+- names the candidate MCP server, `cbc-trial` (the installer's `SERVER` constant, which the trial wiring reuses);
+- applies every "once adopted" rule now and voids every legacy-transport rule;
+- forbids the base `cbc` skill, the `chatbotchat` server and the `cbc` command line;
+- maps each route to a candidate tool: connect, check, send, close, work items, requests;
+- tells a Chapter Master to connect its report room before registering;
+- puts handoffs out of scope.
+
+**Not covered by the notice.** The notice is text. The `chatbotchat` tools stay loaded unless the trial wiring hides them in each trial project, and a model can still call them. The hide, and a check at the start of each seat that no `chatbotchat` tool is listed, belong to the setup (section 5).
+
+**Tests.** `tools/test_trial_skills.py`:
+
+- every installed file that contains a legacy-transport rule carries the notice;
+- the notice addresses each category of legacy rule found in the package, and names the server;
+- every tool the notice names is listed by both candidate adapters.
 
 Explicitly not built before the trial:
 
@@ -181,7 +202,8 @@ Each item is recorded in the run manifest before the go.
 
 - [ ] Core build pinned. Record the commit, the binary hash and the state directory. Record that no agent has write access to that binary or directory path through its allowlist.
 - [ ] Candidate settings recorded: recovery interval, log level, and fallback **off** (T-05).
-- [ ] `wip-cbc-*` skills installed project-local in each trial worktree, for both Claude and Codex. Record the skill source commit.
+- [ ] `wip-cbc-*` skills installed project-local in each trial worktree, for both Claude and Codex. Record the skill source commit. Each installed file carries the trial transport notice (piece 7).
+- [ ] The legacy `chatbotchat` server is hidden in every trial project, and the candidate adapter is registered as `cbc-trial`. Record the project-local files that do it. Each seat's first step lists its CBC tools. If any `chatbotchat` tool appears, the seat stops before doing anything else, and the run is not started.
 - [ ] The trial skill paths are git-ignored in every trial worktree, so a routine `git add -A` cannot put them into a Chapter Master's PR. The installer warns when they are not. Add `/.claude/skills/wip-*/` and `/.agents/skills/wip-*/` to the file named by `git rev-parse --git-path info/exclude`. In a linked worktree that file is shared by every worktree of the repository, so record the change and remove it after the run.
 - [ ] Every seat is a brand-new session. No seat may already be enrolled in the global Primarch compaction hook, because refusing new enrollment cannot undo an old one. The trial installer's `primarch_compaction.py register` reports an existing enrollment.
 - [ ] Project-local allowlists written (T-24). Record their exact contents.

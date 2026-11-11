@@ -13,6 +13,33 @@ from test_hierarchy_skills import ROOT, installer, load
 
 trial = load("trial", ROOT / "tools/install_trial_skills.py")
 PRESERVED = "cbc-preserved"
+ADAPTERS = ROOT / "crates/cbc-candidate/adapters"
+record_tools = load("trial_record_tools", ADAPTERS / "shared/tools.py")
+
+# Legacy-transport instructions in the canonical package (phrase found there, phrase the trial notice
+# must use to override it). The package names no legacy tool; its legacy behaviour is prose.
+LEGACY_TRANSPORT = {
+    "base skill": (r"base CBC skill", "base `cbc` skill"),
+    "legacy transport": (r"today's transport|legacy (?:transport|receivers?)", "today's or legacy transport"),
+    "receivers": (r"\breceivers?\b", "receivers"),
+    "polls": (r"\bpoll", "polls"),
+    "consensus": (r"\bconsensus\b", "consensus"),
+    "caps": (r"numeric caps", "numeric caps"),
+    "connections section": (r"connections:", "`connections:`"),
+    "read cursors": (r"read cursor", "read cursors"),
+    "adoption": (r"candidate core is (?:adopted|in use)", "candidate core is adopted"),
+}
+
+
+def legacy_categories(text):
+    return {name for name, (pattern, _) in LEGACY_TRANSPORT.items() if re.search(pattern, text, re.I)}
+
+
+def candidate_tool_names():
+    """Tools both host adapters list: the base four plus the shared record tools."""
+    listed = [set(re.findall(r'"name": "(cbc_\w+)"', (ADAPTERS / host / "adapter.py").read_text()))
+              for host in ("claude", "codex")]
+    return (listed[0] & listed[1]) | set(record_tools.NAMES)
 
 
 class TrialSkillTests(unittest.TestCase):
@@ -59,6 +86,48 @@ class TrialSkillTests(unittest.TestCase):
             if path.is_file() and path.suffix in {".md", ".yaml"}:
                 with self.subTest(path=path.relative_to(self.project)):
                     self.assertEqual(pattern.findall(path.read_text()), [])
+
+    def test_every_file_with_legacy_transport_rules_carries_the_transport_notice(self):
+        # Agents read references on demand, so a notice only in SKILL.md would not reach rooms.md.
+        trial.install(self.project)
+        flagged = []
+        for path in self.project.rglob("*.md"):
+            text = path.read_text()
+            if legacy_categories(text.replace(trial.TRANSPORT_NOTICE, "")):
+                flagged.append(path.relative_to(self.project).as_posix())
+                with self.subTest(path=flagged[-1]):
+                    self.assertIn(trial.TRANSPORT_NOTICE, text)
+        self.assertIn(".claude/skills/wip-cbc-hierarchy/references/rooms.md", flagged)
+        for target in self.targets():
+            for name in installer.NAMES:
+                self.assertIn(trial.TRANSPORT_NOTICE, (target / trial.trial_name(name) / "SKILL.md").read_text())
+
+    def test_the_transport_notice_overrides_each_legacy_rule_the_package_contains(self):
+        found = set()
+        for name in installer.NAMES:
+            for path in (installer.SOURCE / name).rglob("*.md"):
+                found |= legacy_categories(path.read_text())
+        self.assertGreaterEqual(found, {"base skill", "legacy transport", "receivers", "consensus", "adoption"})
+        for category in sorted(found):
+            with self.subTest(category=category):
+                self.assertIn(LEGACY_TRANSPORT[category][1], trial.TRANSPORT_NOTICE)
+        for forbidden in ("`chatbotchat`", "`cbc` command line"):
+            self.assertIn(forbidden, trial.TRANSPORT_NOTICE)
+        self.assertIn(f"`{trial.SERVER}`", trial.TRANSPORT_NOTICE)
+
+    def test_the_transport_notice_names_only_candidate_tools(self):
+        # cbc_send and cbc_close exist on the legacy server too, so a wrong name would reach v1.
+        candidate = candidate_tool_names()
+        self.assertGreaterEqual(candidate, {"cbc_check", "cbc_send", "cbc_discover", "cbc_connect", "cbc_close"})
+        named = re.findall(r"`(cbc_[a-z_]+\*?)`", trial.TRANSPORT_NOTICE)
+        for tool in named:
+            with self.subTest(tool=tool):
+                if tool.endswith("*"):
+                    self.assertTrue(any(name.startswith(tool[:-1]) for name in candidate))
+                else:
+                    self.assertIn(tool, candidate)
+        for needed in ("cbc_check", "cbc_connect", "cbc_close", "cbc_work_register"):
+            self.assertIn(needed, named)
 
     def test_relative_references_resolve_inside_the_trial_package(self):
         trial.install(self.project)

@@ -23,6 +23,31 @@ HOSTS = (".claude/skills", ".agents/skills")
 NOTICE = ("Trial copy: use only the `wip-cbc-*` skills (and `wip-emperor`) in this project and ignore any "
           "legacy `cbc-*` skill with the same role, which belongs to deployed v1. Scripts accept the `wip-` "
           "role form and record the canonical `cbc-*` role.")
+# The MCP server name the trial wiring registers the candidate adapter under.
+SERVER = "cbc-trial"
+# The canonical package is written for both transports: legacy rules for "today", candidate rules for
+# "once the candidate core is adopted". In the trial the candidate core is in use, so this notice settles
+# every such fork. It goes into every installed Markdown file, because references are read on demand.
+TRANSPORT_NOTICE = f"""**Trial transport.** This project runs the candidate core. This notice overrides every file in
+this package, references included. Your CBC tools come from the `{SERVER}` MCP server.
+
+- Every rule that applies once the candidate core is adopted (or "in use") applies now.
+- Ignore every rule about today's or legacy transport: receivers, polls, read cursors, the
+  `connections:` state section, numeric caps and extensions, and closing by consensus.
+- Never load the base `cbc` skill or any CBC skill without the `wip-` prefix. Never use the
+  `chatbotchat` MCP server or the `cbc` command line. A `cbc_send` or `cbc_close` from any server
+  other than `{SERVER}` is legacy: stop and tell the user.
+- The core binds your identity. Never type a label or pass a member.
+- Routes: `cbc_discover`, then `cbc_connect` for a report or peer room. Connecting is idempotent and
+  returns an existing room, so there is no room ID to carry or join.
+- Receiving: you are told when items are pending; then call `cbc_check`. Start no receiver, poll or
+  timer.
+- Sending: `cbc_send`. Closing: `cbc_close`, alone, with a one-line reason. Rooms have no caps.
+- Work items: `cbc_work_register`, `cbc_work_update`, `cbc_work_get`, and `cbc_work_hitl_on` for the
+  Primarch. A Chapter Master connects its report room to the Primarch before `cbc_work_register`, or
+  the Primarch never sees the registration.
+- Questions: `cbc_request_*`. Holds and stops have no record yet; send them as messages.
+- A handoff is not part of this trial. If asked for one, tell the user."""
 # Longest first, bounded by anything that is not a word character or hyphen, so `cbc-hierarchy-dir`
 # placeholders stay untouched and a second pass over rewritten text changes nothing.
 NAME_PATTERN = re.compile(r"(?<![\w-])(" + "|".join(
@@ -41,7 +66,7 @@ def with_notice(skill):
     if not skill.startswith("---\n"):
         raise ValueError("skill entrypoint has no frontmatter")
     end = skill.index("\n---\n", 4) + 5
-    return skill[:end] + "\n" + NOTICE + "\n" + skill[end:]
+    return skill[:end] + "\n" + NOTICE + "\n\n" + TRANSPORT_NOTICE + "\n" + skill[end:]
 
 
 def build(stage, source=hierarchy.SOURCE):
@@ -54,6 +79,8 @@ def build(stage, source=hierarchy.SOURCE):
                 text = rewrite(path.read_text())
                 if path == destination / "SKILL.md":
                     text = with_notice(text)
+                elif path.suffix == ".md":
+                    text = TRANSPORT_NOTICE + "\n\n" + text
                 path.write_text(text)
 
 
