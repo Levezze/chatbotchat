@@ -419,7 +419,7 @@ Mutation checks:
 D1 is the first slice of the dashboard skeleton (T-11, T-12). It serves a plain,
 read-only page from the core, reached only through a browser session that the
 user's own command starts. Answering from the page is D2; work items and the
-outbox timeline are D1b.
+outbox timeline are D1b, below.
 
 - **Where it runs.** `cbc-candidate serve --dashboard` also listens on
   `127.0.0.1` at the candidate port. The dashboard is opt-in, so a core started
@@ -507,6 +507,55 @@ Mutation checks: each of the following fails at least one test.
 
 Not covered by a test: the 16-connection cap and the 10-second header
 timeout. Both are plain settings of the accept loop.
+
+### D1b as built: work items and the outbox timeline
+
+D1b completes the read side of the dashboard skeleton (T-11). It needs no
+migration: it reads the R2 and R3 records and the PR-A delivery facts as they
+are.
+
+- **The front page.** Each context's panel has three lists, each with its own
+  paging. Every next link is built by reading one entry past the page, so a
+  link appears only when there is more.
+  - *Work items*: 20 per page in item ID order (`/?context=…&items_after=…`),
+    with owner, stage, summary, next action, blocked operation, branch, HITL
+    and when it was last updated. Each item links to its own page.
+  - *Pending requests*: as in D1.
+  - *Outbox*: the context's work and request events, 20 per page, newest first
+    (`/?context=…&outbox_before=…`). Each row shows the room, the class, when
+    it was committed and how many recipients have receipted it, and links to
+    the event's timeline. Participant messages, introductions, notices and
+    closure markers are not outbox events and are not listed.
+- **A work item's page** (`/item?context=…&item=…`) shows every field and the
+  revisions, 50 per page, oldest first (`&after=<revision>`). Each revision
+  shows who made it (the member, or "you"), the fields it changed, when, and
+  each room its event went to, linked to that event's timeline. A revision
+  that reached no room says "nobody".
+- **An event's timeline** (`/timeline?context=…&sequence=…`) shows the room,
+  the class and the commit time, then per recipient: whether it was in the
+  commit-time snapshot, how many times it was offered, when it was first
+  offered and receipted ("not yet" until then), and the time from commit to
+  each. An interval says whether it is exact (one core instance's monotonic
+  clock) or an estimate (wall clocks across a restart).
+- **Missing equals hidden.** An unknown context, item or sequence, a sequence
+  from another context, or a malformed parameter all get the same 404. Every
+  page needs the session; without it the answer is 401.
+- **Store reads.** `Store::work_items` (paged by item ID, one transaction) and
+  `Store::outbox_timelines` (newest first, projected through the existing
+  `delivery_timeline`) are trusted administration reads, used only by the
+  dashboard.
+
+Tests are in `tests/dashboard.rs`. The fixture now gives the worker a report
+room to a repo lead, so its revisions go out through the outbox.
+
+Mutation checks: each of the following fails at least one test.
+- Dropping the escape on a work item's text.
+- Dropping the next link for work items, outbox events or revisions.
+- Listing every item class as an outbox event.
+- Reading a timeline without its context.
+- Serving the item or timeline page without a session.
+- Not trimming the entry read past the page.
+- Leaving a missing stage blank instead of "not yet".
 
 ## Registration, controls and eligible merge
 

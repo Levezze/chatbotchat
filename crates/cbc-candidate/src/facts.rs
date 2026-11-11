@@ -44,7 +44,7 @@ pub enum ItemClass {
 }
 
 impl ItemClass {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Participant => "participant",
             Self::Introduction => "introduction",
@@ -274,6 +274,30 @@ impl Store {
             .timeline_with_tags(context, sequence)
             .await?
             .map(|(t, _)| t))
+    }
+
+    /// Trusted administration (the dashboard). The outbox's events, work and request events,
+    /// with sequence below `before`, newest first, at most `limit` (and never more than 100).
+    pub async fn outbox_timelines(
+        &self,
+        context: &str,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<ItemTimeline>> {
+        crate::bindings::valid_id(context)?;
+        let sequences: Vec<i64> = sqlx::query_scalar(
+            "SELECT sequence FROM candidate_item_facts WHERE context_id=? AND item_class IN ('work_event','request_event') AND sequence<? ORDER BY sequence DESC LIMIT ?",
+        )
+        .bind(context)
+        .bind(before.unwrap_or(i64::MAX))
+        .bind(i64::from(limit.min(100)))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut timelines = Vec::with_capacity(sequences.len());
+        for sequence in sequences {
+            timelines.extend(self.delivery_timeline(context, sequence).await?);
+        }
+        Ok(timelines)
     }
 
     async fn timeline_with_tags(

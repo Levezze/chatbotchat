@@ -5,8 +5,10 @@
 use cbc_candidate::{
     bindings::{Role, SessionBinding},
     connector::{LocalClient, LocalConnector, LocalOwnerClient},
+    enrollment::ConnectionKind,
     requests::{RequestOwner, MAX_REQUEST_PAGE},
     store::Store,
+    work::{Stage, WorkPatch},
     Sandbox,
 };
 use std::net::SocketAddr;
@@ -20,6 +22,9 @@ struct Running {
     owner_key: String,
     addr: SocketAddr,
     worker: SessionBinding,
+    lead: SessionBinding,
+    /// The worker's report room to the lead.
+    report_room: String,
     stop: tokio::sync::oneshot::Sender<()>,
     task: tokio::task::JoinHandle<anyhow::Result<()>>,
 }
@@ -33,6 +38,9 @@ impl Running {
     }
     fn worker(&self) -> LocalClient<'_> {
         LocalClient::new(&self.socket, &self.worker)
+    }
+    fn lead(&self) -> LocalClient<'_> {
+        LocalClient::new(&self.socket, &self.lead)
     }
     async fn get(&self, path: &str, cookie: Option<&str>) -> Response {
         http(self.addr, "GET", path, &self.host(), cookie).await
@@ -78,6 +86,24 @@ async fn running_with(with_dashboard: bool, extra_contexts: &[&str]) -> Running 
         .bind_member("project", "worker", "device", "w")
         .await
         .unwrap();
+    // The worker reports to a repo lead, so its work events go out through the outbox.
+    store
+        .register_member("project", "lead", Role::RepoLead)
+        .await
+        .unwrap();
+    let lead = store
+        .bind_member("project", "lead", "device", "l")
+        .await
+        .unwrap();
+    store
+        .authorize_connection("project", "worker", "lead", ConnectionKind::Report, "f")
+        .await
+        .unwrap();
+    let report_room = store
+        .connect_members(&worker, "lead", ConnectionKind::Report, "f", "r1", "")
+        .await
+        .unwrap()
+        .room;
     let mut connector = LocalConnector::bind(&sandbox, store).unwrap();
     let mut addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
     if with_dashboard {
@@ -100,6 +126,8 @@ async fn running_with(with_dashboard: bool, extra_contexts: &[&str]) -> Running 
         owner_key,
         addr,
         worker,
+        lead,
+        report_room,
         stop,
         task,
     }
@@ -516,4 +544,228 @@ async fn shutdown_closes_a_connection_that_stopped_reading() {
         .await
         .expect("shutdown finishes promptly and releases the store");
     drop((stalled, half));
+}
+
+/// Register an item and move it to implementing: revisions 1 and 2, each a work event to the
+/// report room.
+async fn drive_item(case: &Running, item: &str, summary: &str) {
+    case.worker()
+        .register_work_item(item, summary, &format!("{item}-r"))
+        .await
+        .unwrap();
+    case.worker()
+        .update_work_item(
+            item,
+            1,
+            &format!("{item}-u"),
+            &WorkPatch {
+                stage: Some(Stage::Implementing),
+                next_action: Some("write <the> tests".into()),
+                ..WorkPatch::default()
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// Every `/timeline?…` link on a page, as a path.
+fn timeline_links(body: &str) -> Vec<String> {
+    body.match_indices("/timeline?context=project&amp;sequence=")
+        .map(|(at, _)| {
+            let rest = &body[at..];
+            rest[..rest.find('"').unwrap()].replace("&amp;", "&")
+        })
+        .collect()
+}
+
+/// T-11: work items are listed per context, and each opens to its revisions.
+#[tokio::test]
+async fn work_items_open_to_their_revisions() {
+    let case = running(true).await;
+    let cookie = case.login().await;
+    drive_item(&case, "feat-a", "Build <b>it</b>").await;
+    let home = case.get("/", Some(&cookie)).await;
+    assert_eq!(home.status, 200);
+    assert!(home.body.contains("<h3>Work items</h3>"), "{}", home.body);
+    assert!(home.body.contains("Build &lt;b&gt;it&lt;/b&gt;"));
+    assert!(home.body.contains("implementing"));
+    assert!(home.body.contains("write &lt;the&gt; tests"));
+    let link = "/item?context=project&item=feat-a";
+    assert!(
+        home.body.contains(&link.replace('&', "&amp;")),
+        "a link to the item"
+    );
+
+    let item = case.get(link, Some(&cookie)).await;
+    assert_eq!(item.status, 200);
+    assert!(item.body.contains("feat-a"));
+    assert!(item.body.contains("registered"));
+    assert!(item.body.contains("next_action, stage"));
+    assert!(
+        item.body.contains(&case.report_room),
+        "where each revision went"
+    );
+    assert_eq!(
+        timeline_links(&item.body).len(),
+        2,
+        "one event per revision"
+    );
+
+    for path in [
+        "/item?context=project&item=nope",
+        "/item?context=nope&item=feat-a",
+        "/item?context=project",
+    ] {
+        assert_eq!(case.get(path, Some(&cookie)).await.status, 404, "{path}");
+    }
+    assert_eq!(case.get(link, None).await.status, 401);
+    stop(case).await;
+}
+
+/// T-11: the outbox timeline. Each event shows when it was committed and, per recipient,
+/// when it was offered and receipted.
+#[tokio::test]
+async fn the_outbox_shows_each_event_and_its_recipients() {
+    let case = running(true).await;
+    let cookie = case.login().await;
+    drive_item(&case, "feat-a", "Build it").await;
+    let home = case.get("/", Some(&cookie)).await;
+    assert!(home.body.contains("<h3>Outbox</h3>"), "{}", home.body);
+    assert!(home.body.contains("work_event"));
+    let links = timeline_links(&home.body);
+    assert_eq!(links.len(), 2, "two work events, and no introduction");
+
+    let before = case.get(&links[0], Some(&cookie)).await;
+    assert_eq!(before.status, 200);
+    assert!(before.body.contains("lead"));
+    assert!(before.body.contains("not yet"), "{}", before.body);
+
+    while let Some(batch) = case.lead().check().await.unwrap() {
+        case.lead().receipt(&batch).await.unwrap();
+    }
+    let after = case.get(&links[0], Some(&cookie)).await;
+    assert!(!after.body.contains("not yet"), "{}", after.body);
+    assert!(
+        after.body.contains("exact"),
+        "an interval on one core clock"
+    );
+
+    let unknown = "/timeline?context=project&sequence=999999";
+    for path in [
+        unknown,
+        "/timeline?context=project&sequence=x",
+        "/timeline?context=project",
+    ] {
+        assert_eq!(case.get(path, Some(&cookie)).await.status, 404, "{path}");
+    }
+    assert_eq!(case.get(&links[0], None).await.status, 401);
+    stop(case).await;
+}
+
+/// A sequence from another context is not this context's: hidden equals missing.
+#[tokio::test]
+async fn a_timeline_is_read_only_in_its_own_context() {
+    let case = running_with(true, &["other"]).await;
+    let cookie = case.login().await;
+    drive_item(&case, "feat-a", "Build it").await;
+    let home = case.get("/?context=project", Some(&cookie)).await;
+    let link = timeline_links(&home.body).remove(0);
+    let foreign = link.replace("context=project", "context=other");
+    assert_eq!(case.get(&foreign, Some(&cookie)).await.status, 404);
+    stop(case).await;
+}
+
+/// Past a page of work items or outbox events, a link leads on, and the last page links nowhere.
+#[tokio::test]
+async fn work_items_and_the_outbox_come_in_pages() {
+    use cbc_candidate::dashboard::{MAX_OUTBOX_PAGE, MAX_WORK_PAGE};
+    let case = running(true).await;
+    let cookie = case.login().await;
+    for n in 0..MAX_WORK_PAGE {
+        case.worker()
+            .register_work_item(&format!("w-{n:02}"), "x", &format!("k-{n}"))
+            .await
+            .unwrap();
+    }
+    let page = case.get("/?context=project", Some(&cookie)).await;
+    assert!(
+        !page.body.contains("items_after"),
+        "exactly a page links nowhere"
+    );
+    assert!(!page.body.contains("outbox_before"));
+    for n in MAX_WORK_PAGE..=MAX_OUTBOX_PAGE.max(MAX_WORK_PAGE) {
+        case.worker()
+            .register_work_item(&format!("w-{n:02}"), "x", &format!("k-{n}"))
+            .await
+            .unwrap();
+    }
+    let first = case.get("/", Some(&cookie)).await;
+    let last = format!("w-{:02}", MAX_WORK_PAGE - 1);
+    let next = format!("/?context=project&items_after={last}");
+    assert!(
+        first.body.contains(&next.replace('&', "&amp;")),
+        "{}",
+        first.body
+    );
+    let second = case.get(&next, Some(&cookie)).await;
+    assert!(second.body.contains(&format!("w-{MAX_WORK_PAGE:02}")));
+    assert!(!second.body.contains(">w-00<"));
+
+    let at = first
+        .body
+        .find("/?context=project&amp;outbox_before=")
+        .expect("an outbox link");
+    let rest = &first.body[at..];
+    let older = rest[..rest.find('"').unwrap()].replace("&amp;", "&");
+    let shown: Vec<String> = timeline_links(&first.body);
+    let page_two = case.get(&older, Some(&cookie)).await;
+    assert_eq!(page_two.status, 200);
+    for link in timeline_links(&page_two.body) {
+        assert!(!shown.contains(&link), "pages don't overlap");
+    }
+    assert!(!timeline_links(&page_two.body).is_empty());
+    stop(case).await;
+}
+
+/// A work item's revisions come in pages of 50, oldest first.
+#[tokio::test]
+async fn revisions_come_in_pages() {
+    let case = running(true).await;
+    let cookie = case.login().await;
+    let worker = case.worker();
+    worker
+        .register_work_item("feat-a", "x", "k-r")
+        .await
+        .unwrap();
+    for revision in 1..=50 {
+        worker
+            .update_work_item(
+                "feat-a",
+                revision,
+                &format!("k-{revision}"),
+                &WorkPatch {
+                    next_action: Some(format!("step {revision}")),
+                    ..WorkPatch::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let first = case
+        .get("/item?context=project&item=feat-a", Some(&cookie))
+        .await;
+    let next = "/item?context=project&item=feat-a&after=50";
+    assert!(
+        first.body.contains(&next.replace('&', "&amp;")),
+        "{}",
+        first.body
+    );
+    assert_eq!(timeline_links(&first.body).len(), 50);
+    let second = case.get(next, Some(&cookie)).await;
+    assert_eq!(timeline_links(&second.body).len(), 1, "revision 51 alone");
+    assert!(
+        !second.body.contains("after="),
+        "the last page links nowhere"
+    );
+    stop(case).await;
 }
