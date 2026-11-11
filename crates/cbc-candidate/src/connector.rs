@@ -26,6 +26,8 @@ use tokio::{
     task::JoinSet,
 };
 
+mod work;
+
 const MAX_REQUEST_BYTES: usize = 128 * 1024;
 const MAX_REPLY_BYTES: usize = MAX_BATCH_HARD_BYTES + 8192;
 const MAX_CLIENTS: usize = 32;
@@ -239,6 +241,9 @@ enum OwnerOperation {
         expected_revision: String,
         settings: RuntimeSettings,
     },
+    Work {
+        work: work::OwnerWorkOperation,
+    },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -275,6 +280,9 @@ enum Operation {
     Close {
         room: String,
         reason: String,
+    },
+    Work {
+        work: work::WorkOperation,
     },
 }
 #[derive(Serialize, Deserialize)]
@@ -317,6 +325,9 @@ enum Reply {
     Receipted,
     Closed {
         sequence: i64,
+    },
+    Work {
+        result: work::WorkReply,
     },
     Error {
         message: String,
@@ -451,6 +462,7 @@ async fn owner_route(
                 .update(&expected_revision, update)?;
             Ok(serde_json::to_value(snapshot)?)
         }
+        OwnerOperation::Work { work } => work::owner_dispatch(store, work).await,
     }
 }
 
@@ -507,7 +519,8 @@ async fn route(
     if matches!(
         &reply,
         Reply::Sent { .. } | Reply::Closed { .. } | Reply::Connected { .. }
-    ) {
+    ) || matches!(&reply, Reply::Work { result } if result.committed())
+    {
         notices.send_modify(|revision| *revision = revision.wrapping_add(1));
     }
     Ok(reply)
@@ -600,6 +613,9 @@ async fn dispatch(
         }
         Operation::Close { room, reason } => Reply::Closed {
             sequence: store.close_room(&binding, &room, &reason).await?,
+        },
+        Operation::Work { work } => Reply::Work {
+            result: work::dispatch(store, &binding, work).await?,
         },
     })
 }

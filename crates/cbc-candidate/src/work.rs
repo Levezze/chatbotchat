@@ -56,13 +56,37 @@ impl Stage {
 
 /// The owner's content fields. `None` leaves a field as it is; for the clearable fields,
 /// `Some(None)` clears it. HITL is not here: it has its own routes and its own authority.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// On the wire an absent field is left alone, `null` clears and a value sets.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage: Option<Stage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_action: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub blocked_operation: Option<Option<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
     pub branch: Option<Option<String>>,
+}
+
+/// A field that is present, even as `null`, is `Some`; serde's default covers absence.
+fn present<'de, D>(deserializer: D) -> std::result::Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -316,6 +340,19 @@ impl Store {
             .await?;
         tx.commit().await?;
         Ok(outcome)
+    }
+
+    /// A member's read: the owner, or a repo lead in the context. Anyone else gets the same
+    /// answer as for an item that does not exist.
+    pub async fn read_work_item(&self, binding: &SessionBinding, item: &str) -> Result<WorkItem> {
+        valid_item(item)?;
+        let mut tx = self.pool.begin().await?;
+        let status = validate_on(&mut tx, binding).await?;
+        let found = load_item(&mut tx, &binding.context_id, item)
+            .await?
+            .filter(|found| found.owner == binding.member_id || status.role == Role::RepoLead);
+        tx.commit().await?;
+        found.ok_or_else(|| anyhow::anyhow!("unknown work item"))
     }
 
     pub async fn work_item(&self, context: &str, item: &str) -> Result<Option<WorkItem>> {

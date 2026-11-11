@@ -61,7 +61,7 @@ builds it. Only the missing part is built.
 | T-26 peer rooms | Opening is idempotent per pair, kind and `scope_ref`, with a deterministic room ID. Any member can close a room. A closed room refuses to reopen. | Uniqueness per unordered pair, whatever the scope. Close records actor and reason. A replacement room after a close, with a new ID and a link to the room it supersedes. A member's peer rooms go inactive when its identity retires, but not on a handoff. | R1 |
 | T-07, T-09 work items | Nothing. | Work items owned by one member. Revisions as one validated multi-field patch with an expected revision and an idempotency key, committed with one outbox event in the same transaction. A no-op patch produces no event. The HITL flag can be turned on by the user or a repo lead and turned off only on the owner-authenticated route. A feature lead can't change it. | R2 |
 | Outbox | Nothing beyond the inbox. | Outbox events are delivered through the existing inbox as a new item class, so the #113 PR-A delivery facts and waits cover them. No second delivery path. | R2 |
-| Work-item routes | Nothing. | Connector member routes for register, patch and HITL on; the owner route for HITL on and off; waking watchers when a work event commits. | R2b |
+| Work-item routes | Nothing. | Connector member routes for register, patch, HITL on and read; the owner route for HITL on and off and read; waking watchers when a work event commits. | R2b |
 | T-10, T-12 requests | Nothing. | One canonical request with an owner (who answers) and a callback (who is woken). The answer records its channel. An answer an agent relays from chat is stored as relayed, with the relaying member, and never counts as owner-authenticated (proposed default, for the user's review). The answer wakes the asker through the outbox. | R3 |
 | T-27 waits | First-occurrence commit, offer and receipt facts (#113 PR-A). | A mapping from each wait cause in the trial protocol §6 to the facts it is derived from. CI waits (CM-A's observer), holds (#114) and acted-on (#113 PR-B) can't be observed yet and report `unknown`. The interval calculator itself belongs to the report in #113 C. | R3 |
 
@@ -116,9 +116,7 @@ supersedes the revoked room. Neither change restores a closed or revoked room.
 ### R2 as built: work items and the outbox
 
 Migration 0009 (schema 9). The store operations are in `src/work.rs` and the
-tests in `tests/work_items.rs`. This PR is the record layer. The connector's
-member and owner routes, and waking a watcher when a work event commits, follow
-in their own PR before the trial.
+tests in `tests/work_items.rs`. The connector routes are R2b, below.
 
 - **Ownership.** Only a feature lead registers a work item, and it becomes the
   owner. Only the owner patches it. An item ID is unique in its context, so a
@@ -159,6 +157,25 @@ in their own PR before the trial.
 - **Upgrade.** 0009 rebuilds the delivery-facts table to admit the new class
   and copies every existing fact. A test builds a schema-8 database with a
   recorded fact and checks it survives unchanged.
+
+### R2b as built: work-item routes
+
+The routes are in `src/connector/work.rs`; the connector only adds one `work`
+operation to the member and owner protocols. Tests are in
+`tests/work_routes.rs`, over a real socket.
+
+- **Member route.** A bound member registers, patches and turns HITL on through
+  its binding; the model never supplies a member ID. The store's rules apply
+  unchanged, and errors reach the client in the connector's usual opaque form.
+- **Reading.** A member reads an item it owns, or any item if it is a repo
+  lead. Anyone else gets the same answer as for an item that does not exist.
+- **Owner route.** The user turns HITL on or off, and reads an item with its
+  full revision history, on the owner-authenticated route.
+- **Wire patch.** An absent field is left alone, `null` clears it, and a value
+  sets it. Unknown fields are refused, so HITL can't ride in a patch.
+- **Waking.** A registration or an applied revision wakes parked watchers, the
+  same signal a sent message gives. A no-op or a read wakes nobody. A test
+  parks a lead's watch, registers an item, and fails if the watch isn't woken.
 
 ## Registration, controls and eligible merge
 
