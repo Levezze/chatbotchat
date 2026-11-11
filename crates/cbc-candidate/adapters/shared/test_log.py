@@ -6,7 +6,10 @@ import os
 import pathlib
 import shutil
 import stat
+import subprocess
+import sys
 import tempfile
+import textwrap
 import threading
 import unittest
 
@@ -141,6 +144,27 @@ class EventLogTests(unittest.TestCase):
             done.set()
         threading.Thread(target=run, daemon=True).start()
         self.assertTrue(done.wait(5), "opening a FIFO with no reader must not block the log")
+
+    def test_a_partly_written_line_is_cut_back_before_the_next_line(self):
+        # A child process lowers its own file-size limit, so a long line is written in part and
+        # then fails, as on a full disk; the limit is lifted before the next line.
+        child = textwrap.dedent("""
+            import importlib.util, resource, signal, sys
+            spec = importlib.util.spec_from_file_location("log", sys.argv[1])
+            log = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(log)
+            signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+            soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+            events = log.EventLog(sys.argv[2], "router-events.jsonl", "driver")
+            events.write("info", "first", {})
+            resource.setrlimit(resource.RLIMIT_FSIZE, (events.size + 40, hard))
+            events.write("info", "lost", {"reason": "x" * 400})
+            resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+            events.write("info", "kept", {})
+        """)
+        subprocess.run([sys.executable, "-I", "-c", child,
+                        str(pathlib.Path(__file__).with_name("log.py")), self.dir], check=True)
+        self.assertEqual([l["event"] for l in lines(self.path)], ["first", "log_dropped", "kept"])
 
     def test_a_write_never_raises(self):
         events = self.open()

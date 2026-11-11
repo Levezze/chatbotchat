@@ -123,8 +123,12 @@ impl LogFile {
             Ok(())
         })();
         if written.is_err() {
-            // Reopen at the next line: the file may have been moved or replaced.
-            self.file = None;
+            // A write can fail partway, on a full disk say. Cut the file back to the last whole
+            // line, so the next line does not join a broken one; then reopen at the next line,
+            // since the file may also have been moved or replaced.
+            if let Some(file) = self.file.take() {
+                let _ = file.set_len(self.size);
+            }
         }
         written.is_ok()
     }
@@ -523,6 +527,60 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("opening a FIFO with no reader must not block the log");
         assert!(!appended);
+    }
+
+    /// Runs in a child process only (see the test below): it lowers this process's file-size
+    /// limit, so a long line is written in part and then fails, as on a full disk.
+    #[test]
+    #[ignore = "run by a_partly_written_line_is_cut_back_before_the_next_line"]
+    fn partial_write_child() {
+        let Some(dir) = std::env::var_os("CBC_LOG_PARTIAL_DIR") else {
+            return;
+        };
+        let dir = PathBuf::from(dir);
+        let mut file = LogFile::open(&dir, "core.jsonl", MAX_BYTES, 2).unwrap();
+        let limit = |bytes: libc::rlim_t| {
+            let mut current = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: plain getrlimit/setrlimit on this child process only.
+            unsafe {
+                assert_eq!(libc::getrlimit(libc::RLIMIT_FSIZE, &mut current), 0);
+                current.rlim_cur = bytes.min(current.rlim_max);
+                assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &current), 0);
+            }
+        };
+        // SAFETY: ignoring SIGXFSZ makes an over-limit write fail with EFBIG instead.
+        unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_IGN) };
+        assert!(file.append(b"{\"first\":1}\n"));
+        limit(40);
+        assert!(!file.append(format!("{{\"long\":\"{}\"}}\n", "x".repeat(200)).as_bytes()));
+        limit(libc::RLIM_INFINITY);
+        assert!(file.append(b"{\"kept\":3}\n"));
+    }
+
+    #[test]
+    fn a_partly_written_line_is_cut_back_before_the_next_line() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("logs");
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "log::tests::partial_write_child",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("CBC_LOG_PARTIAL_DIR", &dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            fs::read_to_string(dir.join("core.jsonl")).unwrap(),
+            "{\"first\":1}\n{\"kept\":3}\n"
+        );
     }
 
     #[test]

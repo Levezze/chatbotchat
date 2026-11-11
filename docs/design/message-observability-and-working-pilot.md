@@ -565,6 +565,8 @@ converts that log rather than adding a second one.
   - A line that cannot be written is counted. The count is written as a
     `log_dropped` warning (with `count`) on the next line that succeeds.
     Writing never raises or blocks delivery.
+  - A write that fails partway, on a full disk say, is cut back to the last
+    whole line before the file is reopened, so every line in the file parses.
 - **Run id.** `serve --run <id>`, and `--run <id>` on both routers, put the
   trial's run id on every line. An id is 1 to 64 letters, digits, `.`, `_` or
   `-`; anything else is refused before the process starts. Without the flag,
@@ -615,7 +617,8 @@ converts that log rather than adding a second one.
     level is debug, rotation keeping older files, a dropped line counted and
     reported (a link at the log's path is refused, not followed), a hardlink
     at the log's path refused with its target left empty, a FIFO refused
-    within five seconds, the request line by identifiers only, and a private
+    within five seconds, a partly written line cut back (a child process
+    lowers its own file-size limit mid-line), the request line by identifiers only, and a private
     file in a refused shared directory.
   - `tests/logs.rs`, a real `serve --run trial-1`: no request lines at normal;
     after switching to debug the switching request is not logged and the next
@@ -630,7 +633,8 @@ converts that log rather than adding a second one.
     its `accept_unavailable` warning.
   - `adapters/shared/test_log.py`: the same header and allowlist, parity with
     the Rust list, debug filtering and an ignored unknown level, rotation, a
-    counted and reported drop, a hardlink and a FIFO refused as in Rust, a
+    counted and reported drop, a hardlink and a FIFO refused and a partly
+    written line cut back as in Rust, a
     write that never raises, private files and a refused shared directory, the
     run id rule, and a scan of every adapter source: each field passed to an
     `event` call must be on the allowlist, since the log drops an unknown one
@@ -672,6 +676,11 @@ converts that log rather than adding a second one.
   - the Codex queue's `codex_queued` named its field `sequence`, which the
     allowlist dropped. The new scan found two more dropped fields: the device
     router's `hello` `reply` and the queue's exit `code`.
+
+  Codex's review of the fixed head (ef0c52e) found one more: a write that
+  failed partway left half a line, and the next line joined it, so neither
+  parsed. Both writers now cut the file back to the last whole line; a child
+  process with a lowered file-size limit reproduces the failure in each test.
 
 ### C: manifest, report, sampler
 

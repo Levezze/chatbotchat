@@ -116,7 +116,15 @@ class EventLog:
             self.size += len(data)
             return True
         except OSError:
-            self._close()  # reopen at the next line: the file may have been moved or replaced
+            # A write can fail partway, on a full disk say. Cut the file back to the last whole
+            # line, so the next line does not join a broken one; then reopen at the next line,
+            # since the file may also have been moved or replaced.
+            if self.fd is not None:
+                try:
+                    os.ftruncate(self.fd, self.size)
+                except OSError:
+                    pass
+            self._close()
             return False
 
     def _reopen(self):
