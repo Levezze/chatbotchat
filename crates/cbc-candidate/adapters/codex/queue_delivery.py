@@ -92,10 +92,10 @@ class QueueDelivery:
             self.reporter(hint["sequence"], "failed", "queue_unavailable", recovery, attempted_us)
             return False
         if result.returncode != 0:
-            self.event("codex_queue_unavailable", reason="exit", code=result.returncode)
+            self.event("codex_queue_unavailable", reason="exit", outcome=str(result.returncode))
             self.reporter(hint["sequence"], "failed", "queue_exit", recovery, attempted_us)
             return False
-        self.event("codex_queued", sequence=hint["sequence"])
+        self.event("codex_queued", seq=hint["sequence"])
         self.reporter(hint["sequence"], "accepted", None, recovery, attempted_us)
         self.accepted = progress if progress is not None else (None, hint["sequence"])
         return True

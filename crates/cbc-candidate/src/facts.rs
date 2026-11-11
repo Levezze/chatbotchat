@@ -294,8 +294,9 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// One-way correlation tag. Never reversible to the receipt capability.
-pub(crate) fn batch_tag(reference: &str) -> String {
+/// One-way correlation tag. Never reversible to the receipt capability. The logs carry it in
+/// place of a reference; adapters/shared/log.py computes the same value.
+pub fn batch_tag(reference: &str) -> String {
     let digest = Sha256::digest(format!("cbc-batch-tag-v1:{reference}").as_bytes());
     hex(&digest[..8])
 }

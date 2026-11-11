@@ -113,6 +113,7 @@ impl LocalConnector {
                     let outcome = serve.await;
                     if let Err(error) = &outcome {
                         eprintln!("dashboard stopped: {error:#}");
+                        tracing::error!(event = "dashboard_stopped");
                     }
                     outcome
                 });
@@ -133,7 +134,7 @@ impl LocalConnector {
                     let (mut stream,_) = match accepted {
                         Ok(v)=>{accept_backoff=Duration::from_millis(25);v},
                         Err(e) if transient_accept(&e) => {
-                            eprintln!("candidate accept temporarily unavailable: {}",e.kind());
+                            tracing::warn!(event = "accept_unavailable", kind = ?e.kind());
                             tokio::select! {
                                 _ = &mut shutdown => break Ok(()),
                                 _ = tokio::time::sleep(accept_backoff) => {},
@@ -358,6 +359,25 @@ impl Operation {
     /// The name recorded as the member's first activity after a receipt. None for transport:
     /// reading, receipting, status, settings, watching and wake reports are done by the host
     /// adapters on the member's behalf, so they say nothing about the member itself.
+    /// The operation's wire name, for the debug log of a rejected request.
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Check => "check",
+            Self::BindingStatus => "binding_status",
+            Self::Settings => "settings",
+            Self::Discover { .. } => "discover",
+            Self::Connect { .. } => "connect",
+            Self::Watch { .. } => "watch",
+            Self::WatchMembers { .. } => "watch_members",
+            Self::Send { .. } => "send",
+            Self::Receipt { .. } => "receipt",
+            Self::Close { .. } => "close",
+            Self::Work { .. } => "work",
+            Self::Request { .. } => "request",
+            Self::Wake { .. } => "wake",
+        }
+    }
+
     fn activity(&self) -> Option<&'static str> {
         match self {
             Self::Discover { .. } => Some("discover"),
@@ -385,6 +405,8 @@ pub struct BindingStatus {
     pub first_unread_sequence: Option<i64>,
     pub native_target: Option<crate::native_target::NativeTarget>,
     pub recovery_due: bool,
+    /// The live log level, so the driver follows the core's settings (B2).
+    pub log_level: crate::sampler::Mode,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -396,6 +418,8 @@ enum Reply {
         #[serde(deserialize_with = "crate::native_target::required_target")]
         native_target: Option<crate::native_target::NativeTarget>,
         recovery_due: bool,
+        #[serde(default)]
+        log_level: crate::sampler::Mode,
     },
     Woken {
         covered: u64,
@@ -591,6 +615,33 @@ async fn route(
     stream: &mut UnixStream,
 ) -> Result<Reply> {
     ensure!(request.v == 1, "unsupported candidate protocol");
+    // A request is logged when debug holds at its start and at its end, so normal mode pays
+    // nothing per request and a request that switches the level is never logged. A rejected
+    // request is logged by its operation; the error's text is never logged.
+    let asker = tracing::enabled!(tracing::Level::DEBUG).then(|| {
+        (
+            request.auth.context.clone(),
+            request.auth.member.clone(),
+            request.request.name(),
+        )
+    });
+    let answered = answer(store, settings, request, notices, stream).await;
+    if let Some((context, member, operation)) = asker {
+        match &answered {
+            Ok(reply) => crate::log::reply(&context, &member, &serde_json::to_value(reply)?),
+            Err(_) => crate::log::rejected(&context, &member, operation),
+        }
+    }
+    answered
+}
+
+async fn answer(
+    store: &Store,
+    settings: &Mutex<RuntimeSettingsService>,
+    request: Request,
+    notices: &watch::Sender<u64>,
+    stream: &mut UnixStream,
+) -> Result<Reply> {
     let Request { v, auth, request } = request;
     if matches!(
         request,
@@ -677,11 +728,16 @@ async fn dispatch(
                 }
                 .await
                 .unwrap_or(false);
+                let log_level = settings
+                    .lock()
+                    .map(|service| service.snapshot().settings.log_level)
+                    .unwrap_or_default();
                 Reply::BindingStatus {
                     last_receipted_sequence: activity.last_receipted_sequence,
                     first_unread_sequence: activity.first_unread_sequence,
                     native_target: activity.native_target,
                     recovery_due,
+                    log_level,
                 }
             }
             None => Reply::Error {
@@ -914,11 +970,13 @@ impl<'a> LocalClient<'a> {
                 first_unread_sequence,
                 native_target,
                 recovery_due,
+                log_level,
             } => Ok(BindingStatus {
                 last_receipted_sequence,
                 first_unread_sequence,
                 native_target,
                 recovery_due,
+                log_level,
             }),
             _ => anyhow::bail!("unexpected candidate response"),
         }

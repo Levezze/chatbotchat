@@ -288,7 +288,7 @@ estimated.
 | Rooms and identity: duplicates, identity changes | peer room and identity records (R1) | yes | none |
 | Rooms and identity: legacy skills loaded | session transcripts | no | the trial manager's check, in the manifest |
 | Primarch: interventions, turns per hour | items the Primarch sent | partial | C2 counts the CBC items each repo lead sent; turns and interventions are not observable |
-| Cost: CPU, RSS, disk, normal versus debug | process sampling | partial | C3: `cbc-candidate sample` beside the core and driver; the Claude mod runs inside the host app and is not sampled; debug ticks wait for B2 |
+| Cost: CPU, RSS, disk, normal versus debug | process sampling | partial | C3: `cbc-candidate sample` beside the core and driver; the Claude mod runs inside the host app and is not sampled; each tick carries the live log level (B2) |
 | Manifest, sha256 | none | no | C: the manifest writer |
 
 ### B1: wake facts, activity facts, recovery
@@ -527,6 +527,172 @@ settings file. The core uses the workspace's `tracing` dependency, which is
 already locked. B2 does not feed any report line. It is for diagnosing a failed
 run, so it lands after B1 and does not block trial setup.
 
+### B2 as built
+
+A correction first. The plan above said the driver had no log of its own; it
+had one. Both routers already wrote `router-events.jsonl` under `--log-dir`,
+one unversioned JSON object per line, opened per line and never bounded. B2
+converts that log rather than adding a second one.
+
+- **One schema, two writers.** Every line, from the core or the driver, is one
+  JSON object: `v` (1), `t_ms` (wall milliseconds), `level`, `component`
+  (`core` or `driver`), `run`, `instance` (16 hex characters, random per
+  process start), `event`, then the event's own fields.
+  - Only allowlisted field names are written: member, chat, context, room,
+    batch, reference, delivery, kind, reason, outcome, count, seq, attempt,
+    targets, pending, session, retry_ms. Anything else is dropped at the
+    writer, so a message body, a token or a path cannot reach a log by
+    accident. The core's free-text `message` is dropped too, and a core event
+    with no `event` field is written as `unnamed`.
+  - The core's list is `FIELDS` in `src/log.rs`; the driver's is `FIELDS` in
+    `adapters/shared/log.py`. A Python test parses the Rust list and requires
+    the two to be equal.
+  - A receipt reference is a capability, so no log holds one. `reference` is
+    always the batch tag B1's facts already use (`facts::batch_tag`, the
+    first 16 hex characters of a sha256), which the driver computes the same
+    way. A log line, a fact and the other side's log line about one batch
+    join on it. Both sides pin one input and its tag in a test.
+- **Files.** The core writes `<root>/logs/core.jsonl`; the driver writes
+  `<log-dir>/router-events.jsonl`. Each is mode 0600, opened with
+  `O_NOFOLLOW` in a 0700 directory, and a directory open to others is refused
+  at start.
+  - The open is non-blocking, so a FIFO at the log's path cannot hang it. Only
+    a regular file of ours with exactly one link is kept: a hardlink to a file
+    elsewhere is refused, so the log never writes outside its directory.
+  - A file an earlier writer left readable to others is made 0600 through the
+    open descriptor rather than refused. The router's previous writer used
+    `open(path, "a")`, so an upgraded router finds a 0644 file; refusing it
+    would drop every line with no error.
+  - Each file is opened when its log is created, so later descriptor pressure
+    cannot cost it a line; if that first open fails, every write retries.
+  - At 8 MiB the file rotates to `name.1`, keeping three older files.
+  - A line that cannot be written is counted. The count is written as a
+    `log_dropped` warning (with `count`) on the next line that succeeds.
+    Writing never raises or blocks delivery.
+  - A write that fails partway, on a full disk say, is cut back to the last
+    whole line before the file is reopened, so every line in the file parses.
+- **Run id.** `serve --run <id>`, and `--run <id>` on both routers, put the
+  trial's run id on every line. An id is 1 to 64 letters, digits, `.`, `_` or
+  `-`; anything else is refused before the process starts. Without the flag,
+  `run` is null.
+- **The live level.** `log_level` in `runtime-settings.json` is `normal` or
+  `debug`; absent means `normal`. It is skipped when serializing at `normal`,
+  so a settings file without it keeps its revision (pinned in
+  `tests/settings.rs`). An unknown value is refused like any invalid edit, and
+  the core keeps its last accepted level.
+  - The core applies it at its next settings refresh, with no restart. Normal
+    writes info and above; debug adds debug lines; trace is never written.
+  - `binding_status` replies now carry `log_level`. The driver takes its level
+    from every `binding_status` reply it reads: at startup, and for the device
+    router on its recovery pass, every 60 seconds. A level change reaches the
+    driver within about a minute. The Claude-only router reads it at startup
+    only; the trial runs the device router.
+- **What is logged.** In the core, at debug: one `request` line per answered
+  request, with the reply's kind, seq, reference, count of items, member,
+  context and outcome, with the batch's tag as `reference`. A request is
+  logged only when debug held at both its
+  start and its end, so the request that reads a level change is never
+  logged. A rejected request gives a `request` line too, with `kind` `error`
+  and the operation's name as `reason`; the error's text is never logged,
+  since it can hold names. At any level: `accept_unavailable` and
+  `dashboard_accept_unavailable` (warn, with the error kind) and
+  `dashboard_stopped` (error, without its text, which may hold a path).
+  - In the driver, every existing event, renamed onto the allowlist: `n` to
+    `count`, `error` and the feed's `reply` to `reason`, a handled reply's
+    `reply` to `outcome` (in both routers' `hello`), `sequence` to `seq`
+    (including the Codex queue's `codex_queued`), a failed queue command's exit
+    `code` to `outcome`, `retry_in` seconds to `retry_ms`, and `listening` now gives a `count` of bindings rather than a
+    PID and member list. At debug, one `core_call` line per core round trip:
+    the operation as `kind`, the reply type as `outcome`, member, context, and
+    the reply's seq, batch tag and item count where present.
+- **Not converted.** The Claude adapter's per-chat `adapter-*.jsonl` files and
+  the Codex adapter keep their own formats. They are diagnostics for one
+  chat, not the run. The Codex queue delivery the device router runs is not
+  part of that adapter: it writes through the router's log.
+- **The sampler.** Each tick is labelled with the level in
+  `runtime-settings.json` when the tick is taken, read without a lock or a
+  write. If the file is invalid the core keeps its last accepted settings, so
+  the tick reads the last-good checkpoint as it stands at that tick. Only if
+  neither file reads does the tick keep the previous label; before any read
+  the label comes from the last accepted settings, else `normal`. `sample --mode` is gone, and the
+  file is `samples-<wall_ms>.jsonl`: one sampler can cover both levels.
+- **Tests.**
+  - Core unit (`src/log.rs`): the header and allowlist, debug only while the
+    level is debug, rotation keeping older files, a dropped line counted and
+    reported (a link at the log's path is refused, not followed), a hardlink
+    at the log's path refused with its target left empty, a FIFO refused
+    within five seconds, a partly written line cut back (a child process
+    lowers its own file-size limit mid-line), a 0644 file made private with its
+    old lines kept, the request line by identifiers only, and a private
+    file in a refused shared directory.
+  - `tests/logs.rs`, a real `serve --run trial-1`: no request lines at normal;
+    after switching to debug the switching request is not logged and the next
+    ones are, with their kinds, member, count, run, instance and component;
+    a send to a missing room gives a `request` line with `kind` `error`,
+    `reason` `send` and the member; switching back adds none; neither token
+    nor any body is in the file.
+  - `tests/settings.rs`: a file without `log_level` keeps its pinned revision
+    and reads normal; the level changes live and an unknown value keeps the
+    last good one.
+  - `tests/connector.rs`: under descriptor exhaustion the core still writes
+    its `accept_unavailable` warning.
+  - `adapters/shared/test_log.py`: the same header and allowlist, parity with
+    the Rust list, debug filtering and an ignored unknown level, rotation, a
+    counted and reported drop, a hardlink and a FIFO refused and a partly
+    written line cut back as in Rust, a legacy 0644 router log made private
+    and kept, a
+    write that never raises, private files and a refused shared directory, the
+    run id rule, and a scan of every adapter source: each field passed to an
+    `event` call must be on the allowlist, since the log drops an unknown one
+    without an error.
+  - `adapters/claude/test_router.py`: a real router at normal writes v1 lines
+    and no `core_call`; restarted with `--run` against a core reporting debug,
+    a send gives one `core_call` line with member, outcome and seq, a 0600
+    file, no token and no body; a bad `--run` exits 2.
+  - `adapters/device/test_router.py`: two status reads on the recovery path
+    set debug then normal, giving exactly one `core_call` line, a debug event
+    after the switch back is not written, and no token is in the file. A real
+    Codex queue callback writing through the router's log gives
+    `codex_queued` with `seq` 7, and a failed command gives
+    `codex_queue_unavailable` with `reason` `exit` and `outcome` `3`.
+  - `tests/sampler.rs`: a sampler switched to debug after its first tick,
+    then given an invalid file with a last-good checkpoint of debug, then that
+    checkpoint changed to normal, labels its four ticks normal, debug, debug,
+    normal.
+- **Changed tests.** Six assertions changed with the contract they check, not
+  to make a test pass: the router's `hello` event names its reply `outcome`
+  rather than `reply`; the Codex queue test's captured event carries `seq`
+  rather than `sequence`; the sampler test now expects the checkpoint's level
+  on an invalid file rather than the previous label, and gained a fourth tick
+  that tells the two apart; `tests/logs.rs` requires the request line's
+  `reference` to be the batch tag, and the raw reference to be absent, where it
+  had required any string; the sampler file name no longer carries a mode, and its
+  ticks without a settings change read normal; the report's debug-missing
+  reason no longer says debug waits for B2. The router's "an unwritable log
+  never raises" unit test now builds the new log, removes its directory and
+  writes, because the old one set an attribute that no longer exists and would
+  have passed without writing anything.
+- **Review fixes.** Codex's review of the first B2 head (7825537) found five
+  defects. Each got a failing test before its fix:
+  - a hardlink at a log's path let the log append to the linked file;
+  - a FIFO at a log's path hung the open;
+  - a rejected core request was not logged at debug;
+  - on an invalid settings file, the sampler kept its previous label rather
+    than the level the core actually kept;
+  - the Codex queue's `codex_queued` named its field `sequence`, which the
+    allowlist dropped. The new scan found two more dropped fields: the device
+    router's `hello` `reply` and the queue's exit `code`.
+
+  Codex's review of the fixed head (ef0c52e) found one more: a write that
+  failed partway left half a line, and the next line joined it, so neither
+  parsed. Both writers now cut the file back to the last whole line; a child
+  process with a lowered file-size limit reproduces the failure in each test.
+
+  The third review (099f704) found that a log file the previous router wrote,
+  mode 0644, was refused for good, so an upgraded router logged nothing and
+  said nothing. Both writers now make such a file private through the open
+  descriptor, when it is a regular file of ours with one link.
+
 ### C: manifest, report, sampler
 
 - **Manifest.** One JSON file written before the go: build commit, host and
@@ -727,11 +893,12 @@ sampler and the Cost section it feeds.
 ### C3 as built: the sampler
 
 `cbc-candidate sample --root … --protected-db … [--interval-s 10]
-[--mode normal|debug] [--ticks N]` samples until SIGINT or SIGTERM, or for N
-ticks. It prints `{"status":"sampling","file":…}` when the file exists and
+[--ticks N]` samples until SIGINT or SIGTERM, or for N ticks. It prints
+`{"status":"sampling","file":…}` when the file exists and
 `{"status":"stopped","ticks":n}` at the end. `report --samples FILE` feeds the
-Cost section, repeated once per sampler run (a normal run and a debug run each
-write their own file); each file's name and sha256 go in the header. The files
+Cost section, repeated once per sampler run; each file's name and sha256 go in
+the header. (As merged in C3 the sampler took `--mode`; B2 replaced it with the
+live level, read per tick. See B2 as built.) The files
 are read in time order, and two that overlap are refused: two samplers running
 at once would count every process twice.
 
@@ -755,7 +922,7 @@ at once would count every process twice.
     shared-memory files, `snapshots/`, and everything else.
   - `ps` sees every candidate process the user runs, not only this root's.
     One candidate runs during a trial; a second one would be summed in.
-- **The file.** `<root>/samples/samples-<wall_ms>-<mode>.jsonl`, created new
+- **The file.** `<root>/samples/samples-<wall_ms>.jsonl`, created new
   with mode 0600 and `O_NOFOLLOW` in a 0700 directory, flushed per tick. A
   sampler killed mid-write leaves a partial last line; the report ignores it
   and names the file. Any other bad line, an unknown version or ticks out of order
@@ -774,8 +941,8 @@ at once would count every process twice.
     chat, the Codex adapter per session). An expected label with no match
     prints missing, so an absent component never passes for free. A label not
     expected is still listed.
-  - The Claude mod runs inside the host app and prints missing. Debug-mode
-    ticks print missing until B2 adds debug logging.
+  - The Claude mod runs inside the host app and prints missing. With no
+    debug-mode tick in the window, the debug line prints missing.
   - Disk: start, end and maximum of each part, per mode, so a normal run
     and a debug run are compared rather than merged.
 - **Tests.**

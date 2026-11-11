@@ -115,6 +115,14 @@ pub struct RuntimeSettings {
     /// Member IDs are scoped by context, never a global member-name lookup.
     #[serde(default)]
     pub members: BTreeMap<String, BTreeMap<String, PolicyPatch>>,
+    /// The live log level of the core and the driver (B2). Left out when normal, so a file
+    /// written before B2 keeps its revision.
+    #[serde(default, skip_serializing_if = "is_normal")]
+    pub log_level: crate::sampler::Mode,
+}
+
+fn is_normal(mode: &crate::sampler::Mode) -> bool {
+    *mode == crate::sampler::Mode::Normal
 }
 
 impl Default for RuntimeSettings {
@@ -125,6 +133,7 @@ impl Default for RuntimeSettings {
             contexts: BTreeMap::new(),
             roles: BTreeMap::new(),
             members: BTreeMap::new(),
+            log_level: crate::sampler::Mode::Normal,
         }
     }
 }
@@ -340,6 +349,8 @@ fn make_snapshot(
     recovered: bool,
     error: Option<String>,
 ) -> Result<SettingsSnapshot> {
+    // Every accepted snapshot passes here, so the live log level follows the settings file.
+    crate::log::set_level(settings.log_level);
     Ok(SettingsSnapshot {
         revision: revision(&settings)?,
         source: root.join(SETTINGS),
@@ -438,6 +449,22 @@ fn settings_lock(root: &Path) -> Result<fs::File> {
         "runtime settings busy or unavailable"
     );
     Ok(file)
+}
+
+/// The log level in the settings file as it stands, for an observer such as the sampler: no lock,
+/// no writes. None when the file is missing or invalid; the core then keeps its last accepted
+/// settings, which `accepted_log_level` reads.
+pub fn observed_log_level(root: &Path) -> Option<crate::sampler::Mode> {
+    read_settings(&root.join(SETTINGS))
+        .ok()
+        .map(|s| s.log_level)
+}
+
+/// The level in the last accepted settings (the last-good checkpoint), as it stands.
+pub fn accepted_log_level(root: &Path) -> Option<crate::sampler::Mode> {
+    read_settings(&root.join(LAST_GOOD))
+        .ok()
+        .map(|s| s.log_level)
 }
 
 fn read_settings(path: &Path) -> Result<RuntimeSettings> {

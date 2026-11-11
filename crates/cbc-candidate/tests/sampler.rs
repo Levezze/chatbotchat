@@ -9,10 +9,33 @@ use cbc_candidate::{
 use std::{
     fs,
     os::unix::fs::{symlink, PermissionsExt},
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Duration,
 };
 use tempfile::tempdir;
+
+/// `samples-<wall_ms>.jsonl`: one file can hold both levels, so its name carries neither.
+fn plain_sample_name(name: &str) -> bool {
+    name.strip_prefix("samples-")
+        .and_then(|rest| rest.strip_suffix(".jsonl"))
+        .is_some_and(|ms| !ms.is_empty() && ms.bytes().all(|b| b.is_ascii_digit()))
+}
+
+const DEBUG: &str =
+    r#"{"schema":1,"defaults":{"retry_initial_ms":1000,"retry_max_ms":30000},"log_level":"debug"}"#;
+const NORMAL: &str = r#"{"schema":1,"defaults":{"retry_initial_ms":1000,"retry_max_ms":30000},"log_level":"normal"}"#;
+
+fn write_settings(root: &Path, text: &str) {
+    write_settings_file(root, "runtime-settings.json", text);
+}
+
+fn write_settings_file(root: &Path, name: &str, text: &str) {
+    let temporary = root.join("settings.tmp");
+    fs::write(&temporary, text).unwrap();
+    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::rename(temporary, root.join(name)).unwrap();
+}
 
 struct Killed(std::process::Child);
 impl Drop for Killed {
@@ -77,7 +100,6 @@ async fn a_tick_lists_candidate_processes_by_label_and_the_disk_under_the_root()
         &sandbox,
         SampleArgs {
             interval: Duration::from_millis(50),
-            mode: Mode::Debug,
             ticks: Some(2),
         },
         |path| file = Some(path.to_path_buf()),
@@ -91,10 +113,7 @@ async fn a_tick_lists_candidate_processes_by_label_and_the_disk_under_the_root()
     let path = file.unwrap();
     assert_eq!(path.parent().unwrap(), sandbox.root().join("samples"));
     let name = path.file_name().unwrap().to_str().unwrap().to_owned();
-    assert!(
-        name.starts_with("samples-") && name.ends_with("-debug.jsonl"),
-        "{name}"
-    );
+    assert!(plain_sample_name(&name), "{name}");
     assert_eq!(
         fs::metadata(&path).unwrap().permissions().mode() & 0o777,
         0o600
@@ -142,7 +161,7 @@ async fn a_tick_lists_candidate_processes_by_label_and_the_disk_under_the_root()
     );
     assert!(ticks
         .iter()
-        .all(|t| t.mode == Mode::Debug && t.interval_ms == 50));
+        .all(|t| t.mode == Mode::Normal && t.interval_ms == 50));
     assert!(ticks[0].disk.database_bytes > 0, "{:?}", ticks[0].disk);
     Samples::parse(&name, &bytes).unwrap();
 }
@@ -174,12 +193,74 @@ fn the_command_prints_its_file_and_how_many_ticks_it_wrote() {
     assert_eq!(lines.len(), 2, "{lines:?}");
     assert_eq!(lines[0]["status"], "sampling");
     let file = std::path::PathBuf::from(lines[0]["file"].as_str().unwrap());
-    assert!(file
-        .file_name()
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .ends_with("-normal.jsonl"));
+    assert!(plain_sample_name(
+        file.file_name().unwrap().to_str().unwrap()
+    ));
     assert_eq!(lines[1], serde_json::json!({"status":"stopped","ticks":1}));
     assert_eq!(fs::read_to_string(&file).unwrap().lines().count(), 1);
+}
+
+#[tokio::test]
+async fn each_tick_is_labelled_with_the_live_log_level() {
+    let temp = tempdir().unwrap();
+    let sandbox = Sandbox::initialize(
+        &temp.path().join("candidate"),
+        8994,
+        &[temp.path().join("daily/state.db")],
+    )
+    .unwrap();
+    let root = sandbox.root().to_path_buf();
+    let (found, path) = tokio::sync::oneshot::channel::<PathBuf>();
+    // Switches the level between ticks: debug after the first line, then an invalid file. On an
+    // invalid file the core keeps its last accepted settings, so the label follows that
+    // checkpoint as it stands each tick: debug once the core accepted debug, normal when the
+    // checkpoint says normal, whatever the previous label was.
+    let switcher = tokio::spawn(async move {
+        let path = path.await.unwrap();
+        let lines = |n: usize| {
+            let path = path.clone();
+            async move {
+                while fs::read_to_string(&path)
+                    .unwrap_or_default()
+                    .lines()
+                    .count()
+                    < n
+                {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }
+        };
+        lines(1).await;
+        write_settings(&root, DEBUG);
+        lines(2).await;
+        write_settings_file(&root, "runtime-settings.last-good.json", DEBUG);
+        write_settings(&root, "{");
+        lines(3).await;
+        write_settings_file(&root, "runtime-settings.last-good.json", NORMAL);
+    });
+    let mut file = None;
+    sample(
+        &sandbox,
+        SampleArgs {
+            interval: Duration::from_millis(400),
+            ticks: Some(4),
+        },
+        |p| {
+            file = Some(p.to_path_buf());
+            found.send(p.to_path_buf()).unwrap();
+        },
+        std::future::pending::<()>(),
+    )
+    .await
+    .unwrap();
+    switcher.await.unwrap();
+    let modes: Vec<Mode> = fs::read_to_string(file.unwrap())
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str::<Tick>(l).unwrap().mode)
+        .collect();
+    assert_eq!(
+        modes,
+        [Mode::Normal, Mode::Debug, Mode::Debug, Mode::Normal]
+    );
 }

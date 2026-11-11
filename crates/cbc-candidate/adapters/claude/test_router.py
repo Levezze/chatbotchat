@@ -7,7 +7,7 @@ kernel start time) runs for real. The core is a fake that speaks the Rust v1 wir
 and rejects unknown fields. These tests say nothing about Claude Code delivery.
 Run: python3 -I test_router.py -v
 """
-import importlib.util, json, os, queue, secrets, select, shutil, signal, socket, subprocess, sys, tempfile, threading, time, unittest
+import importlib.util, json, os, queue, secrets, select, shutil, signal, stat, socket, subprocess, sys, tempfile, threading, time, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ALPHA, BETA, GAMMA, STRANGER = "sess-alpha", "sess-beta", "sess-gamma", "sess-stranger"
@@ -74,6 +74,7 @@ class FakeCore:
         self.items, self.pending, self.done, self.keys, self.requests = [], {}, {}, {}, []
         self.operations = []
         self.revoked = set()
+        self.log_level = None  # B2: the live level the core puts on binding_status
         self.watches, self.watch_error = [], False  # one (members, after) per watch connection
         self.budget = MAX_BATCH_BYTES
         self.feed = threading.Condition()
@@ -153,8 +154,11 @@ class FakeCore:
         if name == "binding_status":
             if member in self.revoked:
                 return {"type": "error", "code": "invalid_binding", "message": "revoked"}
-            return {"type": "binding_status", "native_target": None,
-                    "first_unread_sequence": None, "last_receipted_sequence": 0}
+            status = {"type": "binding_status", "native_target": None,
+                      "first_unread_sequence": None, "last_receipted_sequence": 0}
+            if self.log_level is not None:
+                status["log_level"] = self.log_level
+            return status
         if name in ("watch", "watch_members"):
             return self.watch(auth, op["others"], op["after"], conn, targeted=name == "watch_members")
         self.requests.append((member, name))
@@ -579,7 +583,54 @@ class RouterTests(unittest.TestCase):
         self.assertTrue(self.wait_for(lambda: hello), "adapter did not log hello")
         self.assertIsNone(hello[0]["ok"])
         self.assertIn("core", hello[0]["error"])
-        self.assertEqual([e.get("reply") for e in self.events() if e["event"] == "hello"], ["error"])
+        self.assertEqual([e.get("outcome") for e in self.events() if e["event"] == "hello"], ["error"])
+
+    def test_the_router_log_is_v1_and_takes_its_level_from_the_core(self):
+        beta = self.member(BETA)
+        out, is_error = self.tool(beta, 1, "cbc_send", {"room": "t1", "body": "private words", "key": "k1"})
+        self.assertFalse(is_error, out)
+        self.assertTrue(self.wait_for(lambda: any(e["event"] == "hello" for e in self.events())))
+        normal = self.events()
+        self.assertTrue(all(e["v"] == 1 and e["component"] == "driver" and e["run"] is None
+                            for e in normal), normal)
+        self.assertFalse([e for e in normal if e["event"] == "core_call"], "debug lines at normal")
+
+        self.stop_router()
+        if os.path.exists(self.router_sock):
+            os.unlink(self.router_sock)
+        logs = os.path.join(self.tmp, "logs")
+        self.core.log_level = "debug"
+        self.router = subprocess.Popen(
+            [sys.executable, "-I", os.path.join(HERE, "router.py"), "--profile", self.profile,
+             "--listen", self.router_sock, "--sessions-dir", self.sessions,
+             "--log-dir", logs, "--run", "trial-1", "--ttl", "60"])
+        self.assertTrue(self.wait_for(lambda: os.path.exists(self.router_sock), secs=15))
+        alpha = self.member(ALPHA)
+        out, is_error = self.tool(alpha, 1, "cbc_send", {"room": "t1", "body": "private words", "key": "k2"})
+        self.assertFalse(is_error, out)
+        path = os.path.join(logs, "router-events.jsonl")
+        calls = lambda: [json.loads(l) for l in read_text(path).splitlines()
+                         if json.loads(l)["event"] == "core_call"] if os.path.exists(path) else []
+        self.assertTrue(self.wait_for(lambda: any(c["kind"] == "send" for c in calls())), calls())
+        lines = [json.loads(l) for l in read_text(path).splitlines()]
+        self.assertTrue(all(l["run"] == "trial-1" and l["instance"] == lines[0]["instance"]
+                            for l in lines), lines)
+        [send] = [c for c in calls() if c["kind"] == "send"]
+        self.assertEqual((send["level"], send["member"], send["outcome"], send["seq"]),
+                         ("debug", "alpha", "sent", out["sequence"]))
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        text = read_text(path)
+        self.assertNotIn("private words", text)
+        for grant in self.grants:
+            self.assertNotIn(grant["token"], text)
+
+    def test_a_run_id_is_checked_before_the_router_starts(self):
+        bad = subprocess.run(
+            [sys.executable, "-I", os.path.join(HERE, "router.py"), "--profile", self.profile,
+             "--listen", os.path.join(self.tmp, "other.sock"), "--sessions-dir", self.sessions,
+             "--run", "a b", "--ttl", "1"], capture_output=True, text=True)
+        self.assertEqual(bad.returncode, 2, bad.stderr)
+        self.assertIn("--run", bad.stderr)
 
     def test_router_exits_at_ttl_and_removes_its_socket(self):
         path = os.path.join(self.tmp, "ttl.sock")
@@ -842,10 +893,12 @@ class AdapterWriteUnitTests(unittest.TestCase):
 
 class EventLogUnitTests(unittest.TestCase):
     def test_unwritable_event_log_never_raises(self):
+        tmp = tempfile.mkdtemp(prefix="cbcr-", dir="/tmp")
         r = router.Router.__new__(router.Router)
-        r.lock = threading.Lock()
-        r.log_path = "/nonexistent-cbc-dir/router-events.jsonl"
-        r.event("feed_failed", reply="error")  # the feed thread must survive a lost log
+        r.log = router.event_log.EventLog(os.path.join(tmp, "logs"), "router-events.jsonl", "driver")
+        shutil.rmtree(tmp)
+        r.log.close()
+        r.event("feed_failed", reason="error")  # the feed thread must survive a lost log
 
 
 class ProfileUnitTests(unittest.TestCase):

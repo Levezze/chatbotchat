@@ -38,6 +38,9 @@ enum Command {
         /// Also serve the dashboard on 127.0.0.1 at the candidate port.
         #[arg(long)]
         dashboard: bool,
+        /// The trial run this core belongs to, written on every log line.
+        #[arg(long, value_parser = run_id)]
+        run: Option<String>,
     },
     /// Open the dashboard in the browser with a fresh single-use sign-in link. The link goes
     /// straight to the browser and is never printed.
@@ -132,9 +135,6 @@ enum Command {
         /// Seconds between ticks.
         #[arg(long = "interval-s", default_value_t = 10)]
         interval_s: u64,
-        /// The logging mode the candidate runs in: normal or debug.
-        #[arg(long, default_value = "normal")]
-        mode: cbc_candidate::sampler::Mode,
         /// Stop after this many ticks instead of on a signal.
         #[arg(long)]
         ticks: Option<u64>,
@@ -289,7 +289,6 @@ async fn main() -> anyhow::Result<()> {
             root,
             protected_db,
             interval_s,
-            mode,
             ticks,
         } => {
             protected_dbs.push(protected_db);
@@ -300,7 +299,6 @@ async fn main() -> anyhow::Result<()> {
                 &sandbox,
                 cbc_candidate::sampler::SampleArgs {
                     interval: std::time::Duration::from_secs(interval_s),
-                    mode,
                     ticks,
                 },
                 |file| {
@@ -434,10 +432,12 @@ async fn main() -> anyhow::Result<()> {
             root,
             protected_db,
             dashboard,
+            run,
         } => {
             protected_dbs.push(protected_db);
             let sandbox = cbc_candidate::Sandbox::inspect(&root, &protected_dbs)?;
             protect_port(sandbox.port())?;
+            cbc_candidate::log::init(sandbox.root(), run)?;
             // Hash the executable now, before a later rebuild can replace it on disk.
             cbc_candidate::evidence::build()?;
             let store = cbc_candidate::store::Store::open(&sandbox).await?;
@@ -682,4 +682,17 @@ fn protect_port(port: u16) -> anyhow::Result<()> {
         "candidate port overlaps a protected endpoint"
     );
     Ok(())
+}
+
+/// A run id is short and plain, so it can sit on every log line as is.
+fn run_id(text: &str) -> Result<String> {
+    anyhow::ensure!(
+        !text.is_empty()
+            && text.len() <= 64
+            && text
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')),
+        "a run id is 1 to 64 letters, digits, '-', '_' or '.'"
+    );
+    Ok(text.to_owned())
 }

@@ -65,6 +65,68 @@ class DeviceTests(unittest.TestCase):
         router.wake_read.close()
         router.wake_write.close()
 
+    def test_the_recovery_status_read_sets_the_live_level_and_logs_no_token(self):
+        # B2: the core puts log_level on binding_status; the device router reads that status on
+        # its recovery cadence, so the level follows the core's settings without a restart.
+        replies = [{"type": "binding_status", "log_level": "debug", "reference": "ref-secret-1"},
+                   {"type": "binding_status", "log_level": "normal"}]
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(self.profile["core_socket"])
+        server.listen(4)
+        self.addCleanup(server.close)
+
+        def answer():
+            for reply in replies:
+                connection, _ = server.accept()
+                with connection:
+                    while not connection.recv(65536).endswith(b"\n"):
+                        pass
+                    connection.sendall((json.dumps(reply) + "\n").encode())
+        threading.Thread(target=answer, daemon=True).start()
+        args = self.args()
+        args.log_dir, args.run = str(self.root / "logs"), "trial-2"
+        router = device.DeviceRouter(args)
+        self.addCleanup(self.cleanup_router, router)
+        grant = binding("claude", CLAUDE)
+        self.assertEqual(router.read_wake_status(grant, 2.0)["log_level"], "debug")
+        self.assertEqual(router.read_wake_status(grant, 2.0)["log_level"], "normal")
+        router.event("still_info", member="claude")
+        router.event("debug_only", level="debug", member="claude")
+        path = self.root / "logs" / "router-events.jsonl"
+        lines = [json.loads(line) for line in path.read_text().splitlines()]
+        calls = [line for line in lines if line["event"] == "core_call"]
+        self.assertEqual([(c["kind"], c["outcome"], c["member"]) for c in calls],
+                         [("binding_status", "binding_status", "claude")])  # only while debug
+        self.assertEqual(calls[0]["reference"], "6292735d22f1737a")  # a digest, never the capability
+        self.assertEqual([line["event"] for line in lines if line["event"] != "core_call"],
+                         ["still_info"])
+        self.assertTrue(all(line["run"] == "trial-2" and line["component"] == "driver"
+                            for line in lines), lines)
+        self.assertNotIn(grant["token"], path.read_text())
+        self.assertNotIn("ref-secret-1", path.read_text())
+
+    def test_a_codex_queue_delivery_reaches_the_router_log_with_its_sequence(self):
+        # The real callback the router builds, writing through the router's own log: a field
+        # the log's allowlist does not know would be dropped silently.
+        args = self.args()
+        args.log_dir = str(self.root / "logs")
+        router = device.DeviceRouter(args)
+        self.addCleanup(self.cleanup_router, router)
+        exits = iter([0, 3])
+        callback = device.codex.QueueDelivery(
+            "/usr/local/bin/codex", SESSION, router.event,
+            runner=lambda *_args, **_kwargs: SimpleNamespace(returncode=next(exits)))
+        self.assertTrue(callback(HINT))
+        callback.accepted = None
+        self.assertFalse(callback(HINT))
+        path = self.root / "logs" / "router-events.jsonl"
+        lines = [json.loads(line) for line in path.read_text().splitlines()]
+        queued = [line for line in lines if line["event"].startswith("codex_queue")]
+        self.assertEqual([(q["event"], q.get("seq"), q.get("reason"), q.get("outcome"))
+                          for q in queued],
+                         [("codex_queued", 7, None, None),
+                          ("codex_queue_unavailable", None, "exit", "3")])
+
     def test_private_profile_maps_every_native_session_to_one_host(self):
         core, bindings, targets = device.load_targets(str(self.path))
         self.assertEqual(core, self.profile["core_socket"])
@@ -1242,7 +1304,7 @@ class CodexQueueTests(unittest.TestCase):
         self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
         self.assertEqual(kwargs["stderr"], subprocess.DEVNULL)
         self.assertNotIn("shell", kwargs)
-        self.assertEqual(events, [("codex_queued", {"sequence": 7})])
+        self.assertEqual(events, [("codex_queued", {"seq": 7})])
 
     def test_unavailable_command_is_failure_not_fake_delivery(self):
         for outcome in (OSError("sensitive path"), subprocess.TimeoutExpired("private", 1), 1):

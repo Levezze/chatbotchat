@@ -48,10 +48,11 @@ CBC113_CASE=$(rtk proxy mktemp -d /private/tmp/cbc113.XXXXXX)
 CBC113_ROOT="$CBC113_CASE/core"
 CBC113_BIN="$CBC113_REPO/target-candidate/debug/cbc-candidate"
 CBC113_PROTECTED="$HOME/.chatbotchat/state.db"
+CBC113_RUN="run-1"
 rtk proxy mkdir "$CBC113_CASE/codex-project" "$CBC113_CASE/claude-project"
 rtk proxy chmod 700 "$CBC113_CASE/codex-project" "$CBC113_CASE/claude-project"
 rtk proxy "$CBC113_BIN" init --root "$CBC113_ROOT" --port 18485 --protected-db "$CBC113_PROTECTED"
-rtk proxy "$CBC113_BIN" serve --root "$CBC113_ROOT" --protected-db "$CBC113_PROTECTED"
+rtk proxy "$CBC113_BIN" serve --root "$CBC113_ROOT" --protected-db "$CBC113_PROTECTED" --run "$CBC113_RUN"
 ```
 
 The last command owns that terminal. Reuse these exact variable values in the other terminals. Set `CBC113_PROTECTED` to the actual daily DB if it differs. `18485` is reserved candidate metadata, not a TCP listener. Daily `8484` is forbidden. Init requires a new root; keep socket paths below 104 bytes. Do not print `owner.key`, the generated profile, credentials or receipt references. Keep test documents mode 0600 and projects private. Record build commit, test results, actual executable versions and core/driver PIDs in `CASE/evidence.md`, never secrets.
@@ -125,8 +126,10 @@ Write `ROOT/provision.json` privately using the following shape. Replace every `
 ```sh
 rtk proxy chmod 600 "$CBC113_ROOT/provision.json"
 rtk proxy "$CBC113_BIN" provision --root "$CBC113_ROOT" --protected-db "$CBC113_PROTECTED" --spec "$CBC113_ROOT/provision.json" --profile-out "$CBC113_ROOT/device-profile.json"
-rtk proxy python3 -B -I "$CBC113_REPO/crates/cbc-candidate/adapters/device/router.py" --profile "$CBC113_ROOT/device-profile.json" --listen "$CBC113_ROOT/device.sock" --sessions-dir /ACTUAL/CLAUDE/SESSIONS --codex-executable /ACTUAL/INSTALLED/CODEX --log-dir "$CBC113_ROOT/device-log"
+rtk proxy python3 -B -I "$CBC113_REPO/crates/cbc-candidate/adapters/device/router.py" --profile "$CBC113_ROOT/device-profile.json" --listen "$CBC113_ROOT/device.sock" --sessions-dir /ACTUAL/CLAUDE/SESSIONS --codex-executable /ACTUAL/INSTALLED/CODEX --log-dir "$CBC113_ROOT/device-log" --run "$CBC113_RUN"
 ```
+
+Set `CBC113_RUN` to one id per run (1 to 64 of letters, digits, `.`, `_`, `-`). The core logs to `$CBC113_ROOT/logs/core.jsonl` and the driver to `device-log/router-events.jsonl`, both v1 lines that carry the id. Switch to debug by setting `"log_level":"debug"` in `$CBC113_ROOT/runtime-settings.json` through the settings mechanism, and back by removing it; neither needs a restart. The core applies it at its next request; the driver within its 60-second recovery pass, so before measuring debug cost wait for the first driver `core_call` line after the switch. Neither log holds a token, a receipt reference or a message body.
 
 Use `profile:"cli"` for an observed Claude CLI entrypoint. Provisioning rejects unsupported
 Codex execution-profile claims or configured saved selectors before changing state. Its output

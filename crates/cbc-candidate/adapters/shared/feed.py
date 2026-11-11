@@ -186,7 +186,7 @@ class ChangeFeed:
                     # New activity must not defeat retry backoff or duplicate an in-flight call.
                     current["hint"] = dict(change)
             self.ready.notify_all()
-        self.emit("feed_changed", sequence=reply["sequence"], targets=len(changes))
+        self.emit("feed_changed", seq=reply["sequence"], targets=len(changes))
         return reply["sequence"]
 
     def hinted(self, key):
@@ -247,7 +247,7 @@ class ChangeFeed:
                 state["due"] = self.clock() + delay
             self.ready.notify_all()
         if reason is not None:
-            self.emit("target_failed", context=key[0], member=key[1], reason=reason, retry_in=delay)
+            self.emit("target_failed", context=key[0], member=key[1], reason=reason, retry_ms=int(delay * 1000))
 
     def deliver_ready(self):
         """Attempt one due target without waiting. Also used for deterministic clock tests."""
@@ -328,5 +328,5 @@ class ChangeFeed:
                 after = 0
                 failures += 1
                 delay = self._retry_delay(failures)
-                self.emit("feed_failed", reply=type(error).__name__, retry_in=delay)
+                self.emit("feed_failed", reason=type(error).__name__, retry_ms=int(delay * 1000))
                 self.registry_changed.wait(delay)

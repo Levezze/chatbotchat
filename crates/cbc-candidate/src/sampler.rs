@@ -24,10 +24,12 @@ use std::{
 pub const SAMPLE_VERSION: u64 = 1;
 const SAMPLE_DIR: &str = "samples";
 
-/// The label a trial run gives its ticks, so the report keeps normal and debug runs apart.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+/// The logging mode: the runtime settings' live log level. Each tick carries the level in force
+/// when it was taken, so the report keeps normal and debug apart even within one file.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
+    #[default]
     Normal,
     Debug,
 }
@@ -357,14 +359,13 @@ pub fn disk(root: &Path, database: &Path) -> Result<Disk> {
 /// What the `sample` command was given.
 pub struct SampleArgs {
     pub interval: Duration,
-    pub mode: Mode,
     /// Stop after this many ticks; None runs until `stop` resolves.
     pub ticks: Option<u64>,
 }
 
-/// Creates `<root>/samples/samples-<wall_ms>-<mode>.jsonl` (mode 0600, never an existing file,
-/// never through a link) and returns it open, with its path.
-fn create_sample_file(root: &Path, mode: Mode) -> Result<(fs::File, PathBuf)> {
+/// Creates `<root>/samples/samples-<wall_ms>.jsonl` (mode 0600, never an existing file, never
+/// through a link) and returns it open, with its path.
+fn create_sample_file(root: &Path) -> Result<(fs::File, PathBuf)> {
     let dir = root.join(SAMPLE_DIR);
     match fs::DirBuilder::new().mode(0o700).create(&dir) {
         Ok(()) => {}
@@ -376,11 +377,7 @@ fn create_sample_file(root: &Path, mode: Mode) -> Result<(fs::File, PathBuf)> {
         meta.is_dir() && meta.mode() & 0o077 == 0,
         "the samples directory must be a private directory"
     );
-    let path = dir.join(format!(
-        "samples-{}-{}.jsonl",
-        crate::facts::wall_ms(),
-        mode.label()
-    ));
+    let path = dir.join(format!("samples-{}.jsonl", crate::facts::wall_ms()));
     let file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -401,7 +398,11 @@ pub async fn sample(
     stop: impl std::future::Future<Output = ()>,
 ) -> Result<u64> {
     ensure!(!args.interval.is_zero(), "interval must be positive");
-    let (mut file, path) = create_sample_file(sandbox.root(), args.mode)?;
+    let (mut file, path) = create_sample_file(sandbox.root())?;
+    // The label follows the settings file, read each tick. On an invalid file the core keeps its
+    // last accepted settings, so the label follows that checkpoint as it stands at the tick; only
+    // when neither file reads does it keep the last level seen.
+    let mut mode = crate::settings::accepted_log_level(sandbox.root()).unwrap_or_default();
     started(&path);
     let interval_ms = u64::try_from(args.interval.as_millis())?;
     let mut clock = tokio::time::interval(args.interval);
@@ -414,14 +415,17 @@ pub async fn sample(
             _ = clock.tick() => {}
         }
         let (root, database) = (sandbox.root().to_path_buf(), sandbox.database_path());
-        let (processes, disk) = tokio::task::spawn_blocking(move || -> Result<_> {
-            Ok((read_processes(&root)?, disk(&root, &database)?))
+        let (processes, disk, level) = tokio::task::spawn_blocking(move || -> Result<_> {
+            let level = crate::settings::observed_log_level(&root)
+                .or_else(|| crate::settings::accepted_log_level(&root));
+            Ok((read_processes(&root)?, disk(&root, &database)?, level))
         })
         .await??;
+        mode = level.unwrap_or(mode);
         let tick = Tick {
             v: SAMPLE_VERSION,
             wall_ms: crate::facts::wall_ms(),
-            mode: args.mode,
+            mode,
             interval_ms,
             processes,
             disk,

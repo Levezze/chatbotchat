@@ -37,6 +37,10 @@ _target_spec = importlib.util.spec_from_file_location(
     "cbc_native_target", os.path.join(os.path.dirname(os.path.abspath(__file__)), "../shared/native_target.py"))
 native_target = importlib.util.module_from_spec(_target_spec)
 _target_spec.loader.exec_module(native_target)
+_log_spec = importlib.util.spec_from_file_location(
+    "cbc_candidate_log", os.path.join(os.path.dirname(os.path.abspath(__file__)), "../shared/log.py"))
+event_log = importlib.util.module_from_spec(_log_spec)
+_log_spec.loader.exec_module(event_log)
 
 MAX_FRAME = 256 * 1024
 MAX_CLIENTS = 32
@@ -185,13 +189,16 @@ def read_frame(conn):
 
 class Router:
     def __init__(self, args):
+        # B2: v1 lines, the core's schema. Opened first, so startup's binding_status reads
+        # already set the level. A shared directory is refused.
+        self.log = event_log.EventLog(args.log_dir, "router-events.jsonl", "driver",
+                                      run=getattr(args, "run", None)) if args.log_dir else None
         self.core, bindings, self.native_targets = load_profile(args.profile, with_targets=True)
         # A revoked binding is quarantined, not fatal: one stale grant in the
         # profile must not take every other chat on this device down with it.
         self.revoked = self.verify_target_registry(bindings, self.native_targets)
         self.bindings = {s: b for s, b in bindings.items() if s not in self.revoked}
         self.sessions_dir = args.sessions_dir
-        self.log_path = os.path.join(args.log_dir, "router-events.jsonl") if args.log_dir else None
         self.bells = 0
         self.rung = {}  # session -> reference of the pending batch last rung for
         self.lock = threading.Lock()
@@ -223,14 +230,27 @@ class Router:
                 raise ValueError("native target disagrees with core binding authority")
         return revoked
 
-    def event(self, kind, **fields):
-        if not self.log_path:
-            return
-        try:  # a lost log must never take a delivery path down with it
-            with self.lock, open(self.log_path, "a") as f:
-                f.write(dumps({"t": time.time(), "event": kind, **fields}) + "\n")
-        except OSError:
-            pass
+    def event(self, kind, level="info", **fields):
+        log = getattr(self, "log", None)
+        if log is not None:  # EventLog.write never raises: a lost log never takes delivery down
+            log.write(level, kind, fields)
+
+    def observed(self, binding, request, reply):
+        """Every core round trip passes here. The live level rides on binding_status, and at
+        debug each call is one line of identifiers: the operation, the reply's type and size."""
+        log = getattr(self, "log", None)
+        if log is None or not isinstance(reply, dict):
+            return reply
+        if reply.get("type") == "binding_status":
+            log.set_level(reply.get("log_level"))
+        items = reply.get("items")
+        log.write("debug", "core_call", {
+            "kind": request.get("op"), "outcome": reply.get("type"),
+            "context": binding.get("context"), "member": binding.get("member"),
+            "seq": reply.get("sequence"),
+            "reference": event_log.batch_tag(ref) if isinstance(ref := reply.get("reference"), str) else None,
+            "count": len(items) if isinstance(items, list) else None})
+        return reply
 
     def core_call(self, binding, request):
         s = socket.socket(socket.AF_UNIX)
@@ -239,11 +259,12 @@ class Router:
             s.connect(self.core)
             s.sendall((dumps({"v": 1, "auth": binding, "request": request}) + "\n").encode())
             raw = read_frame(s)
-            return json.loads(raw) if raw else {"type": "error", "message": "core reply missing or too large"}
+            reply = json.loads(raw) if raw else {"type": "error", "message": "core reply missing or too large"}
         except (OSError, ValueError):
-            return {"type": "error", "message": "core unavailable"}
+            reply = {"type": "error", "message": "core unavailable"}
         finally:
             s.close()
+        return self.observed(binding, request, reply)
 
     def follow_feed(self):
         """One host-neutral feed dispatches only members whose unread state changed."""
@@ -371,10 +392,10 @@ class Router:
         try:
             s.connect(path)
             s.sendall(frame.encode())
-            self.event("doorbell_written", member=member, n=n)
+            self.event("doorbell_written", member=member, count=n)
             return True
         except OSError as e:
-            self.event("doorbell_failed", member=member, error=type(e).__name__)
+            self.event("doorbell_failed", member=member, reason=type(e).__name__)
             return False
         finally:
             s.close()
@@ -447,13 +468,13 @@ class Router:
         if op == "hello":
             reply = self.notify(session, force=True)
             kind = reply.get("type")
-            self.event("hello", member=member, pending=kind == "batch", reply=kind)
+            self.event("hello", member=member, pending=kind == "batch", outcome=kind)
             if kind not in ("batch", "empty"):
                 return {"error": str(reply.get("message", "core error"))}
             return {"ok": True}
         reply = self.core_call(binding, {"op": op, **req})
         kind = reply.get("type")
-        self.event(op, member=member, reply=kind)
+        self.event(op, member=member, outcome=kind)
         if op == "receipt":
             # Ring again if anything is still pending: a batch holds at most 32 items, and
             # a failed receipt (the core cancelled or superseded the batch) leaves the same
@@ -521,7 +542,8 @@ def main():
     ap.add_argument("--profile", required=True)
     ap.add_argument("--listen", required=True)
     ap.add_argument("--sessions-dir", default=os.path.expanduser("~/.claude/sessions"))
-    ap.add_argument("--log-dir")
+    ap.add_argument("--log-dir", help="private directory for router-events.jsonl (v1 lines)")
+    ap.add_argument("--run", type=event_log.run_id, help="trial run id written on every log line")
     ap.add_argument("--ttl", type=int, help="optional disposable-test lifetime; otherwise runs until stopped")
     args = ap.parse_args()
     if args.ttl is not None and args.ttl <= 0:
@@ -531,7 +553,7 @@ def main():
         raise SystemExit("router socket must differ from the core socket")
     srv, inode = listen(args.listen)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    router.event("listening", pid=os.getpid(), members=sorted(b["member"] for b in router.bindings.values()))
+    router.event("listening", count=len(router.bindings))
     if router.bindings:
         threading.Thread(target=router.follow_feed, daemon=True).start()
     deadline = time.monotonic() + args.ttl if args.ttl is not None else None

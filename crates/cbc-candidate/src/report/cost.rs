@@ -185,7 +185,9 @@ pub(super) fn render_cost(o: &mut String, samples: &[Samples], facts: &Facts, wi
         let Some(usage) = modes.get(&mode) else {
             let reason = match mode {
                 Mode::Normal => "no normal-mode ticks in the window",
-                Mode::Debug => "no debug-mode ticks in the window; debug logging lands in B2",
+                Mode::Debug => {
+                    "no debug-mode ticks in the window; log_level was never debug while sampling"
+                }
             };
             let _ = writeln!(o, "  {name}: {}", missing(reason));
             continue;
@@ -420,7 +422,7 @@ Cost (sampler ticks in the window)
         assert!(text.contains("  normal — cbc-candidate snapshot: processes max=1 rss_kb n=1"));
         assert!(!text.contains("codex"));
         assert!(text.contains(
-            "  debug: missing (no debug-mode ticks in the window; debug logging lands in B2)"
+            "  debug: missing (no debug-mode ticks in the window; log_level was never debug while sampling)"
         ));
     }
 
