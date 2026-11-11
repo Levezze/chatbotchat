@@ -9,6 +9,7 @@ pub mod owner;
 pub mod requests;
 pub mod settings;
 pub mod store;
+pub mod waits;
 pub mod work;
 use anyhow::{anyhow, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
