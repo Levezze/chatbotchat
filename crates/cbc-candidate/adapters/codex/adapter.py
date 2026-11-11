@@ -28,6 +28,10 @@ _target_spec = importlib.util.spec_from_file_location(
     "cbc_codex_native_target", Path(__file__).resolve().parents[1] / "shared/native_target.py")
 native_target = importlib.util.module_from_spec(_target_spec)
 _target_spec.loader.exec_module(native_target)
+_tools_spec = importlib.util.spec_from_file_location(
+    "cbc_codex_tools", Path(__file__).resolve().parents[1] / "shared/tools.py")
+tools = importlib.util.module_from_spec(_tools_spec)
+_tools_spec.loader.exec_module(tools)
 
 PROFILE = os.environ.get("CBC_CANDIDATE_PROFILE")
 MAX_PROFILE = 128 * 1024
@@ -62,7 +66,7 @@ TOOLS = [
                                     "scope_ref": {"type": "string", "maxLength": 128},
                                     "key": {"type": "string", "maxLength": 128},
                                     "explanation": {"type": "string", "maxLength": 600}}}},
-]
+] + tools.definitions()
 
 
 def dumps(value):
@@ -193,6 +197,9 @@ class Core:
             return {"members": reply["members"]}, None
         if kind == "connected":
             return {"connection": reply["connection"]}, None
+        payload = tools.reply_payload(reply)
+        if payload is not None:
+            return payload, None
         if kind == "error":
             return {"error": "core error: " + str(reply.get("message", ""))[:256]}, None
         return {"error": "core reply missing or too large"}, None
@@ -323,7 +330,7 @@ def call_tool(rid, params):
     name, args = params.get("name"), params.get("arguments")
     if args is None:
         args = {}
-    if name not in ("cbc_check", "cbc_send", "cbc_discover", "cbc_connect"):
+    if name not in ("cbc_check", "cbc_send", "cbc_discover", "cbc_connect", *tools.NAMES):
         write({"jsonrpc": "2.0", "id": rid, "error": {"code": -32602, "message": "unknown tool"}})
         return
     try:
@@ -360,6 +367,14 @@ def call_tool(rid, params):
             receipt, _ = core.call(grant, {"op": "receipt", "reference": reference})
             if receipt.get("ok") is True and still_bound(grant, core_path, targets):
                 nudge_device(grant, core_path)
+    elif name in tools.NAMES:
+        try:
+            op, fields = tools.core_request(name, args)
+        except tools.ArgumentError as e:
+            write(text_result(rid, {"error": str(e)}, True))
+            return
+        res, _ = core.call(grant, {"op": op, **fields})
+        write(text_result(rid, res, "error" in res))
     elif send_args_error(args):
         write(text_result(rid, {"error": send_args_error(args)}, True))
     else:

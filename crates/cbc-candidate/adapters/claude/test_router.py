@@ -19,6 +19,9 @@ spec.loader.exec_module(router)
 spec = importlib.util.spec_from_file_location("adapter", os.path.join(HERE, "adapter.py"))
 adapter = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(adapter)
+spec = importlib.util.spec_from_file_location("tools", os.path.join(HERE, "../shared/tools.py"))
+tools_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(tools_module)
 MAX_BATCH_BYTES = 48 * 1024  # inbox.rs: budget for a new batch
 LEGACY_BATCH_BYTES = 128 * 1024  # batches persisted under the old budget may still be pending
 MAX_ESCAPED_BODY = 32 * 1024  # serde_json-escaped body, without its two quotes
@@ -62,7 +65,8 @@ def read_line(conn):
 
 class FakeCore:
     """Speaks the Rust connector v1 wire; exact-field checks stand in for deny_unknown_fields."""
-    OPS = {"check": set(), "send": {"room", "key", "body"}, "receipt": {"reference"}, "close": {"room"},
+    OPS = {"check": set(), "send": {"room", "key", "body"}, "receipt": {"reference"},
+           "close": {"room", "reason"}, "work": {"work"}, "request": {"request"},
            "binding_status": set(),
            "watch": {"others", "after"}, "watch_members": {"others", "after"},
            "discover": {"limit"}, "connect": {"target", "kind", "scope_ref", "key", "explanation"}}
@@ -176,6 +180,10 @@ class FakeCore:
         if name == "connect":
             return {"type": "connected", "connection": {"room": "connected-route", "kind": op["kind"],
                 "scope_ref": op["scope_ref"], "introduction_sequence": 1, "reused": False, "closed": False}}
+        if name == "close":
+            return {"type": "closed", "sequence": 41}
+        if name in ("work", "request"):  # echo the operation so a test sees what reached the core
+            return {"type": name, "result": {"type": "echo", "op": op[name]}}
         done = self.done.setdefault(member, set())
         if name == "send":
             if member not in self.rooms.get(op["room"], ()):
@@ -705,13 +713,19 @@ class RouterTests(unittest.TestCase):
         init = self.rpc(p, 1, "initialize", {"protocolVersion": "2026-07-28"})
         self.assertEqual(init["result"]["protocolVersion"], "2025-06-18")
         tools = {t["name"]: t for t in self.rpc(p, 2, "tools/list")["result"]["tools"]}
-        self.assertEqual(set(tools), {"cbc_check", "cbc_connect", "cbc_discover", "cbc_send"})
+        self.assertEqual(set(tools), {"cbc_check", "cbc_connect", "cbc_discover", "cbc_send", *tools_module.NAMES})
         self.assertEqual(tools["cbc_check"]["inputSchema"]["properties"], {})
         # Claude Code moves a longer result to a file the model may never read; a full core
         # batch, including one left pending under the old 128 KiB budget, must stay inline.
         limit = tools["cbc_check"].get("_meta", {}).get("anthropic/maxResultSizeChars", 50000)
         self.assertGreaterEqual(limit, LEGACY_BATCH_BYTES + 8192)
         self.assertLessEqual(limit, 500000)
+        # A page of seven 4,000-character answers or questions, each character escaping to two,
+        # must stay inline too, or the model may never open the file it is moved to.
+        for name in tools_module.NAMES:
+            limit = tools[name].get("_meta", {}).get("anthropic/maxResultSizeChars", 50000)
+            self.assertGreaterEqual(limit, tools_module.MAX_PAGE * 2 * 4000 + 8192, name)
+            self.assertLessEqual(limit, 500000, name)
 
     def test_discover_and_connect_use_corroborated_binding_without_receipts(self):
         p = self.member(ALPHA, extra_env={"CBC_CANDIDATE_CHANNEL": "1"})
@@ -742,6 +756,64 @@ class RouterTests(unittest.TestCase):
                 reply = self.rpc(p, rid, "tools/call", {"name": name, "arguments": value})
                 self.assertTrue(reply["result"]["isError"])
         self.assertEqual(self.core.requests, [])
+
+    def test_record_tools_reach_the_core_as_exact_operations(self):
+        p = self.member(ALPHA)
+        calls = [
+            ("cbc_close", {"room": "t1", "reason": "done"}, "close", {"room": "t1", "reason": "done"},
+             {"sequence": 41}),
+            ("cbc_work_register", {"item": "w1", "summary": "s", "key": "k1"}, "work",
+             {"work": {"op": "register", "item": "w1", "summary": "s", "key": "k1"}}, None),
+            ("cbc_work_update", {"item": "w1", "expected_revision": 2, "key": "k2", "stage": "in_review",
+                                 "blocked_operation": None},
+             "work", {"work": {"op": "update", "item": "w1", "expected_revision": 2, "key": "k2",
+                               "patch": {"stage": "in_review", "blocked_operation": None}}}, None),
+            ("cbc_work_hitl_on", {"item": "w1", "key": "k3"}, "work",
+             {"work": {"op": "set_hitl", "item": "w1", "on": True, "key": "k3"}}, None),
+            ("cbc_work_get", {"item": "w1"}, "work", {"work": {"op": "get", "item": "w1"}}, None),
+            ("cbc_request_open", {"to": "user", "question": "q", "key": "k4"}, "request",
+             {"request": {"op": "open", "owner": "user", "item": None, "question": "q", "key": "k4"}}, None),
+            ("cbc_request_open", {"to": "beta", "question": "q", "key": "k5", "item": "w1"}, "request",
+             {"request": {"op": "open", "owner": {"member": "beta"}, "item": "w1", "question": "q", "key": "k5"}},
+             None),
+            ("cbc_request_answer", {"request": "r1", "body": "a", "key": "k6"}, "request",
+             {"request": {"op": "answer", "request": "r1", "body": "a", "key": "k6"}}, None),
+            ("cbc_request_withdraw", {"request": "r1", "reason": "moot"}, "request",
+             {"request": {"op": "withdraw", "request": "r1", "reason": "moot"}}, None),
+            ("cbc_request_applied", {"request": "r1", "answer": 3}, "request",
+             {"request": {"op": "applied", "request": "r1", "answer": 3}}, None),
+            ("cbc_request_get", {"request": "r1"}, "request", {"request": {"op": "get", "request": "r1"}}, None),
+            ("cbc_request_answers", {"request": "r1"}, "request",
+             {"request": {"op": "answers", "request": "r1", "after": 0, "limit": 7}}, None),
+            ("cbc_request_pending", {}, "request", {"request": {"op": "pending", "after": "", "limit": 7}}, None),
+        ]
+        self.assertEqual({c[0] for c in calls}, set(tools_module.NAMES))
+        for rid, (name, args, op, fields, expected) in enumerate(calls, 1):
+            with self.subTest(name=name, args=args):
+                payload, is_error = self.tool(p, rid, name, args)
+                self.assertFalse(is_error, payload)
+                self.assertEqual(self.core.operations[-1], ("alpha", op, fields))
+                inner = fields.get(op)
+                self.assertEqual(payload, expected or {op: {"type": "echo", "op": inner}})
+
+    def test_record_tools_refuse_identity_and_bad_arguments_before_core(self):
+        p = self.member(ALPHA)
+        malformed = [("cbc_close", {"room": "t1"}), ("cbc_close", {"room": "t1", "reason": "x", "member": "beta"}),
+                     ("cbc_work_register", {"item": "w1", "summary": "s", "key": "k", "owner": "beta"}),
+                     ("cbc_work_update", {"item": "w1", "expected_revision": 1, "key": "k"}),
+                     ("cbc_work_update", {"item": "w1", "expected_revision": True, "key": "k", "stage": "merged"}),
+                     ("cbc_work_update", {"item": "w1", "expected_revision": 1, "key": "k", "stage": "shipped"}),
+                     ("cbc_work_hitl_on", {"item": "w1", "key": "k", "on": False}),
+                     ("cbc_request_open", {"to": "user", "question": "q" * 4001, "key": "k"}),
+                     ("cbc_request_open", {"to": "\ud800", "question": "q", "key": "k"}),
+                     ("cbc_request_answers", {"request": "r1", "limit": 8}),
+                     ("cbc_request_pending", {"context": "other"}),
+                     ("cbc_work_get", [])]
+        for rid, (name, value) in enumerate(malformed, 1):
+            with self.subTest(name=name, value=repr(value)[:100]):
+                reply = self.rpc(p, rid, "tools/call", {"name": name, "arguments": value})
+                self.assertTrue(reply["result"]["isError"])
+        self.assertEqual([r for r in self.core.requests if r[1] != "check"], [])
 
     def test_check_with_arguments_is_rejected_before_reaching_core(self):
         p = self.member(ALPHA)

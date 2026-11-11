@@ -7,10 +7,14 @@ metadata here is synthetic, so these tests say nothing about what Codex sends;
 binding_probe.py is the evidence for that.
 Run: python3 -I test_adapter.py -v
 """
-import json, os, queue, secrets, socket, subprocess, sys, tempfile, threading, time, unittest
+import importlib.util, json, os, queue, secrets, socket, subprocess, sys, tempfile, threading, time, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ADAPTER = os.path.join(HERE, "adapter.py")
+_tools_spec = importlib.util.spec_from_file_location("tools", os.path.join(HERE, "../shared/tools.py"))
+record_tools = importlib.util.module_from_spec(_tools_spec)
+_tools_spec.loader.exec_module(record_tools)
+BOUND_TOOLS = {"cbc_check", "cbc_connect", "cbc_discover", "cbc_send", *record_tools.NAMES}
 THREAD_A, THREAD_B, STRANGER = "thread-alpha", "thread-beta", "thread-stranger"
 ROOM = "room-ab"
 MAX_BATCH_BYTES = 48 * 1024  # inbox.rs: budget for a new batch
@@ -289,7 +293,7 @@ class CodexAdapterTests(unittest.TestCase):
     def test_initialize_lists_bound_tools_and_check_takes_no_arguments(self):
         a = self.start()
         tools = a.reply(a.request("tools/list"))["result"]["tools"]
-        self.assertEqual(sorted(t["name"] for t in tools), ["cbc_check", "cbc_connect", "cbc_discover", "cbc_send"])
+        self.assertEqual(sorted(t["name"] for t in tools), sorted(BOUND_TOOLS))
         check = next(t for t in tools if t["name"] == "cbc_check")
         self.assertEqual(check["inputSchema"].get("properties"), {})
         self.assertFalse(check["inputSchema"].get("additionalProperties", True))
@@ -680,8 +684,7 @@ class CodexAdapterTests(unittest.TestCase):
         later = os.path.join(self.root, "later.json")
         a = self.start(later)
         tools = a.reply(a.request("tools/list"))["result"]["tools"]
-        self.assertEqual({tool["name"] for tool in tools},
-                         {"cbc_check", "cbc_connect", "cbc_discover", "cbc_send"})
+        self.assertEqual({tool["name"] for tool in tools}, BOUND_TOOLS)
         out, err = a.call("cbc_check", meta=thread(THREAD_B))
         self.assertTrue(err)
         self.assertIn("profile", out["error"])
