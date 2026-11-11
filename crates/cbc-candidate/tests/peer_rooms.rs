@@ -386,8 +386,9 @@ async fn v7_store(port: u16, rows: &[&str]) -> (TempDir, Sandbox, Store) {
 }
 
 /// A database written before T-26 could hold one open room per scope for a pair. The newest
-/// open one becomes the pair's active room; the others stay open and usable; a closed one is
-/// superseded by the next open.
+/// open one becomes the pair's active room. The others are drain-only: their history and unread
+/// items are still read and receipted, but nothing new is sent there, so the pair has one
+/// writable room. A closed one is superseded by the next open.
 #[tokio::test]
 async fn a_v7_database_keeps_its_rooms_and_gets_one_active_room_per_pair() {
     let (_temp, _sandbox, store) = v7_store(
@@ -421,8 +422,21 @@ async fn a_v7_database_keeps_its_rooms_and_gets_one_active_room_per_pair() {
     );
     assert!(joined.reused);
     assert_eq!(joined.scope_ref, "contract-b");
-    store
+    let refused = store
         .send(&worker, "old-a", "k2", "still open")
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("drain-only"), "{refused}");
+    let peer = bound(&store, "peer").await;
+    let drained = drain_kinds(&store, &peer).await;
+    assert!(
+        drained
+            .iter()
+            .any(|(room, _, body)| room == "old-a" && body == "a"),
+        "a set-aside room is still read: {drained:?}"
+    );
+    store
+        .send(&worker, "old-b", "k2", "the active room")
         .await
         .unwrap();
     store.close_room(&worker, "old-b", "done").await.unwrap();
