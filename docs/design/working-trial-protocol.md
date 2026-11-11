@@ -87,7 +87,42 @@ Each piece goes through the normal PR process (T-19).
 | 3 | Record layer | #113, moved from #115 | Identity binding (T-25), unique peer rooms (T-26), work items with the HITL flag (T-07), atomic revisions, requests with callbacks (T-10), the outbox, and waits derived from those facts (T-27). Planned as three PRs (R1 to R3), listed in the [record layer plan](work-records-and-external-observations.md#record-layer-plan-for-the-trial-113-2026-11-10). |
 | 4 | Dashboard skeleton | #113, moved from #116 | Work items, open requests and the outbox timeline, plus answering through a browser session (T-11, T-12). |
 | 5 | Instrumentation and report | #113 B and C | Connector instrumentation, bounded recovery, the run manifest, and the deterministic report, including the wait and prompt measurements. |
-| 6 | Trial setup | #113 | The pinned build (T-15), local skills and allowlists (T-17, T-24), the launch sheet (T-20). |
+| 6 | Model tools | #113, found 2026-11-11 | Tools that let a model close a room and use work items and requests. Pieces 3 to 5 built these operations in the core, but no adapter exposed them, so the agents could not reach them. See [model tools](#model-tools-piece-6). |
+| 7 | Trial setup | #113 | The pinned build (T-15), local skills and allowlists (T-17, T-24), the launch sheet (T-20). |
+
+### Model tools (piece 6)
+
+**Why it was added.** A survey of pieces 1 to 5 checked each step of section 4 against the tools a model can call. Before piece 6, a model could check, send, discover and connect, and nothing else. Closing a room, registering or revising a work item, setting HITL, and opening, answering or reading a request existed only as core operations. Phase 1 step 3 and most of phase 2 were therefore unreachable.
+
+**What it adds.** Both adapters gain twelve tools from one table, `adapters/shared/tools.py`, which generates the declared schema and enforces it. Each tool maps to exactly one core operation. The table also checks every field the way the core does: lengths, blank values, control characters, the stage list and integer bounds. A model is therefore told what is wrong. The core still refuses a member's operation with a single generic message, whatever the cause. Identity never comes from arguments: an extra `member`, `owner` or `context` field is refused before anything reaches the core.
+
+Reachability, by trial step:
+
+| Trial step | Tool | Precondition the model must meet |
+|---|---|---|
+| Phase 1.1, one room from simultaneous opens | `cbc_connect` (existing) | none |
+| Phase 1.2, messages both ways | `cbc_send`, `cbc_check` (existing) | none |
+| Phase 1.3, close alone with a reason | `cbc_close` | a member of the room; the reason is one line |
+| Phase 2.2, register and start | `cbc_work_register`, then `cbc_work_update` | the Chapter Master has an open report room to the Primarch. Revision events go only to the owner's open report rooms, and with none the revision records an empty delivery list. |
+| Phase 2.2, Primarch sees the registrations | `cbc_check`, `cbc_work_get` | the same report room |
+| Phase 2.3, contract agreed in a peer room | `cbc_connect` with kind `peer`, then `cbc_send` | a peer grant between the two Chapter Masters |
+| Phase 2.4, question to the user | `cbc_request_open` with `to` `user`; `cbc_request_answers`, `cbc_request_applied` | none |
+| Phase 2.4, user answers in the chat | `cbc_request_answer` on the user's request | stored as relayed, never as the user's own answer (T-10) |
+| Request to a member | `cbc_request_open` with `to` set to the member ID | an open room with that member; otherwise the core refuses |
+| Scenario: HITL set partway | `cbc_work_hitl_on` | Primarch only, turning the flag on only, with an active report grant from the item's owner. Only the user turns it off. |
+| Scenario: a Primarch hold on one operation | none | no hold or stop operation exists yet (#114). The Primarch sends the hold as a message, and the waits report counts it as partial or unknown. |
+| Priority change, note | `cbc_send` | an ordinary message; no record |
+
+**Known gaps, recorded for the report.**
+
+- A refused record operation reaches the model only as "candidate operation rejected", whatever the cause. A stale revision, a missing room and a missing grant look the same, so the tool descriptions state the preconditions. At debug level, the core's `request` lines record each rejection by its operation (B2), which lets a run count refusals. They do not record the cause.
+- Holds and stops are messages, not records, so their waits are measured as partial at best.
+
+**Tests.**
+
+- `tests/model_tools.rs` drives the real Codex adapter against a real core, with a provisioned Primarch and two Chapter Masters. It covers registration and revision, HITL on-only, a relayed user question, a request to the Primarch from opening through answer, read, applied and withdraw, a close and its replacement, and identity in arguments.
+- `adapters/claude/test_router.py` checks that each Claude tool reaches the core as one exact operation and that bad arguments never reach it.
+- `adapters/shared/test_tools.py` checks that the declared schema is the enforced one and mirrors each core field rule.
 
 Explicitly not built before the trial:
 

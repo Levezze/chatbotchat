@@ -57,6 +57,9 @@ jobs:
       - name: Test driver log
         run: python3 -B -I crates/cbc-candidate/adapters/shared/test_log.py
 
+      - name: Test shared record tools
+        run: python3 -B -I crates/cbc-candidate/adapters/shared/test_tools.py
+
       - name: Test device driver
         run: python3 -B -I crates/cbc-candidate/adapters/device/test_router.py
 

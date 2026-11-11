@@ -41,6 +41,10 @@ _log_spec = importlib.util.spec_from_file_location(
     "cbc_candidate_log", os.path.join(os.path.dirname(os.path.abspath(__file__)), "../shared/log.py"))
 event_log = importlib.util.module_from_spec(_log_spec)
 _log_spec.loader.exec_module(event_log)
+_tools_spec = importlib.util.spec_from_file_location(
+    "cbc_candidate_tools", os.path.join(os.path.dirname(os.path.abspath(__file__)), "../shared/tools.py"))
+record_tools = importlib.util.module_from_spec(_tools_spec)
+_tools_spec.loader.exec_module(record_tools)
 
 MAX_FRAME = 256 * 1024
 MAX_CLIENTS = 32
@@ -48,7 +52,9 @@ MAX_PROFILE = 128 * 1024
 MAX_BINDINGS = 64  # connector.rs: one watch carries at most 64 bindings
 AUTH_FIELDS = {"context", "member", "device", "session", "epoch", "token"}
 OPS = {"hello": set(), "subscribe": set(), "check": set(), "receipt": {"reference"}, "send": {"room", "body", "key"},
-       "discover": {"limit"}, "connect": {"target", "kind", "scope_ref", "key", "explanation"}}
+       "discover": {"limit"}, "connect": {"target", "kind", "scope_ref", "key", "explanation"},
+       # S1 record operations: the adapter checks their shape; the core denies unknown fields.
+       "close": {"room", "reason"}, "work": {"work"}, "request": {"request"}}
 DOORBELL = ("CBC_T1 doorbell #{n}: new CBC items are pending for this chat. "
             "Call the cbc_check tool with no arguments.")
 SUBSCRIBED = object()
@@ -494,6 +500,9 @@ class Router:
             return {"members": reply["members"]}
         if kind == "connected":
             return {"connection": reply["connection"]}
+        payload = record_tools.reply_payload(reply)
+        if payload is not None:
+            return payload
         return {"error": str(reply.get("message", "core error"))}
 
     def serve(self, conn):

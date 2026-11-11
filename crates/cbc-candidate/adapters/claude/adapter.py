@@ -11,7 +11,12 @@ Stdlib only. Run with python3 -I. Connector path: CBC_CANDIDATE_CONNECTOR (requi
 there is no ambient default). Tool arguments are enforced here, not only declared in
 the schema, and every frame in either direction is size-bounded.
 """
-import hashlib, json, os, socket, sys, threading, time
+import hashlib, importlib.util, json, os, socket, sys, threading, time
+
+_tools_spec = importlib.util.spec_from_file_location(
+    "cbc_candidate_tools", os.path.join(os.path.dirname(os.path.abspath(__file__)), "../shared/tools.py"))
+record_tools = importlib.util.module_from_spec(_tools_spec)
+_tools_spec.loader.exec_module(record_tools)
 
 CONNECTOR = os.environ.get("CBC_CANDIDATE_CONNECTOR")
 CHANNEL_ENABLED = os.environ.get("CBC_CANDIDATE_CHANNEL") == "1"
@@ -49,7 +54,7 @@ TOOLS = [
                                     "scope_ref": {"type": "string", "maxLength": 128},
                                     "key": {"type": "string", "maxLength": 128},
                                     "explanation": {"type": "string", "maxLength": 600}}}},
-]
+] + record_tools.definitions()
 
 
 def dumps(value):
@@ -308,6 +313,14 @@ def main():
                 res = conn.call("send", room=args.get("room"), body=args.get("body"), key=args.get("key"))
                 write(text_result(rid, res, "error" in res))
                 log("send", ok="error" not in res, error=res.get("error"))
+            elif name in record_tools.NAMES:
+                try:
+                    op, fields = record_tools.core_request(name, args)
+                except record_tools.ArgumentError as e:
+                    write(text_result(rid, {"error": str(e)}, True))
+                else:
+                    res = conn.call(op, **fields)
+                    write(text_result(rid, res, "error" in res))
             else:
                 write({"jsonrpc": "2.0", "id": rid, "error": {"code": -32602, "message": "unknown tool"}})
         elif method == "ping":
