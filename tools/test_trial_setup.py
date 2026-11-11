@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -507,6 +508,45 @@ class PathSafetyTest(unittest.TestCase):
             removed, kept = setup.teardown(case.dir, "cm-a")
             self.assertIn(".claude/settings.local.json", kept)
             self.assertTrue((elsewhere / "settings.local.json").is_file())
+
+    def test_teardown_keeps_an_empty_directory_reached_through_a_symlink(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            case = Case(base)
+            project = fake_project(base)
+            case.prepare(project, "cm-a", "claude")
+            elsewhere = base / "elsewhere"
+            (project / ".claude").rename(elsewhere)
+            (project / ".claude").symlink_to(elsewhere)
+            for skill in (elsewhere / "skills").iterdir():
+                shutil.rmtree(skill)
+            setup.teardown(case.dir, "cm-a")
+            self.assertTrue((elsewhere / "skills").is_dir())
+
+    def test_tracked_trial_skills_are_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            case = Case(base)
+            project = fake_project(base)
+            trial.install(project)
+            git(project, "add", "-f", ".agents")
+            git(project, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "skills")
+            with self.assertRaisesRegex(ValueError, "tracked"):
+                case.prepare(project, "cm-a", "claude")
+            self.assertFalse((project / ".mcp.json").exists())
+
+    def test_sheets_remove_the_marketplace_from_local_settings_only(self):
+        for phase, seats in LaunchSheetTest.SEATS.items():
+            with tempfile.TemporaryDirectory() as temp:
+                base = Path(temp)
+                case = Case(base)
+                for seat, host in seats.items():
+                    case.prepare(fake_project(base, seat), seat, host)
+                text = setup.render_sheet(case.dir, phase).read_text()
+                removals = re.findall(r"marketplace remove [^`]*", text)
+                self.assertTrue(removals)
+                for removal in removals:
+                    self.assertIn("--scope local", removal)
 
     def test_a_negation_exposing_one_installed_skill_is_refused(self):
         with tempfile.TemporaryDirectory() as temp:

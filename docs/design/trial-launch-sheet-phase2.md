@@ -194,7 +194,7 @@ the report's tally file.
    ```
 
 6. Stop the driver (terminal 2), then the core (terminal 1). Stop nothing else; the hosts' own MCP processes belong to the apps.
-7. Desktop seats: `claude plugin uninstall <PLUGIN>@<MARKET_NAME> --scope local` and `claude plugin marketplace remove <MARKET_NAME>` in each Claude worktree.
+7. Desktop seats: `claude plugin uninstall <PLUGIN>@<MARKET_NAME> --scope local` and `claude plugin marketplace remove <MARKET_NAME> --scope local` in each Claude worktree.
 8. Remove each seat's wiring. A file changed since `prepare` is kept and listed.
 
    ```sh

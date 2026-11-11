@@ -280,7 +280,8 @@ def prepare(case, project, seat, host, python, claude_skills_dir=Path.home() / "
 
     files = claude_files(case, python, claude_skills_dir) if host == "claude" else codex_files(case, python)
     refuse_symlinks(project, [*files, *CREATED_DIRS])
-    tracked = git(project, "ls-files", "--", *files).split()
+    skills = [f"{host}/{trial.trial_name(name)}" for host in SKILL_HOSTS for name in trial.hierarchy.NAMES]
+    tracked = git(project, "ls-files", "--", *files, *skills).split()
     if tracked:
         raise ValueError(f"tracked by git, refusing to write: {', '.join(tracked)}")
     for relative, text in files.items():
@@ -405,7 +406,7 @@ def teardown(case, seat):
         kept.extend(f"{host}/wip-*" for host in SKILL_HOSTS)
     for relative in sorted(record["created_dirs"], key=lambda item: item.count("/"), reverse=True):
         path = project / relative
-        if path.is_dir() and not path.is_symlink() and not any(path.iterdir()):
+        if not redirected(project, relative) and path.is_dir() and not any(path.iterdir()):
             path.rmdir()
     archive_hierarchy(case, seat, project, removed, kept)
     if kept:
