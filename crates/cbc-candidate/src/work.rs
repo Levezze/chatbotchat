@@ -404,6 +404,25 @@ impl Store {
         found.ok_or_else(|| anyhow::anyhow!("unknown work item"))
     }
 
+    /// Trusted administration (the dashboard). Items after `after` in ID order, at most `limit`
+    /// (and never more than 100), read in one transaction.
+    pub async fn work_items(
+        &self,
+        context: &str,
+        after: &str,
+        limit: u32,
+    ) -> Result<Vec<WorkItem>> {
+        let mut tx = self.pool.begin().await?;
+        let ids: Vec<String> = sqlx::query_scalar("SELECT item_id FROM candidate_work_items WHERE context_id=? AND item_id>? ORDER BY item_id LIMIT ?")
+            .bind(context).bind(after).bind(i64::from(limit.min(100))).fetch_all(&mut *tx).await?;
+        let mut items = Vec::with_capacity(ids.len());
+        for id in ids {
+            items.extend(load_item(&mut tx, context, &id).await?);
+        }
+        tx.commit().await?;
+        Ok(items)
+    }
+
     pub async fn work_item(&self, context: &str, item: &str) -> Result<Option<WorkItem>> {
         let mut conn = self.pool.acquire().await?;
         load_item(&mut conn, context, item).await

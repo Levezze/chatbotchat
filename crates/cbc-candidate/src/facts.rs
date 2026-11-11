@@ -44,7 +44,7 @@ pub enum ItemClass {
 }
 
 impl ItemClass {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Participant => "participant",
             Self::Introduction => "introduction",
@@ -258,6 +258,11 @@ fn stamp(row: &sqlx::sqlite::SqliteRow, prefix: &str) -> Result<Option<Stamp>> {
     })
 }
 
+/// A context's outbox events below a sequence, newest first. It must read through
+/// `candidate_outbox_facts`: without that index a quiet context scans the whole facts history on
+/// the store's one connection.
+const OUTBOX_PAGE: &str = "SELECT sequence FROM candidate_item_facts WHERE context_id=? AND item_class IN ('work_event','request_event') AND sequence<? ORDER BY sequence DESC LIMIT ?";
+
 impl Store {
     /// This open's core instance ID.
     pub fn instance_id(&self) -> &str {
@@ -274,6 +279,28 @@ impl Store {
             .timeline_with_tags(context, sequence)
             .await?
             .map(|(t, _)| t))
+    }
+
+    /// Trusted administration (the dashboard). The outbox's events, work and request events,
+    /// with sequence below `before`, newest first, at most `limit` (and never more than 100).
+    pub async fn outbox_timelines(
+        &self,
+        context: &str,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<ItemTimeline>> {
+        crate::bindings::valid_id(context)?;
+        let sequences: Vec<i64> = sqlx::query_scalar(OUTBOX_PAGE)
+            .bind(context)
+            .bind(before.unwrap_or(i64::MAX))
+            .bind(i64::from(limit.min(100)))
+            .fetch_all(&self.pool)
+            .await?;
+        let mut timelines = Vec::with_capacity(sequences.len());
+        for sequence in sequences {
+            timelines.extend(self.delivery_timeline(context, sequence).await?);
+        }
+        Ok(timelines)
     }
 
     async fn timeline_with_tags(
@@ -388,6 +415,32 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_outbox_page_reads_through_its_index() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::store::MIGRATOR.run(&pool).await.unwrap();
+        let plan: Vec<String> = sqlx::query(&format!("EXPLAIN QUERY PLAN {OUTBOX_PAGE}"))
+            .bind("c")
+            .bind(i64::MAX)
+            .bind(21)
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get::<String, _>("detail"))
+            .collect();
+        assert!(
+            plan.iter()
+                .any(|d| d.contains("INDEX candidate_outbox_facts")),
+            "{plan:?}"
+        );
+        assert!(!plan.iter().any(|d| d.contains("TEMP B-TREE")), "{plan:?}");
+    }
 
     #[test]
     fn batch_tag_is_short_stable_and_not_the_reference() {

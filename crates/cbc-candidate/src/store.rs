@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+pub(crate) static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 #[must_use = "call close().await before deliberately transferring candidate database ownership"]
 pub struct Store {
