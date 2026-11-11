@@ -78,6 +78,7 @@ class Case:
     """A pinned case directory, with a seat helper."""
 
     def __init__(self, base):
+        base = Path(base).resolve()  # the setup canonicalizes paths, so compare against real paths
         self.base = base
         self.source, self.binary = fake_source(base)
         self.dir = base / "c1"
@@ -392,6 +393,80 @@ class TeardownTest(unittest.TestCase):
             self.assertIn("# cbc-trial c1 begin", exclude.read_text())
             setup.teardown(case.dir, "primarch")
             self.assertNotIn("cbc-trial", exclude.read_text())
+
+
+class PathSafetyTest(unittest.TestCase):
+    """Paths the operator will paste into a shell, and paths the core canonicalizes."""
+
+    def test_a_case_reached_through_a_symlink_is_wired_by_its_real_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp).resolve()
+            case = Case(base)
+            alias = base / "alias"
+            alias.symlink_to(case.dir)
+            project = fake_project(base, "cm-a")
+            setup.prepare(alias, project, "cm-a", "claude", python="/usr/bin/python3", claude_skills_dir=case.skills)
+            text = (project / ".mcp.json").read_text()
+            self.assertIn(str(case.dir / "core/device.sock"), text)
+            self.assertNotIn(str(alias), text)
+            self.assertTrue((case.dir / "seats/cm-a.json").is_file())
+
+    def test_paths_that_need_shell_quoting_are_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp).resolve()
+            (base / "a").mkdir()
+            source, binary = fake_source(base / "a")
+            with self.assertRaisesRegex(ValueError, "shell"):
+                setup.pin(source, binary, base / "a/trial space/c1")
+            self.assertFalse((base / "a/trial space").exists())
+            (base / "b").mkdir()
+            case = Case(base / "b")
+            project = fake_project(base / "b", "cm a")
+            with self.assertRaisesRegex(ValueError, "shell"):
+                case.prepare(project, "cm-a", "claude")
+            self.assertFalse((project / ".mcp.json").exists())
+
+    def test_rendered_setup_commands_run_through_python(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            case = Case(base)
+            for seat, host in LaunchSheetTest.SEATS[1].items():
+                case.prepare(fake_project(base, seat), seat, host)
+            text = setup.render_sheet(case.dir, 1).read_text()
+            script = str((ROOT / "tools/trial_setup.py").resolve())
+            self.assertIn(f"/usr/bin/python3 -B {script} teardown", text)
+            for match in re.finditer(re.escape(script), text):
+                self.assertEqual(text[match.start() - 20:match.start()], "/usr/bin/python3 -B ")
+
+    def test_teardown_archives_hierarchy_records_before_dropping_the_ignore_rule(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            case = Case(base)
+            project = fake_project(base, "cm-a")
+            case.prepare(project, "cm-a", "claude")
+            records = project / ".cbc/hierarchy/trial-c1/cm-a"
+            records.mkdir(parents=True)
+            (records / "state.json").write_text("{}")
+            removed, kept = setup.teardown(case.dir, "cm-a")
+            self.assertEqual(kept, [])
+            self.assertFalse((project / ".cbc").exists())
+            archived = case.dir / "archive/cm-a/hierarchy/trial-c1/cm-a/state.json"
+            self.assertEqual(archived.read_text(), "{}")
+            self.assertEqual(git(project, "status", "--porcelain"), "")
+
+    def test_teardown_keeps_the_ignore_rule_when_hierarchy_records_cannot_be_archived(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            case = Case(base)
+            project = fake_project(base, "cm-a")
+            case.prepare(project, "cm-a", "claude")
+            (project / ".cbc/hierarchy/x").mkdir(parents=True)
+            (project / ".cbc/hierarchy/x/state.json").write_text("{}")
+            (case.dir / "archive/cm-a/hierarchy").mkdir(parents=True)
+            removed, kept = setup.teardown(case.dir, "cm-a")
+            self.assertIn(".cbc/hierarchy", kept)
+            self.assertEqual(git(project, "status", "--porcelain"), "")
+            self.assertTrue((case.dir / "seats/cm-a.json").is_file())
 
 
 class LaunchSheetTest(unittest.TestCase):

@@ -23,6 +23,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -72,6 +73,18 @@ def core(case):
     return Path(case) / "core"
 
 
+def canonical(path):
+    """The real path: the core writes canonical socket paths, and the driver compares them literally."""
+    return Path(path).expanduser().resolve()
+
+
+def shell_safe(*paths):
+    """Refuse paths the launch sheet could not paste into a shell unquoted."""
+    for path in paths:
+        if shlex.quote(str(path)) != str(path):
+            raise ValueError(f"path needs shell quoting; choose one without spaces or shell characters: {path}")
+
+
 def tree_digests(directory, skip=()):
     return {str(path.relative_to(directory)): sha256(path)
             for path in sorted(Path(directory).rglob("*")) if path.is_file() and path.name not in skip}
@@ -100,7 +113,8 @@ def stage_pin(source, binary, stage):
 
 def pin(source, binary, case):
     """Copy the adapters and the core binary from a clean checkout into CASE/pin. Idempotent."""
-    source, binary, case = (Path(path).expanduser().absolute() for path in (source, binary, case))
+    source, binary, case = (canonical(path) for path in (source, binary, case))
+    shell_safe(case)
     check_sockets(case)
     if git(source, "status", "--porcelain", "--", ADAPTERS):
         raise ValueError(f"uncommitted changes under {ADAPTERS}; pin a clean checkout")
@@ -207,7 +221,8 @@ def seat_path(case, seat):
 
 def prepare(case, project, seat, host, python, claude_skills_dir=Path.home() / ".claude/skills"):
     """Write one seat's project-local wiring. Nothing is written unless every check passes."""
-    case, project = Path(case).expanduser().absolute(), Path(project).expanduser().absolute()
+    case, project = canonical(case), canonical(project)
+    shell_safe(case, project, python)
     if not SEAT_NAME.match(seat):
         raise ValueError(f"seat names are lowercase words and hyphens: {seat!r}")
     if host not in HOSTS:
@@ -245,14 +260,15 @@ def prepare(case, project, seat, host, python, claude_skills_dir=Path.home() / "
         raise ValueError(f"the trial block in {exclude} was edited; restore or remove it first")
 
     created = [relative for relative in CREATED_DIRS if not (project / relative).exists()]
+    # The ignore rule goes first, so an interrupted run never leaves a trial file visible to git.
+    if block not in current:
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text(current + ("" if current.endswith("\n") or not current else "\n") + block)
     for relative, text in files.items():
         path = project / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
     trial.install(project)
-    if block not in current:
-        exclude.parent.mkdir(parents=True, exist_ok=True)
-        exclude.write_text(current + ("" if current.endswith("\n") or not current else "\n") + block)
     if record_path.exists():
         created = json.loads(record_path.read_text())["created_dirs"]
     record_path.parent.mkdir(parents=True, exist_ok=True)
@@ -305,9 +321,25 @@ def remove_skills(project):
     return True
 
 
+def archive_hierarchy(case, seat, project, removed, kept):
+    """Move the hierarchy skill's local records into the private case before their ignore rule goes."""
+    hierarchy = project / ".cbc/hierarchy"
+    if not hierarchy.exists() and not hierarchy.is_symlink():
+        return
+    target = case / "archive" / seat / "hierarchy"
+    if hierarchy.is_symlink() or not hierarchy.is_dir() or target.exists() or target.is_symlink():
+        kept.append(".cbc/hierarchy")
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(hierarchy), str(target))
+    removed.append(".cbc/hierarchy (archived)")
+    if not any(hierarchy.parent.iterdir()):
+        hierarchy.parent.rmdir()
+
+
 def teardown(case, seat):
     """Remove what prepare wrote for one seat, if unchanged. Returns (removed, kept) project paths."""
-    case = Path(case).expanduser().absolute()
+    case = canonical(case)
     record_path = seat_path(case, seat)
     record = json.loads(record_path.read_text())
     project = Path(record["project"])
@@ -329,6 +361,7 @@ def teardown(case, seat):
         path = project / relative
         if path.is_dir() and not path.is_symlink() and not any(path.iterdir()):
             path.rmdir()
+    archive_hierarchy(case, seat, project, removed, kept)
     if kept:
         return removed, kept
     record_path.unlink()
@@ -347,7 +380,7 @@ def teardown(case, seat):
 
 def render_sheet(case, phase, template=None):
     """Fill the committed launch-sheet template with this case's paths. Writes CASE/launch-sheet-phaseN.md."""
-    case = Path(case).expanduser().absolute()
+    case = canonical(case)
     if phase not in PHASES:
         raise ValueError(f"phase must be one of {sorted(PHASES)}")
     record = verify_pin(case)
@@ -370,10 +403,11 @@ def render_sheet(case, phase, template=None):
         "BINARY": case / "pin/cbc-candidate", "ROUTER": case / "pin/adapters/device/router.py",
         "MARKET": case / "market", "MARKET_NAME": market_name(case), "PLUGIN": PLUGIN,
         "PLUGIN_DIR": case / "market/plugins" / PLUGIN, "SERVER": SERVER,
-        "PYTHON": next(iter(seats.values()))["python"], "SETUP": Path(__file__).resolve(),
+        "PYTHON": next(iter(seats.values()))["python"], "SETUP": f"{next(iter(seats.values()))['python']} -B {Path(__file__).resolve()}",
     }
     for seat, seat_record in seats.items():
         values[f"{seat.upper().replace('-', '_')}_WORKTREE"] = seat_record["project"]
+    shell_safe(*(value for value in values.values() if not str(value).count(" -B ")))
     text = Path(template or str(TEMPLATE).format(phase=phase)).read_text()
     for key, value in values.items():
         text = text.replace(f"<{key}>", str(value))
