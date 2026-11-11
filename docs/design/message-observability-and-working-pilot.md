@@ -662,8 +662,9 @@ sampler and the Cost section it feeds.
   drop (a plain rebind writes no identity event) and a later batch may offer
   it again. So an offered notice still held by a pending batch at the end
   snapshot is pending, and one no longer held, never receipted, was replaced
-  at an unknown time: it is left out of pending and the waits and counted on
-  its own line. Wake attempts reported in the window, by kind, accepted and failed
+  at an unknown time, though not before the newer notice's commit. A report cut
+  before that commit shows it pending with its wait open; one cut after it
+  leaves it out of pending and the waits and counts it on its own line. Wake attempts reported in the window, by kind, accepted and failed
   by class.
 - **Wake latency.** Per host and profile (for example `claude/desktop`), commit
   to wake accepted and commit to first activity. Each delivery belongs to the
@@ -721,4 +722,4 @@ sampler and the Cost section it feeds.
     notice, nothing pending and no open delivery wait; and a notice offered,
     re-offered after a rebind and then joined by a newer one stays pending,
     until a further rebind drops it unreceipted and it counts as superseded at
-    an unknown time.
+    an unknown time, yet a cut before the newer notice still shows it pending.

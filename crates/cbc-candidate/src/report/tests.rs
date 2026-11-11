@@ -642,8 +642,8 @@ fn a_notice_is_superseded_when_replaced_unless_offered_first() {
     );
     assert_eq!(
         superseded_at(&offered, Some(130), false),
-        Superseded::Undated,
-        "its batch was dropped unreceipted, at a time no record gives"
+        Superseded::Undated { after: 130 },
+        "its batch was dropped unreceipted, at a time no record gives, but not before the newer notice"
     );
     let receipted = Delivery {
         receipted: Some(at("a", 140)),
@@ -651,8 +651,9 @@ fn a_notice_is_superseded_when_replaced_unless_offered_first() {
     };
     assert_eq!(superseded_at(&receipted, Some(130), false), Superseded::Not);
 
-    // In the report: superseded from 130, so pending before it and neither pending nor waited on
-    // after it. An undated one is left out of pending and the waits, and counted on its own.
+    // In the report: both were replaced at 130, so both are pending before it. After it the dated
+    // one is superseded, and the undated one is left out of pending and the waits and counted on
+    // its own: it was dropped at some point after 130, and no record says when.
     let facts = Facts {
         deliveries: vec![
             Delivery {
@@ -660,7 +661,7 @@ fn a_notice_is_superseded_when_replaced_unless_offered_first() {
                 ..unread
             },
             Delivery {
-                superseded: Superseded::Undated,
+                superseded: Superseded::Undated { after: 130 },
                 ..offered
             },
         ],
@@ -682,10 +683,11 @@ fn a_notice_is_superseded_when_replaced_unless_offered_first() {
     let (early, open) = cut(125);
     assert!(early.contains("receipted=0 superseded=0 "), "{early}");
     assert!(
-        early.contains("never offered=1 offered, not receipted=0"),
+        early.contains("never offered=1 offered, not receipted=1"),
         "{early}"
     );
-    assert_eq!(open, 1);
+    assert!(!early.contains("unknown time"), "{early}");
+    assert_eq!(open, 2);
     let (late, open) = cut(200);
     assert!(late.contains("receipted=0 superseded=1 "), "{late}");
     assert!(

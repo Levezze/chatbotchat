@@ -253,6 +253,7 @@ async fn a_notice_held_in_a_batch_across_a_handoff_stays_pending() {
         case.store.check(&lead, 32).await.unwrap().is_some(),
         "re-offered"
     );
+    let offered = snap(&case).await;
     send(&lead, "k3").await;
     send(&lead, "k4").await;
     drain(&case.store, &case.worker).await;
@@ -281,6 +282,20 @@ async fn a_notice_held_in_a_batch_across_a_handoff_stays_pending() {
     );
     line(&text, "  superseded at an unknown time: 1 ");
     assert!(line(&text, "  project/lead — waiting on delivery: ").contains(" open=1 "));
+
+    // Cut before the newer notice, the dropped notice was still pending, beside the worker's two
+    // unread messages: the later snapshot must say what the earlier one said.
+    for end in [&held, &dropped] {
+        let text = run(&case, &manifest, end, Some(offered.taken_wall_ms), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            line(&text, "  pending at until: "),
+            "  pending at until: never offered=2 offered, not receipted=1",
+            "{text}"
+        );
+        assert!(!text.contains("unknown time"), "{text}");
+    }
 }
 
 #[tokio::test]

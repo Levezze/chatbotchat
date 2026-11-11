@@ -51,6 +51,11 @@ impl Window {
     fn superseded(&self, delivery: &Delivery) -> bool {
         matches!(delivery.superseded, Superseded::At(at) if at <= self.until_ms)
     }
+    /// Possibly replaced by `until`, at a time no record gives: neither pending nor waited on is
+    /// known. Before the newer notice it was still pending.
+    fn undated(&self, delivery: &Delivery) -> bool {
+        matches!(delivery.superseded, Superseded::Undated { after } if after <= self.until_ms)
+    }
     fn length(&self) -> i64 {
         self.until_ms - self.from_ms
     }
@@ -198,11 +203,7 @@ pub(crate) fn waits(facts: &Facts, window: Window) -> Vec<WaitInterval> {
         );
     }
     // A notice replaced at an unknown time has no known end: left out and counted.
-    for delivery in facts
-        .deliveries
-        .iter()
-        .filter(|d| d.superseded != Superseded::Undated)
-    {
+    for delivery in facts.deliveries.iter().filter(|d| !window.undated(d)) {
         let seat = seat_id(&delivery.context, &delivery.member);
         let id = format!("item {}", delivery.sequence);
         push(

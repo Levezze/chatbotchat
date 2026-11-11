@@ -40,8 +40,11 @@ pub(crate) enum Superseded {
     Not,
     /// Replaced at this wall time: from then it is neither pending nor waited on.
     At(i64),
-    /// Replaced by the end snapshot, at a time no record gives.
-    Undated,
+    /// Replaced by the end snapshot, at a time no record gives but not before `after`, the newer
+    /// notice's commit: until then it was provably still pending.
+    Undated {
+        after: i64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -106,7 +109,8 @@ pub(crate) struct ConnectionFact {
 /// offered stays in its batch until receipt; a rebind drops the batch, and then it is replaced, but
 /// no record dates the drop (a rebind may write no identity event) and a later batch may offer it
 /// again. So an offered notice still held at the end was never replaced, and one no longer held
-/// was replaced at an unknown time. A receipt means it was delivered, not replaced.
+/// was replaced at an unknown time after the newer notice. A receipt means it was delivered, not
+/// replaced.
 pub(super) fn superseded_at(
     delivery: &Delivery,
     newer_notice_wall_ms: Option<i64>,
@@ -116,7 +120,7 @@ pub(super) fn superseded_at(
         _ if delivery.receipted.is_some() || held_at_end => Superseded::Not,
         (None, _) => Superseded::Not,
         (Some(newer), None) => Superseded::At(newer),
-        (Some(_), Some(_)) => Superseded::Undated,
+        (Some(newer), Some(_)) => Superseded::Undated { after: newer },
     }
 }
 
