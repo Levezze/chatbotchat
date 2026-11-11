@@ -314,12 +314,12 @@ class DeviceRouter(claude.Router):
             except Exception as error:
                 self.event("recovery_failed", reason=type(error).__name__)
 
-    def event(self, kind, **fields):
+    def event(self, kind, level="info", **fields):
         # The one watch already emits this after durable changes. Waking HTTP
         # waiters requires no second watch, per-room timer, or model turn.
         if kind == "feed_changed" and hasattr(self, "native_ready"):
             self.wake_native()
-        super().event(kind, **fields)
+        super().event(kind, level, **fields)
 
     def wake_native(self):
         with self.native_ready:
@@ -431,6 +431,9 @@ class DeviceRouter(claude.Router):
         return self.bounded_call(binding, {"op": "binding_status"}, timeout)
 
     def bounded_call(self, binding, request, timeout):
+        return self.observed(binding, request, self.bounded_exchange(binding, request, timeout))
+
+    def bounded_exchange(self, binding, request, timeout):
         deadline = time.monotonic() + timeout
         with socket.socket(socket.AF_UNIX) as connection:
             connection.settimeout(timeout)
@@ -807,6 +810,8 @@ def main():
                         help="actual Claude session corroboration directory")
     parser.add_argument("--codex-executable", help="explicit installed Codex CLI path")
     parser.add_argument("--log-dir", help="candidate-only private diagnostics directory")
+    parser.add_argument("--run", type=claude.event_log.run_id,
+                        help="trial run id written on every log line")
     args = parser.parse_args()
     try:
         router = DeviceRouter(args)

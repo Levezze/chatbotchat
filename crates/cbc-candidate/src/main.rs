@@ -135,9 +135,6 @@ enum Command {
         /// Seconds between ticks.
         #[arg(long = "interval-s", default_value_t = 10)]
         interval_s: u64,
-        /// The logging mode the candidate runs in: normal or debug.
-        #[arg(long, default_value = "normal")]
-        mode: cbc_candidate::sampler::Mode,
         /// Stop after this many ticks instead of on a signal.
         #[arg(long)]
         ticks: Option<u64>,
@@ -292,7 +289,6 @@ async fn main() -> anyhow::Result<()> {
             root,
             protected_db,
             interval_s,
-            mode,
             ticks,
         } => {
             protected_dbs.push(protected_db);
@@ -303,7 +299,6 @@ async fn main() -> anyhow::Result<()> {
                 &sandbox,
                 cbc_candidate::sampler::SampleArgs {
                     interval: std::time::Duration::from_secs(interval_s),
-                    mode,
                     ticks,
                 },
                 |file| {

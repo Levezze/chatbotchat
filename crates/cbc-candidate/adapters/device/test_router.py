@@ -65,6 +65,44 @@ class DeviceTests(unittest.TestCase):
         router.wake_read.close()
         router.wake_write.close()
 
+    def test_the_recovery_status_read_sets_the_live_level_and_logs_no_token(self):
+        # B2: the core puts log_level on binding_status; the device router reads that status on
+        # its recovery cadence, so the level follows the core's settings without a restart.
+        replies = [{"type": "binding_status", "log_level": "debug"},
+                   {"type": "binding_status", "log_level": "normal"}]
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(self.profile["core_socket"])
+        server.listen(4)
+        self.addCleanup(server.close)
+
+        def answer():
+            for reply in replies:
+                connection, _ = server.accept()
+                with connection:
+                    while not connection.recv(65536).endswith(b"\n"):
+                        pass
+                    connection.sendall((json.dumps(reply) + "\n").encode())
+        threading.Thread(target=answer, daemon=True).start()
+        args = self.args()
+        args.log_dir, args.run = str(self.root / "logs"), "trial-2"
+        router = device.DeviceRouter(args)
+        self.addCleanup(self.cleanup_router, router)
+        grant = binding("claude", CLAUDE)
+        self.assertEqual(router.read_wake_status(grant, 2.0)["log_level"], "debug")
+        self.assertEqual(router.read_wake_status(grant, 2.0)["log_level"], "normal")
+        router.event("still_info", member="claude")
+        router.event("debug_only", level="debug", member="claude")
+        path = self.root / "logs" / "router-events.jsonl"
+        lines = [json.loads(line) for line in path.read_text().splitlines()]
+        calls = [line for line in lines if line["event"] == "core_call"]
+        self.assertEqual([(c["kind"], c["outcome"], c["member"]) for c in calls],
+                         [("binding_status", "binding_status", "claude")])  # only while debug
+        self.assertEqual([line["event"] for line in lines if line["event"] != "core_call"],
+                         ["still_info"])
+        self.assertTrue(all(line["run"] == "trial-2" and line["component"] == "driver"
+                            for line in lines), lines)
+        self.assertNotIn(grant["token"], path.read_text())
+
     def test_private_profile_maps_every_native_session_to_one_host(self):
         core, bindings, targets = device.load_targets(str(self.path))
         self.assertEqual(core, self.profile["core_socket"])

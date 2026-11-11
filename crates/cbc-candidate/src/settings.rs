@@ -451,6 +451,22 @@ fn settings_lock(root: &Path) -> Result<fs::File> {
     Ok(file)
 }
 
+/// The log level in the settings file as it stands, for an observer such as the sampler: no lock,
+/// no writes. None when the file is missing or invalid; the core then keeps its last accepted
+/// settings, and an observer should keep the level it last saw.
+pub fn observed_log_level(root: &Path) -> Option<crate::sampler::Mode> {
+    read_settings(&root.join(SETTINGS))
+        .ok()
+        .map(|s| s.log_level)
+}
+
+/// The level in the last accepted settings, for an observer that has seen none yet.
+pub fn accepted_log_level(root: &Path) -> Option<crate::sampler::Mode> {
+    read_settings(&root.join(LAST_GOOD))
+        .ok()
+        .map(|s| s.log_level)
+}
+
 fn read_settings(path: &Path) -> Result<RuntimeSettings> {
     validate_file(&fs::symlink_metadata(path)?)?;
     let mut file = fs::OpenOptions::new()

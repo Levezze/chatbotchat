@@ -49,6 +49,9 @@ pub const FIELDS: &[&str] = &[
     "seq",
     "attempt",
     "targets",
+    "pending",
+    "session",
+    "retry_ms",
 ];
 
 /// The live level the core's layer reads on every event.
