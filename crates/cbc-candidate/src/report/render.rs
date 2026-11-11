@@ -374,10 +374,11 @@ pub(super) fn render_rooms_identity(o: &mut String, facts: &Facts, window: Windo
         .filter(|(_, rooms)| rooms.len() > 1)
         .map(|((c, a, b), rooms)| format!("{c}/{a}+{b}: {} rooms", rooms.len()))
         .collect();
+    // Every chain head beyond a pair's first is one duplicate room.
+    let extra: usize = chains.values().map(|rooms| rooms.len() - 1).sum();
     let _ = writeln!(
         o,
-        "  duplicate peer rooms: {}{}",
-        duplicates.len(),
+        "  duplicate peer rooms: {extra}{}",
         if duplicates.is_empty() {
             String::new()
         } else {

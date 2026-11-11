@@ -700,3 +700,38 @@ fn a_notice_is_superseded_when_replaced_unless_offered_first() {
     );
     assert_eq!(open, 0);
 }
+
+#[test]
+fn duplicate_peer_rooms_count_every_extra_chain_head() {
+    let head = |context: &str, first: &str, second: &str, room: &str| ConnectionFact {
+        context: context.into(),
+        first: first.into(),
+        second: second.into(),
+        room: room.into(),
+        supersedes: None,
+        introduced_wall_ms: Some(101),
+    };
+    let facts = Facts {
+        connections: vec![
+            head("t", "feature", "lead", "r1"),
+            head("t", "lead", "feature", "r2"),
+            head("t", "feature", "lead", "r3"),
+            head("t", "other", "lead", "r4"),
+            head("t", "lead", "other", "r5"),
+        ],
+        ..Facts::default()
+    };
+    let mut o = String::new();
+    render_rooms_identity(
+        &mut o,
+        &facts,
+        Window {
+            from_ms: 100,
+            until_ms: 200,
+        },
+    );
+    assert!(
+        o.contains("  duplicate peer rooms: 3 [t/feature+lead: 3 rooms; t/lead+other: 2 rooms]\n"),
+        "{o}"
+    );
+}
