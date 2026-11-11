@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.27.0"
+version = "0.28.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/Levezze/chatbotchat"
@@ -41,3 +41,9 @@ rand = "0.8"
 
 # dev / test
 assert_cmd = "2"
+
+# The candidate core hashes its own executable as it starts (`evidence::build`), so a binary
+# replaced on disk later is not credited with its work. Unoptimized, sha2 is slow over a debug
+# binary of some 25 MB, and parallel test servers on CI then miss their 5 s readiness timeout.
+[profile.dev.package.sha2]
+opt-level = 3
