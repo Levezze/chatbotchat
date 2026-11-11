@@ -8,6 +8,11 @@ Two operational roles. A future dashboard Emperor sits outside their reporting c
 | /cbc-chapter-master | Feature Lead | One implementation end to end, including direct coding and native implementation subagents |
 | /cbc-emperor or /emperor | Project Lead | Future dashboard status conversation and user instructions to Primarchs; dormant before the dashboard |
 
+**Planned change (2026-11-11).** [ADR-0012](decisions/0012-chapter-masters-own-feature-intake.md) moves feature
+intake to the Chapter Master: it grills the user, writes the PRD or issue and keeps any task tracker
+current. The Primarch becomes a supervisor. This file describes the skills as they are today; the
+skills change after the #113 trial.
+
 Primarchs run in Codex. Chapter Masters and their native subagents run in Codex or Claude as
 the user assigns. Theme remains optional.
 Generic entrypoints are cbc-repo-lead, cbc-feature-lead and cbc-project-lead.
