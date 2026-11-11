@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.26.0](https://github.com/Levezze/chatbotchat/compare/v0.25.0...v0.26.0) (2026-11-11)
+
+
+### Features
+
+* **candidate:** answer the user's questions from the dashboard (D2) ([#148](https://github.com/Levezze/chatbotchat/issues/148)) ([8425037](https://github.com/Levezze/chatbotchat/commit/8425037a4ed4594336828053583f5916a2aed87c))
+
 ## [0.25.0](https://github.com/Levezze/chatbotchat/compare/v0.24.0...v0.25.0) (2026-11-11)
 
 
