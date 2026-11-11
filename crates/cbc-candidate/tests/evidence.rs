@@ -246,15 +246,18 @@ async fn the_manifest_command_writes_a_new_file_beside_its_snapshot_only() {
     assert_eq!(parsed["snapshot"]["sha256"], digest);
 
     // The root given on the command line may be an alias of the sandbox root (on macOS,
-    // /tmp is /private/tmp): the same directory, so the same rule applies.
-    let alias = core.temp.path().join("c/snapshots/trial-3.json");
+    // /tmp is /private/tmp): the same directory, so the same rule applies. A symlink made here
+    // gives every platform an alias.
+    let link = core.temp.path().join("alias");
+    std::os::unix::fs::symlink(core.sandbox.root(), &link).unwrap();
+    let alias = link.join("snapshots/trial-3.json");
     assert_ne!(alias.parent().unwrap(), snapshots.as_path());
     record_manifest(&core.sandbox, &core.owner(), &alias, args())
         .await
         .unwrap();
     assert!(snapshots.join("trial-3.json").is_file());
     // An alias still has to name the snapshot directory itself.
-    let beside = core.temp.path().join("c/trial-4.json");
+    let beside = link.join("trial-4.json");
     assert!(
         record_manifest(&core.sandbox, &core.owner(), &beside, args())
             .await
