@@ -122,11 +122,12 @@ async fn a_feature_lead_drives_its_item_and_a_parked_lead_is_woken() {
             .is_err(),
         "nothing to wake for yet"
     );
-    let item = worker
+    let registered = worker
         .register_work_item("feat-login", "Login flow", "reg-1")
         .await
         .unwrap();
-    assert_eq!(item.revision, 1);
+    assert_eq!(registered.item.revision, 1);
+    assert!(!registered.replayed);
     tokio::time::timeout(Duration::from_secs(3), parked)
         .await
         .expect("registration wakes the parked lead")

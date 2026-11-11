@@ -585,6 +585,10 @@ impl Store {
             sqlx::query("INSERT INTO candidate_connections(context_id,first_member,second_member,kind,scope_ref,room_id,introduction_sequence,generation,supersedes_room,active,held_slot) VALUES (?,?,?,?,?,?,?,?,?,1,1)")
                 .bind(&binding.context_id).bind(first).bind(second).bind(kind.as_str()).bind(scope_ref).bind(&room).bind(sequence)
                 .bind(generation).bind(supersedes).execute(&mut *tx).await?;
+            if kind == ConnectionKind::Report {
+                self.snapshot_work_items(&mut tx, &binding.context_id, &room, first, second)
+                    .await?;
+            }
             room
         };
         sqlx::query("INSERT INTO candidate_connection_requests(context_id,member_id,request_key,fingerprint,room_id) VALUES (?,?,?,?,?)")

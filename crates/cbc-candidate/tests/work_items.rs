@@ -1,109 +1,17 @@
 //! Work items (T-07, T-09): one owner, atomic multi-field revisions, the HITL flag, and one
 //! outbox event per revision delivered through the inbox. Real SQLite only.
+#[path = "support/work_fixture.rs"]
+mod work_fixture;
 use cbc_candidate::{
-    bindings::{Role, SessionBinding},
+    bindings::Role,
     enrollment::ConnectionKind,
     facts::ItemClass,
     store::Store,
     work::{Actor, Stage, WorkOutcome, WorkPatch},
     Sandbox,
 };
-use serde_json::Value;
-use tempfile::{tempdir, TempDir};
-
-struct Case {
-    _temp: TempDir,
-    _sandbox: Sandbox,
-    store: Store,
-    worker: SessionBinding,
-    lead: SessionBinding,
-    other: SessionBinding,
-    report_room: String,
-}
-
-async fn fixture() -> Case {
-    let temp = tempdir().unwrap();
-    let sandbox = Sandbox::initialize(
-        &temp.path().join("candidate"),
-        8989,
-        &[temp.path().join("daily/state.db")],
-    )
-    .unwrap();
-    let store = Store::open(&sandbox).await.unwrap();
-    store.create_context("project").await.unwrap();
-    for (member, role) in [
-        ("worker", Role::FeatureLead),
-        ("lead", Role::RepoLead),
-        ("other", Role::FeatureLead),
-    ] {
-        store
-            .register_member("project", member, role)
-            .await
-            .unwrap();
-    }
-    let bind = |m: &'static str| {
-        let store = &store;
-        async move {
-            store
-                .bind_member("project", m, "device", &format!("{m}-session"))
-                .await
-                .unwrap()
-        }
-    };
-    let worker = bind("worker").await;
-    let lead = bind("lead").await;
-    let other = bind("other").await;
-    store
-        .authorize_connection(
-            "project",
-            "worker",
-            "lead",
-            ConnectionKind::Report,
-            "feature",
-        )
-        .await
-        .unwrap();
-    let report_room = store
-        .connect_members(&worker, "lead", ConnectionKind::Report, "feature", "r1", "")
-        .await
-        .unwrap()
-        .room;
-    let case = Case {
-        _temp: temp,
-        _sandbox: sandbox,
-        store,
-        worker,
-        lead,
-        other,
-        report_room,
-    };
-    // Start every test from an empty inbox: the introduction is not a work event.
-    drain(&case.store, &case.worker).await;
-    drain(&case.store, &case.lead).await;
-    case
-}
-
-/// Every work event a member receives, as (room, parsed body). Receipts everything it reads.
-async fn drain(store: &Store, who: &SessionBinding) -> Vec<(String, Value)> {
-    let mut events = Vec::new();
-    while let Some(batch) = store.check(who, 32).await.unwrap() {
-        for item in &batch.items {
-            if item.kind == "work_event" {
-                assert_eq!(item.sender, "cbc", "a work event is server information");
-                events.push((item.room.clone(), serde_json::from_str(&item.body).unwrap()));
-            }
-        }
-        store
-            .receipt(who, batch.reference_for_adapter())
-            .await
-            .unwrap();
-    }
-    events
-}
-
-fn patch() -> WorkPatch {
-    WorkPatch::default()
-}
+use tempfile::tempdir;
+use work_fixture::{drain, fixture, patch};
 
 #[tokio::test]
 async fn registering_a_work_item_records_revision_one_and_wakes_the_lead() {
@@ -112,7 +20,8 @@ async fn registering_a_work_item_records_revision_one_and_wakes_the_lead() {
         .store
         .register_work_item(&case.worker, "feat-login", "Login flow", "reg-1")
         .await
-        .unwrap();
+        .unwrap()
+        .item;
     assert_eq!(item.owner, "worker");
     assert_eq!(item.revision, 1);
     assert_eq!(item.stage, Stage::Planning);
@@ -339,8 +248,9 @@ async fn a_replayed_key_returns_the_first_result_and_a_reused_key_is_refused() {
         .register_work_item(&case.worker, "feat-login", "Login flow", "reg-1")
         .await
         .unwrap();
+    assert!(again.replayed);
     assert_eq!(
-        again.revision, 2,
+        again.item.revision, 2,
         "a replayed registration returns the one item as it is now, never a second item"
     );
     let duplicate = case
@@ -504,7 +414,8 @@ async fn a_revision_commits_without_a_report_room_and_is_marked_undelivered() {
         .store
         .register_work_item(&case.other, "feat-other", "No lead yet", "reg-1")
         .await
-        .unwrap();
+        .unwrap()
+        .item;
     assert_eq!(item.revision, 1);
     let revisions = case
         .store
@@ -518,7 +429,8 @@ async fn a_revision_commits_without_a_report_room_and_is_marked_undelivered() {
         .store
         .register_work_item(&case.worker, "feat-login", "Login flow", "reg-1")
         .await
-        .unwrap();
+        .unwrap()
+        .item;
     assert_eq!(delivered.revision, 1);
     let revisions = case
         .store
