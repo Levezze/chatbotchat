@@ -108,6 +108,9 @@ struct Usage {
     rss_kb: Vec<i64>,
     max_processes: usize,
     cpu_ms: u64,
+    /// Steps between consecutive ticks where one of its processes was measured. With none, its
+    /// CPU is unknown, not zero.
+    cpu_steps: usize,
 }
 
 #[derive(Default)]
@@ -144,8 +147,9 @@ fn usage(ticks: &[&Tick]) -> BTreeMap<Mode, ModeUsage> {
                     continue;
                 };
                 if old.label == process.label && process.cpu_ms >= old.cpu_ms {
-                    mode.labels.entry(process.label.clone()).or_default().cpu_ms +=
-                        process.cpu_ms - old.cpu_ms;
+                    let usage = mode.labels.entry(process.label.clone()).or_default();
+                    usage.cpu_ms += process.cpu_ms - old.cpu_ms;
+                    usage.cpu_steps += 1;
                 }
             }
         }
@@ -213,7 +217,9 @@ pub(super) fn render_cost(o: &mut String, samples: &[Samples], facts: &Facts, wi
                 );
                 continue;
             };
-            let cpu = if usage.span_ms > 0 {
+            let cpu = if found.cpu_steps == 0 {
+                missing("never seen in two consecutive ticks")
+            } else if usage.span_ms > 0 {
                 format!(
                     "{} of one core ({} ms CPU)",
                     per_mille(found.cpu_ms, usage.span_ms),
@@ -418,6 +424,47 @@ Cost (sampler ticks in the window)
         assert!(text.contains(
             "  debug: missing (no debug-mode ticks in the window; debug logging lands in B2)"
         ));
+    }
+
+    #[test]
+    fn cpu_is_missing_for_a_label_never_seen_in_two_consecutive_ticks() {
+        let samples = file(&[
+            tick(0, Mode::Normal, vec![process(CORE, 1, 100, 0)], 0),
+            tick(
+                1000,
+                Mode::Normal,
+                vec![
+                    process(CORE, 1, 100, 10),
+                    process("cbc-candidate snapshot", 9, 5, 400),
+                ],
+                0,
+            ),
+            tick(2000, Mode::Normal, vec![process(CORE, 1, 100, 10)], 0),
+        ]);
+        let samples = Samples::parse("s.jsonl", &samples).unwrap();
+        let mut text = String::new();
+        render_cost(
+            &mut text,
+            std::slice::from_ref(&samples),
+            &Facts::default(),
+            Window {
+                from_ms: 0,
+                until_ms: 2000,
+            },
+        );
+        // Seen in one tick only: its CPU was never measured, which is not idle.
+        assert!(
+            text.contains(
+                "  normal — cbc-candidate snapshot: processes max=1 rss_kb n=1 median=5 p90=5 \
+                 max=5 cpu=missing (never seen in two consecutive ticks)\n"
+            ),
+            "{text}"
+        );
+        // Measured and idle across a step is a real zero.
+        assert!(
+            text.contains("  normal — cbc-candidate serve: processes max=1 expected=1 rss_kb n=3 median=100 p90=100 max=100 cpu=0.5% of one core (10 ms CPU)\n"),
+            "{text}"
+        );
     }
 
     #[test]

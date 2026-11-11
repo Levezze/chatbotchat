@@ -33,8 +33,10 @@ async fn a_tick_lists_candidate_processes_by_label_and_the_disk_under_the_root()
     .unwrap();
     let store = Store::open(&sandbox).await.unwrap();
     // A stand-in core: an executable named cbc-candidate, with a subcommand unique to this run.
-    let bin = temp.path().join("bin");
-    fs::create_dir(&bin).unwrap();
+    // Both stand-ins live under a directory with a space, as a checkout under "Application
+    // Support" would: the rendered `ps` line cannot say where such a path ends.
+    let bin = temp.path().join("with space/bin");
+    fs::create_dir_all(&bin).unwrap();
     symlink("/bin/sleep", bin.join("cbc-candidate")).unwrap();
     let unique = (7000 + std::process::id() % 1000).to_string();
     let core = Killed(
@@ -45,7 +47,7 @@ async fn a_tick_lists_candidate_processes_by_label_and_the_disk_under_the_root()
             .unwrap(),
     );
     // A stand-in device router: Python running a script under cbc-candidate/adapters.
-    let adapters = temp.path().join("cbc-candidate/adapters/device");
+    let adapters = temp.path().join("with space/cbc-candidate/adapters/device");
     fs::create_dir_all(&adapters).unwrap();
     fs::write(adapters.join("router.py"), "import time\ntime.sleep(600)\n").unwrap();
     let router = Killed(

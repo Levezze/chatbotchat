@@ -739,9 +739,12 @@ at once would count every process twice.
   the candidate processes and the disk. Unknown fields are refused on read.
   - Processes come from `ps -ww -U <uid of the root's owner> -o
     pid=,rss=,time=,args=`. Each keeps a label, PID, RSS in KiB and cumulative
-    CPU in milliseconds. The command line is used to classify and then
-    dropped: no argument, path or unmatched line is stored or printed, and a
-    malformed `ps` line is reported by number only.
+    CPU in milliseconds. A line that does not mention `cbc-candidate` is
+    skipped unread. For one that does, the exact argument vector is read from
+    the kernel (`KERN_PROCARGS2` on macOS, `/proc/<pid>/cmdline` on Linux),
+    because a rendered `ps` line cannot say where a path with a space ends. It
+    is used to classify and then dropped: no argument, path or unmatched line
+    is stored or printed, and a malformed `ps` line is reported by number only.
   - A process counts only when it runs the code: the `cbc-candidate`
     executable itself, labelled by subcommand (`cbc-candidate serve`), or a
     Python interpreter whose script is `cbc-candidate/adapters/<dir>/<file>.py`
@@ -763,7 +766,9 @@ at once would count every process twice.
   per-tick sum, and CPU as a share of one core.
   - CPU is each process's growth in cumulative CPU time between consecutive
     ticks of one mode, over the wall time those ticks span. A PID whose time
-    goes down, or whose label changed, was reused and adds nothing.
+    goes down, or whose label changed, was reused and adds nothing. A label
+    with no such step, seen in one tick only, prints its CPU as missing, not
+    zero.
   - Expected counts come from the end snapshot's active seats: one core, one
     device router, and one shim per seat of each host (the Claude adapter per
     chat, the Codex adapter per session). An expected label with no match

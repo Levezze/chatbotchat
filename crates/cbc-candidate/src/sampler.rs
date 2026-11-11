@@ -3,8 +3,10 @@
 //!
 //! It reads `ps` for the current user only and keeps a line only when its command is the
 //! candidate: the `cbc-candidate` binary, or a Python adapter under `cbc-candidate/adapters/`.
-//! Every other line is dropped unread, and no command line is ever stored or printed, because
-//! `ps` also lists the daily CBC and other agents' sessions. A process is stored as a label,
+//! A line that does not mention `cbc-candidate` is dropped unread. For one that does, the exact
+//! argument vector is read from the kernel, because a rendered `ps` line cannot say where a path
+//! with a space ends. No command line is ever stored or printed, because `ps` also lists the
+//! daily CBC and other agents' sessions. A process is stored as a label,
 //! its PID (needed to take CPU deltas across ticks; the report never prints it), resident
 //! memory and cumulative CPU time.
 use crate::Sandbox;
@@ -102,24 +104,104 @@ fn adapter_label(path: &str) -> Option<String> {
     (plain(dir) && plain(stem)).then(|| format!("adapters/{dir}/{file}"))
 }
 
-/// The label of a candidate process from its command line, or None for anything else.
+/// The label of a candidate process from its argument vector, or None for anything else.
 ///
 /// Only the process that runs the code counts: the `cbc-candidate` executable itself, or a
 /// Python interpreter whose script is a candidate adapter. A wrapper that merely names the
 /// candidate in its arguments (a shell, `rtk proxy`, an editor) is not the candidate.
-pub fn classify(command: &str) -> Option<String> {
-    let mut words = command.split_whitespace();
-    let executable = words.next()?;
+pub fn classify(argv: &[String]) -> Option<String> {
+    let (executable, args) = argv.split_first()?;
+    let mut args = args.iter().map(String::as_str);
     if executable.rsplit('/').next() == Some("cbc-candidate") {
-        return Some(match words.next().filter(|w| !w.starts_with('-')) {
+        return Some(match args.next().filter(|w| !w.starts_with('-')) {
             Some(subcommand) => format!("cbc-candidate {subcommand}"),
             None => "cbc-candidate".into(),
         });
     }
     if is_python(executable) {
-        let script = words.find(|w| !w.starts_with('-'))?;
+        let script = args.find(|w| !w.starts_with('-'))?;
         return adapter_label(script);
     }
+    None
+}
+
+/// The argument vector in a macOS `KERN_PROCARGS2` buffer: the argument count, the executable
+/// path, NUL padding, then the arguments, each NUL-terminated. The environment that follows is
+/// never read.
+pub fn parse_procargs2(buffer: &[u8]) -> Option<Vec<String>> {
+    let argc = usize::try_from(i32::from_ne_bytes(buffer.get(..4)?.try_into().ok()?)).ok()?;
+    let rest = &buffer[4..];
+    let mut start = rest.iter().position(|&b| b == 0)?;
+    while rest.get(start) == Some(&0) {
+        start += 1;
+    }
+    let mut argv = Vec::with_capacity(argc);
+    let mut pieces = rest[start..].split(|&b| b == 0);
+    for _ in 0..argc {
+        argv.push(String::from_utf8_lossy(pieces.next()?).into_owned());
+    }
+    Some(argv)
+}
+
+/// The exact argument vector of a process, or None when it has gone.
+#[cfg(target_os = "macos")]
+fn argv_of(pid: u32) -> Option<Vec<String>> {
+    let mut argmax: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    let mut mib = [libc::CTL_KERN, libc::KERN_ARGMAX];
+    // SAFETY: the out-pointer and its size describe `argmax`.
+    let status = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            2,
+            (&mut argmax as *mut libc::c_int).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if status != 0 || argmax <= 0 {
+        return None;
+    }
+    let mut buffer = vec![0u8; usize::try_from(argmax).ok()?];
+    let mut size = buffer.len();
+    let mut mib = [
+        libc::CTL_KERN,
+        libc::KERN_PROCARGS2,
+        libc::c_int::try_from(pid).ok()?,
+    ];
+    // SAFETY: the out-pointer and its size describe `buffer`.
+    let status = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    parse_procargs2(&buffer[..size])
+}
+
+/// The exact argument vector of a process, or None when it has gone.
+#[cfg(target_os = "linux")]
+fn argv_of(pid: u32) -> Option<Vec<String>> {
+    let bytes = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let bytes = bytes.strip_suffix(&[0]).unwrap_or(&bytes);
+    Some(
+        bytes
+            .split(|&b| b == 0)
+            .map(|piece| String::from_utf8_lossy(piece).into_owned())
+            .collect(),
+    )
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn argv_of(_pid: u32) -> Option<Vec<String>> {
     None
 }
 
@@ -165,22 +247,27 @@ fn next_field<'a>(rest: &mut &'a str) -> Option<&'a str> {
 }
 
 /// The candidate processes in `ps -o pid=,rss=,time=,args=` output, leaving out `own_pid` (the
-/// sampler). A line that is not the candidate is skipped before any field is read, and an
-/// error names only the line number and field, never the line, so no other process's
-/// arguments reach the sampler's output.
-pub fn parse_ps(output: &str, own_pid: u32) -> Result<Vec<Process>> {
+/// sampler). A line that does not mention the candidate is skipped before any field is read.
+/// For one that does, `argv_of` gives the exact argument vector to classify, or None for a
+/// process that has gone. An error names only the line number and field, never the line, so
+/// no other process's arguments reach the sampler's output.
+pub fn parse_ps(
+    output: &str,
+    own_pid: u32,
+    argv_of: impl Fn(u32) -> Option<Vec<String>>,
+) -> Result<Vec<Process>> {
     let mut processes = Vec::new();
     for (index, line) in output.lines().enumerate() {
         let number = index + 1;
+        if !line.contains("cbc-candidate") {
+            continue;
+        }
         let mut rest = line.trim_start();
         let (Some(pid), Some(rss), Some(time)) = (
             next_field(&mut rest),
             next_field(&mut rest),
             next_field(&mut rest),
         ) else {
-            continue;
-        };
-        let Some(label) = classify(rest) else {
             continue;
         };
         let pid: u32 = pid
@@ -190,6 +277,9 @@ pub fn parse_ps(output: &str, own_pid: u32) -> Result<Vec<Process>> {
         if pid == own_pid {
             continue;
         }
+        let Some(label) = argv_of(pid).as_deref().and_then(classify) else {
+            continue;
+        };
         processes.push(Process {
             label,
             pid,
@@ -214,7 +304,11 @@ fn read_processes(root: &Path) -> Result<Vec<Process>> {
         .output()
         .context("could not run ps")?;
     ensure!(output.status.success(), "ps failed");
-    parse_ps(&String::from_utf8_lossy(&output.stdout), std::process::id())
+    parse_ps(
+        &String::from_utf8_lossy(&output.stdout),
+        std::process::id(),
+        argv_of,
+    )
 }
 
 /// Allocated bytes under the candidate root, without following links. A file that vanishes
@@ -402,8 +496,61 @@ mod tests {
             ("", None),
         ];
         for (command, label) in cases {
-            assert_eq!(classify(command).as_deref(), label, "{command:?}");
+            assert_eq!(classify(&words(command)).as_deref(), label, "{command:?}");
         }
+        // Paths with a space, as the kernel gives them: one argument each.
+        let argv = |parts: &[&str]| parts.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            classify(&argv(&["/tmp/with space/cbc-candidate", "serve"])).as_deref(),
+            Some("cbc-candidate serve")
+        );
+        assert_eq!(
+            classify(&argv(&[
+                "python3",
+                "-I",
+                "/tmp/with space/crates/cbc-candidate/adapters/device/router.py",
+            ]))
+            .as_deref(),
+            Some("adapters/device/router.py")
+        );
+        assert_eq!(classify(&[]), None);
+    }
+
+    fn words(command: &str) -> Vec<String> {
+        command.split_whitespace().map(String::from).collect()
+    }
+
+    /// The argument vector a test `ps` line stands for, keyed by its PID.
+    fn argv_from(output: &'static str) -> impl Fn(u32) -> Option<Vec<String>> {
+        move |pid| {
+            output.lines().find_map(|line| {
+                let mut fields = line.split_whitespace();
+                (fields.next()? == pid.to_string())
+                    .then(|| fields.skip(2).map(String::from).collect())
+            })
+        }
+    }
+
+    #[test]
+    fn procargs2_gives_the_arguments_and_never_the_environment() {
+        let mut buffer = 3i32.to_ne_bytes().to_vec();
+        buffer.extend(b"/tmp/with space/cbc-candidate\0\0\0\0");
+        buffer.extend(b"/tmp/with space/cbc-candidate\0serve\0--root\0");
+        buffer.extend(b"SECRET=value\0\0");
+        assert_eq!(
+            parse_procargs2(&buffer).unwrap(),
+            ["/tmp/with space/cbc-candidate", "serve", "--root"]
+        );
+        assert_eq!(parse_procargs2(&buffer[..2]), None);
+        let mut short = 5i32.to_ne_bytes().to_vec();
+        short.extend(b"/x\0a\0");
+        assert_eq!(parse_procargs2(&short), None);
+    }
+
+    #[test]
+    fn a_gone_process_is_skipped() {
+        let output = "  101  4304   2:28.70 /repo/target/release/cbc-candidate serve\n";
+        assert!(parse_ps(output, 1, |_| None).unwrap().is_empty());
     }
 
     #[test]
@@ -414,7 +561,7 @@ mod tests {
   103  2048   0:01.00 python3 -I /repo/crates/cbc-candidate/adapters/codex/adapter.py\n\
   104  1024   0:00.10 /repo/target/release/cbc-candidate sample --root /r\n\
 not even a ps line\n";
-        let processes = parse_ps(output, 104).unwrap();
+        let processes = parse_ps(output, 104, argv_from(output)).unwrap();
         assert_eq!(
             processes,
             vec![
@@ -437,10 +584,13 @@ not even a ps line\n";
     #[test]
     fn a_bad_candidate_line_is_refused_without_echoing_any_line() {
         let output = "  7 lots 0:00.10 /repo/cbc-candidate serve --token-like-value\n";
-        let error = parse_ps(output, 1).unwrap_err().to_string();
+        let error = parse_ps(output, 1, argv_from(output))
+            .unwrap_err()
+            .to_string();
         assert_eq!(error, "ps line 1: bad rss");
         // A malformed line that is not the candidate is never read, so it cannot fail a tick.
-        assert!(parse_ps("  x y z /usr/bin/other --secret\n", 1)
+        let other = "  x y z /usr/bin/other --secret\n";
+        assert!(parse_ps(other, 1, |_| panic!("never read"))
             .unwrap()
             .is_empty());
     }
