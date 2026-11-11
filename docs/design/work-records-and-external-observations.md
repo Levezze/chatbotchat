@@ -608,6 +608,10 @@ Migration `0013_answer_surface` adds one column; the schema version is 13.
   page. Any other refusal is a 409 that says why: already answered,
   withdrawn, a member's question, or empty or overlong text. Success is a 303
   back to the context's panel, where the question is gone.
+- **Line breaks.** A browser submits a textarea's line breaks as CRLF. The
+  route turns each CRLF into LF before the shared text check, so a multiline
+  answer is stored as on any other route. A lone CR is still refused. Found in
+  Codex's review of D2.
 - **Resubmitting is a retry.** Each render puts a fresh 128-bit key in each
   form. Posting the same form twice returns the first answer through the
   owner route's existing retry path. A new render has a new key, so a second
@@ -621,7 +625,7 @@ Migration `0013_answer_surface` adds one column; the schema version is 13.
 - **Not in D2.** The plan listed "shared notices" for D2, but nothing in the
   design defines them, so D2 does not invent a scope for them.
 
-Tests are in `tests/dashboard.rs` (seven new, over a real socket) and a
+Tests are in `tests/dashboard.rs` (eight new, over a real socket) and a
 migration unit test in `src/store.rs`.
 
 Mutation checks: each of the following fails at least one test.
@@ -636,6 +640,15 @@ Mutation checks: each of the following fails at least one test.
 - Redirecting somewhere other than the context's panel.
 - Keeping `no-referrer`.
 - Dropping the surface CHECK, or letting any channel carry a surface.
+- Passing the form's CRLF line breaks through unchanged.
+
+Left as they are, after review:
+- The 404/409 split reads the store's error messages. The store returns
+  untyped errors on every route and the connector has no status classes to
+  map them to, so a typed error would be a change across the crate, not a D2
+  fix. The tests pin each mapping.
+- The asker's `answered` event does not name the surface. The asker needs
+  "the user answered"; the surface is on the answer record.
 
 ## Registration, controls and eligible merge
 

@@ -392,6 +392,9 @@ async fn answer(
     ) else {
         return not_found();
     };
+    // A browser submits every textarea line break as CRLF; answers store LF, as on every other
+    // route. A lone CR is left for the shared check to refuse.
+    let body = body.replace("\r\n", "\n");
     match d
         .store
         .dashboard_answer_request(&context, &request, &body, &key)

@@ -897,6 +897,45 @@ async fn the_user_answers_from_the_page() {
     stop(case).await;
 }
 
+/// A browser submits a textarea's line breaks as CRLF. A multiline answer is stored with LF line
+/// breaks, as any other answer is; a lone carriage return is still refused.
+#[tokio::test]
+async fn a_multiline_answer_from_the_browser_is_recorded() {
+    let case = running(true).await;
+    let cookie = case.login().await;
+    let request = case
+        .worker()
+        .open_request(&RequestOwner::User, None, "Ship it?", "k-1")
+        .await
+        .unwrap()
+        .request;
+    let key = form_key(&case.get("/", Some(&cookie)).await.body, &request).unwrap();
+    let lone = case
+        .post_answer(
+            Some(&cookie),
+            Some(&case.origin()),
+            &answer_form(&request, &key, "yes\rbut"),
+        )
+        .await;
+    assert_eq!(lone.status, 409, "{}", lone.body);
+    let posted = case
+        .post_answer(
+            Some(&cookie),
+            Some(&case.origin()),
+            &answer_form(&request, &key, "Yes.\r\nShip it\r\n\r\ntoday."),
+        )
+        .await;
+    assert_eq!(posted.status, 303, "{}", posted.body);
+    let answers = case
+        .owner()
+        .request_answers("project", &request, 0, 10)
+        .await
+        .unwrap();
+    assert_eq!(answers.len(), 1);
+    assert_eq!(answers[0].body, "Yes.\nShip it\n\ntoday.");
+    stop(case).await;
+}
+
 /// A post needs the session and this page's exact origin; anything else records nothing.
 #[tokio::test]
 async fn an_answer_needs_the_session_and_this_origin() {
