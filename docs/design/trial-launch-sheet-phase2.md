@@ -122,6 +122,13 @@ Confirm the settings show the recovery interval, the log level and no fallback (
 dashboard yourself with `<BINARY> dashboard --root <CORE> --protected-db ~/.chatbotchat/state.db`.
 Only the user runs that command.
 
+Start the cost sampler in terminal 4 and leave it running. It prints the file it writes; record that
+path as ACTUAL_SAMPLES_FILE.
+
+```sh
+<BINARY> sample --root <CORE> --protected-db ~/.chatbotchat/state.db
+```
+
 ## 7. Stage B: the role messages (the go)
 
 Send each seat its message. From here, count every CBC-related approval prompt per seat (T-27), for
@@ -174,10 +181,11 @@ the report's tally file.
 
 ## 8. End of run
 
-1. `<BINARY> snapshot --root <CORE> --protected-db ~/.chatbotchat/state.db`
-2. Write the prompt tally as `<CORE>/tally.json`, shaped `{"<CONTEXT>":{"cm-a":{"cbc":0},...}}`.
-3. `<BINARY> report --root <CORE> --protected-db ~/.chatbotchat/state.db --manifest <CORE>/snapshots/manifest-run1.json --snapshot ACTUAL_END_SNAPSHOT --tally <CORE>/tally.json`
-4. Retire each member. Retiring ends the binding, closes the member's rooms and withdraws its requests.
+1. Stop the sampler with Ctrl-C in terminal 4. It flushes every tick, so nothing is lost.
+2. `<BINARY> snapshot --root <CORE> --protected-db ~/.chatbotchat/state.db`
+3. Write the prompt tally as `<CORE>/tally.json`, shaped `{"<CONTEXT>":{"cm-a":{"cbc":0},...}}`.
+4. `<BINARY> report --root <CORE> --protected-db ~/.chatbotchat/state.db --manifest <CORE>/snapshots/manifest-run1.json --snapshot ACTUAL_END_SNAPSHOT --tally <CORE>/tally.json --samples ACTUAL_SAMPLES_FILE`
+5. Retire each member. Retiring ends the binding, closes the member's rooms and withdraws its requests.
 
    ```sh
    <BINARY> retire --root <CORE> --protected-db ~/.chatbotchat/state.db --context <CONTEXT> --member primarch --reason "run ended"
@@ -185,9 +193,9 @@ the report's tally file.
    <BINARY> retire --root <CORE> --protected-db ~/.chatbotchat/state.db --context <CONTEXT> --member cm-b --reason "run ended"
    ```
 
-5. Stop the driver (terminal 2), then the core (terminal 1). Stop nothing else; the hosts' own MCP processes belong to the apps.
-6. Desktop seats: `claude plugin uninstall <PLUGIN>@<MARKET_NAME> --scope local` and `claude plugin marketplace remove <MARKET_NAME>` in each Claude worktree.
-7. Remove each seat's wiring. A file changed since `prepare` is kept and listed.
+6. Stop the driver (terminal 2), then the core (terminal 1). Stop nothing else; the hosts' own MCP processes belong to the apps.
+7. Desktop seats: `claude plugin uninstall <PLUGIN>@<MARKET_NAME> --scope local` and `claude plugin marketplace remove <MARKET_NAME>` in each Claude worktree.
+8. Remove each seat's wiring. A file changed since `prepare` is kept and listed.
 
    ```sh
    <SETUP> teardown --case <CASE> --seat primarch
@@ -195,4 +203,4 @@ the report's tally file.
    <SETUP> teardown --case <CASE> --seat cm-b
    ```
 
-8. Keep `<CASE>` as the private evidence (T-22). Only the report goes to GitHub.
+9. Keep `<CASE>` as the private evidence (T-22). Only the report goes to GitHub.

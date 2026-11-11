@@ -37,6 +37,12 @@ ROOT = Path(__file__).resolve().parents[1]
 SERVER = trial.SERVER
 PLUGIN = "cbc-candidate-wake"
 ADAPTERS = "crates/cbc-candidate/adapters"
+# The pinned layout keeps `cbc-candidate/adapters/<dir>/<file>.py`: the sampler only counts an adapter
+# process whose script path carries that segment (sampler::adapter_label).
+PIN_ADAPTERS = "pin/cbc-candidate/adapters"
+PIN_BINARY = "pin/bin/cbc-candidate"
+# Paths that must stay ignored: one probe inside each excluded directory.
+IGNORE_PROBES = (".claude/skills/wip-probe/SKILL.md", ".agents/skills/wip-probe/SKILL.md", ".cbc/hierarchy/probe")
 TEMPLATE = ROOT / "docs/design/trial-launch-sheet-phase{phase}.md"
 # The longest Unix socket path macOS can bind is 103 bytes.
 SOCKET_LIMIT = 104
@@ -111,10 +117,11 @@ def check_sockets(case):
 
 def stage_pin(source, binary, stage):
     ignore = shutil.ignore_patterns("__pycache__", "*.pyc", "node_modules")
-    shutil.copytree(source / ADAPTERS, stage / "pin/adapters", ignore=ignore)
-    shutil.copy2(binary, stage / "pin/cbc-candidate")
-    (stage / "pin/cbc-candidate").chmod(0o755)
-    shutil.copytree(stage / "pin/adapters/claude/mod", stage / f"market/plugins/{PLUGIN}", ignore=ignore)
+    shutil.copytree(source / ADAPTERS, stage / PIN_ADAPTERS, ignore=ignore)
+    (stage / PIN_BINARY).parent.mkdir(parents=True)
+    shutil.copy2(binary, stage / PIN_BINARY)
+    (stage / PIN_BINARY).chmod(0o755)
+    shutil.copytree(stage / PIN_ADAPTERS / "claude/mod", stage / f"market/plugins/{PLUGIN}", ignore=ignore)
     catalog = stage / "market/.claude-plugin/marketplace.json"
     catalog.parent.mkdir(parents=True)
     return catalog
@@ -171,7 +178,7 @@ def legacy_skill_names(claude_skills_dir):
 
 def claude_files(case, python, claude_skills_dir):
     socket = str(core(case) / "device.sock")
-    server = {"command": python, "args": ["-B", "-I", str(Path(case) / "pin/adapters/claude/adapter.py")],
+    server = {"command": python, "args": ["-B", "-I", str(Path(case) / PIN_ADAPTERS / "claude/adapter.py")],
               "env": {"CBC_CANDIDATE_CONNECTOR": socket, "CBC_CANDIDATE_CHANNEL": "0"}}
     settings = {
         "enabledMcpjsonServers": [SERVER],
@@ -187,7 +194,7 @@ def claude_files(case, python, claude_skills_dir):
 
 
 def codex_files(case, python):
-    adapter = str(Path(case) / "pin/adapters/codex/adapter.py")
+    adapter = str(Path(case) / PIN_ADAPTERS / "codex/adapter.py")
     lines = [
         "# Written by tools/trial_setup.py for one CBC trial seat. Its teardown removes this file.",
         f"[mcp_servers.{SERVER}]",
@@ -215,6 +222,12 @@ def exclude_block(case):
 
 def exclude_path(project):
     return Path(git(project, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude").strip())
+
+
+def ignored(project, relatives):
+    """The relative paths git would ignore in this project, whether or not they exist."""
+    out = git(project, "check-ignore", "--", *relatives, check=False)
+    return set(out.splitlines())
 
 
 def refuse_symlinks(project, relatives):
@@ -276,6 +289,12 @@ def prepare(case, project, seat, host, python, claude_skills_dir=Path.home() / "
     if block not in current:
         exclude.parent.mkdir(parents=True, exist_ok=True)
         exclude.write_text(current + ("" if current.endswith("\n") or not current else "\n") + block)
+    exposed = sorted(set([*files, *IGNORE_PROBES]) - ignored(project, [*files, *IGNORE_PROBES]))
+    if exposed:
+        if block not in current:
+            exclude.write_text(current)
+        raise ValueError(f"not ignored despite the exclude block (a .gitignore negation overrides it); "
+                         f"nothing written: {', '.join(exposed)}")
     for relative, text in files.items():
         path = project / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -412,7 +431,7 @@ def render_sheet(case, phase, template=None):
         raise ValueError(f"prepare these seats first: {', '.join(missing)}")
     values = {
         "CASE": case, "CORE": core(case), "COMMIT": record["commit"], "CONTEXT": f"trial-{case.name}",
-        "BINARY": case / "pin/cbc-candidate", "ROUTER": case / "pin/adapters/device/router.py",
+        "BINARY": case / PIN_BINARY, "ROUTER": case / PIN_ADAPTERS / "device/router.py",
         "MARKET": case / "market", "MARKET_NAME": market_name(case), "PLUGIN": PLUGIN,
         "PLUGIN_DIR": case / "market/plugins" / PLUGIN, "SERVER": SERVER,
         "PYTHON": next(iter(seats.values()))["python"], "SETUP": f"{next(iter(seats.values()))['python']} -B {Path(__file__).resolve()}",

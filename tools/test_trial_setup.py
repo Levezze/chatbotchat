@@ -98,10 +98,10 @@ class PinTest(unittest.TestCase):
             record = setup.pin(source, binary, base / "c1")
             pinned = base / "c1/pin"
             self.assertEqual(record["commit"], git(source, "rev-parse", "HEAD").strip())
-            self.assertEqual((pinned / "adapters/codex/adapter.py").read_text(), "# codex adapter\n")
-            self.assertFalse((pinned / "adapters/shared/__pycache__").exists())
-            self.assertEqual(record["files"]["cbc-candidate"], digest(binary))
-            self.assertEqual(record["files"]["adapters/claude/adapter.py"], digest(pinned / "adapters/claude/adapter.py"))
+            self.assertEqual((pinned / "cbc-candidate/adapters/codex/adapter.py").read_text(), "# codex adapter\n")
+            self.assertFalse((pinned / "cbc-candidate/adapters/shared/__pycache__").exists())
+            self.assertEqual(record["files"]["bin/cbc-candidate"], digest(binary))
+            self.assertEqual(record["files"]["cbc-candidate/adapters/claude/adapter.py"], digest(pinned / "cbc-candidate/adapters/claude/adapter.py"))
             self.assertEqual(json.loads((pinned / "pin.json").read_text()), record)
 
     def test_pin_stages_a_private_marketplace_for_the_wake_mod(self):
@@ -156,7 +156,7 @@ class PrepareTest(unittest.TestCase):
             self.assertEqual(set(server), {"cbc-trial"})
             self.assertEqual(server["cbc-trial"]["command"], "/usr/bin/python3")
             self.assertEqual(server["cbc-trial"]["args"],
-                             ["-B", "-I", str(case.dir / "pin/adapters/claude/adapter.py")])
+                             ["-B", "-I", str(case.dir / "pin/cbc-candidate/adapters/claude/adapter.py")])
             self.assertEqual(server["cbc-trial"]["env"], {
                 "CBC_CANDIDATE_CONNECTOR": str(case.dir / "core/device.sock"), "CBC_CANDIDATE_CHANNEL": "0"})
             wake = json.loads((project / ".cbc-candidate-wake.json").read_text())
@@ -189,7 +189,7 @@ class PrepareTest(unittest.TestCase):
             self.assertEqual(config["mcp_servers"]["chatbotchat"], {"enabled": False})
             server = config["mcp_servers"]["cbc-trial"]
             self.assertEqual(server["command"], "/usr/bin/python3")
-            self.assertEqual(server["args"], ["-B", "-I", str(case.dir / "pin/adapters/codex/adapter.py")])
+            self.assertEqual(server["args"], ["-B", "-I", str(case.dir / "pin/cbc-candidate/adapters/codex/adapter.py")])
             self.assertEqual(server["default_tools_approval_mode"], "approve")
             self.assertEqual(server["env"], {"CBC_CANDIDATE_PROFILE": str(case.dir / "core/device-profile.json"),
                                              "CBC_CANDIDATE_CONNECTOR": str(case.dir / "core/device.sock")})
@@ -312,7 +312,7 @@ class PrepareTest(unittest.TestCase):
             base = Path(temp)
             case = Case(base)
             project = fake_project(base)
-            (case.dir / "pin/adapters/codex/adapter.py").write_text("# swapped\n")
+            (case.dir / "pin/cbc-candidate/adapters/codex/adapter.py").write_text("# swapped\n")
             with self.assertRaisesRegex(ValueError, "pin"):
                 case.prepare(project, "primarch", "codex")
 
@@ -451,6 +451,49 @@ class PathSafetyTest(unittest.TestCase):
             self.assertEqual(git(linked, "status", "--porcelain"), "")
             self.assertEqual(git(project, "status", "--porcelain"), "")
 
+    def test_pinned_adapter_paths_keep_the_sampler_contract(self):
+        # sampler::adapter_label only counts a script under `cbc-candidate/adapters/<dir>/<stem>.py`.
+        contract = re.compile(r"cbc-candidate/adapters/[a-z0-9_]+/[a-z0-9_]+\.py$")
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            case = Case(base)
+            claude, codex = fake_project(base, "peer-a"), fake_project(base, "peer-b")
+            case.prepare(claude, "peer-a", "claude")
+            case.prepare(codex, "peer-b", "codex")
+            scripts = [json.loads((claude / ".mcp.json").read_text())["mcpServers"]["cbc-trial"]["args"][-1],
+                       tomllib.loads((codex / ".codex/config.toml").read_text())["mcp_servers"]["cbc-trial"]["args"][-1]]
+            text = setup.render_sheet(case.dir, 1).read_text()
+            scripts.append(re.search(r"-B -I (\S+router\.py)", text).group(1))
+            for script in scripts:
+                self.assertRegex(script, contract)
+                self.assertTrue(Path(script).is_file(), script)
+            self.assertRegex(text, r"\S+/cbc-candidate init ")
+
+    def test_a_gitignore_negation_that_exposes_a_trial_path_is_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            case = Case(base)
+            project = fake_project(base)
+            (project / ".gitignore").write_text("!/.cbc/hierarchy/\n")
+            git(project, "add", ".gitignore")
+            git(project, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "negate")
+            with self.assertRaisesRegex(ValueError, "not ignored"):
+                case.prepare(project, "cm-a", "claude")
+            self.assertFalse((project / ".mcp.json").exists())
+            exclude = Path(git(project, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude").strip())
+            self.assertNotIn("cbc-trial", exclude.read_text())
+
+    def test_sheets_start_the_sampler_and_feed_it_to_the_report(self):
+        for phase, seats in LaunchSheetTest.SEATS.items():
+            with tempfile.TemporaryDirectory() as temp:
+                base = Path(temp)
+                case = Case(base)
+                for seat, host in seats.items():
+                    case.prepare(fake_project(base, seat), seat, host)
+                text = setup.render_sheet(case.dir, phase).read_text()
+                self.assertRegex(text, r"cbc-candidate sample --root \S+ --protected-db")
+                self.assertRegex(text, r"cbc-candidate report [^\n]*--samples ")
+
     def test_rendered_setup_commands_run_through_python(self):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
@@ -524,8 +567,8 @@ class LaunchSheetTest(unittest.TestCase):
                     self.assertRegex(text, rf"Stage A[^\n]*{re.escape(seat)}")
                     self.assertRegex(text, rf"Stage B[^\n]*{re.escape(seat)}")
                 self.assertIn("mcp__chatbotchat__", text)
-                self.assertIn(str(case.dir / "pin/cbc-candidate"), text)
-                self.assertIn(str(case.dir / "pin/adapters/device/router.py"), text)
+                self.assertIn(str(case.dir / "pin/bin/cbc-candidate"), text)
+                self.assertIn(str(case.dir / "pin/cbc-candidate/adapters/device/router.py"), text)
 
     def test_each_sheet_stands_alone_and_names_its_run_literally(self):
         for phase, seats in self.SEATS.items():
