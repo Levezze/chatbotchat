@@ -170,15 +170,18 @@ class DeviceRouter(claude.Router):
         return handler
 
     def codex_reporter(self, binding):
-        return lambda through, outcome, failure, recovery: self.report_wake(
-            binding, through, "codex_queue", outcome, failure, recovery)
+        return lambda through, outcome, failure, recovery, attempted_us: self.report_wake(
+            binding, through, "codex_queue", outcome, failure, recovery, attempted_us)
 
-    def report_wake(self, binding, through, kind, outcome, failure=None, recovery=False):
-        """Enqueue one wake attempt for the core. Never blocks and never raises."""
+    def report_wake(self, binding, through, kind, outcome, failure, recovery, attempted_us):
+        """Enqueue one wake attempt for the core. Never blocks and never raises.
+
+        attempted_us is the wall clock in microseconds taken before the host was notified, so
+        the core can tell which items were still unread at the attempt."""
         if type(through) is not int or through < 1:
             return
         request = {"op": "wake", "through": through, "kind": kind, "outcome": outcome,
-                   "recovery": bool(recovery), "driver_wall_ms": int(time.time() * 1000)}
+                   "recovery": bool(recovery), "attempt_wall_us": attempted_us}
         if failure is not None:
             request["failure"] = failure
         try:
@@ -212,7 +215,7 @@ class DeviceRouter(claude.Router):
             time.sleep(0.005)
         return True
 
-    def rang(self, session, batch, written, recovery):
+    def rang(self, session, batch, written, recovery, attempted_us):
         binding = self.bindings.get(session)
         sequences = [item.get("sequence") for item in batch.get("items") or []
                      if isinstance(item, dict)]
@@ -220,7 +223,7 @@ class DeviceRouter(claude.Router):
         if binding and sequences:
             self.report_wake(binding, max(sequences), "claude_channel",
                              "accepted" if written else "failed",
-                             None if written else "channel_write_failed", recovery)
+                             None if written else "channel_write_failed", recovery, attempted_us)
 
     def recover_native(self, session):
         """The next wait answers pending once even if the cursor has not moved."""
@@ -495,7 +498,9 @@ class DeviceRouter(claude.Router):
                     self.native_recover.discard(session)
                     through = max(fresh_first, self.latest_hint.get(session, 0), hinted)
                 self.event("native_mod_pending", member=binding["member"])
-                self.report_wake(binding, through, "claude_mod", "accepted", None, recovery)
+                # Reported before the 200 is written, so this is before the mod hears of it.
+                self.report_wake(binding, through, "claude_mod", "accepted", None, recovery,
+                                 time.time_ns() // 1000)
                 return native.response(200, {"v": 1, "type": "pending", "cursor": token})
             with self.native_ready:
                 if generation != self.native_generation:

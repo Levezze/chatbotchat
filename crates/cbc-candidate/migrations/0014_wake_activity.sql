@@ -15,7 +15,7 @@ CREATE TABLE candidate_wake_attempts (
     reported_instance TEXT NOT NULL REFERENCES candidate_core_instances(instance_id),
     reported_mono_us INTEGER NOT NULL CHECK(typeof(reported_mono_us) = 'integer' AND reported_mono_us >= 0),
     reported_wall_ms INTEGER NOT NULL CHECK(typeof(reported_wall_ms) = 'integer'),
-    driver_wall_ms INTEGER NOT NULL CHECK(typeof(driver_wall_ms) = 'integer'),
+    attempt_wall_us INTEGER NOT NULL CHECK(typeof(attempt_wall_us) = 'integer'),
     FOREIGN KEY(context_id, member_id) REFERENCES candidate_members(context_id, member_id)
 );
 CREATE INDEX candidate_wake_attempts_member ON candidate_wake_attempts(context_id, member_id, attempt_id);
@@ -32,6 +32,10 @@ ALTER TABLE candidate_recipient_facts ADD COLUMN active_instance TEXT REFERENCES
 ALTER TABLE candidate_recipient_facts ADD COLUMN active_mono_us INTEGER;
 ALTER TABLE candidate_recipient_facts ADD COLUMN active_wall_ms INTEGER;
 ALTER TABLE candidate_recipient_facts ADD COLUMN active_operation TEXT;
+
+-- The receipt's wall clock in microseconds, so a wake attempt in the same millisecond can be
+-- ordered against it. NULL for receipts stamped before this migration.
+ALTER TABLE candidate_recipient_facts ADD COLUMN receipted_wall_us INTEGER;
 
 -- Only rows still waiting for activity: receipted, no activity yet. Stays small.
 CREATE INDEX candidate_recipient_facts_awaiting_activity ON candidate_recipient_facts(member_id)

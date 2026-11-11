@@ -66,15 +66,15 @@ fn wake(through: i64, outcome: WakeOutcome, failure: Option<&str>, recovery: boo
         outcome,
         failure: failure.map(str::to_owned),
         recovery,
-        driver_wall_ms: now_ms(),
+        attempt_wall_us: now_us(),
     }
 }
 
-fn now_ms() -> i64 {
+fn now_us() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_millis() as i64
+        .as_micros() as i64
 }
 
 fn accepted(through: i64) -> WakeReport {
@@ -211,6 +211,31 @@ async fn a_report_that_arrives_after_the_receipt_still_covers_its_items() {
     let bob = bob_in(&c.store, one).await;
     assert!(bob.woken.is_some());
     assert!(bob.receipted.is_some());
+    c.store.close().await;
+}
+
+/// A receipt and a later attempt can share a clock tick. The receipt came first, so the attempt
+/// did not cover the item. Built from the stored receipt stamp, not from the clock, so it cannot
+/// race.
+#[tokio::test]
+async fn an_attempt_in_the_same_tick_as_an_earlier_receipt_covers_nothing() {
+    let c = pair().await;
+    let one = c
+        .store
+        .send(&c.alice, "peer-room", "k1", "one")
+        .await
+        .unwrap();
+    read_all(&c.store, &c.bob).await;
+    let receipted = bob_in(&c.store, one).await.receipted.expect("receipted");
+    // The last microsecond of the receipt's millisecond is at or after the receipt itself.
+    let mut tie = accepted(one);
+    tie.attempt_wall_us = receipted.wall_ms * 1000 + 999;
+    assert_eq!(c.store.record_wake(&c.bob, &tie).await.unwrap(), 0);
+    assert!(bob_in(&c.store, one).await.dispatched.is_none());
+    let mut before = accepted(one);
+    before.attempt_wall_us = receipted.wall_ms * 1000 - 1;
+    assert_eq!(c.store.record_wake(&c.bob, &before).await.unwrap(), 1);
+    assert!(bob_in(&c.store, one).await.woken.is_some());
     c.store.close().await;
 }
 

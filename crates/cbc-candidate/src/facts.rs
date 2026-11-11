@@ -152,9 +152,10 @@ pub struct WakeReport {
     pub failure: Option<String>,
     /// Sent by the recovery path rather than by a new item.
     pub recovery: bool,
-    /// The driver's own wall clock when it saw the outcome. Kept beside the core's stamp; never
-    /// compared to it as if the two clocks agreed.
-    pub driver_wall_ms: i64,
+    /// The driver's wall clock in microseconds, taken just before it notified the host. The
+    /// driver and the core run on one host and read one realtime clock, so the core compares it
+    /// with its receipt stamps to tell which items were still unread at the attempt.
+    pub attempt_wall_us: i64,
 }
 
 /// A failure class or an operation name: 1 to 64 of `[a-z0-9_]`.
@@ -216,7 +217,7 @@ pub struct DeliveryEvent {
 
 /// How far before the core's receipt of a wake report its attempt may lie. The driver's queue
 /// holds at most 256 reports sent with a 2 second timeout each.
-const MAX_REPORT_DELAY_MS: i64 = 600_000;
+const MAX_REPORT_DELAY_US: i64 = 600_000_000;
 
 /// When a member request started, on this core instance's clock. Opaque outside the crate.
 #[derive(Debug, Clone, Copy)]
@@ -250,9 +251,22 @@ impl CoreClock {
     }
 
     fn now(&self) -> (i64, i64) {
-        let mono = i64::try_from(self.origin.elapsed().as_micros()).unwrap_or(i64::MAX);
-        (mono, wall_ms())
+        let (mono, wall_us) = self.now_us();
+        (mono, wall_us.div_euclid(1000))
     }
+
+    /// One reading, with the wall clock in microseconds.
+    fn now_us(&self) -> (i64, i64) {
+        let mono = i64::try_from(self.origin.elapsed().as_micros()).unwrap_or(i64::MAX);
+        (mono, wall_us())
+    }
+}
+
+pub(crate) fn wall_us() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }
 
 pub(crate) fn wall_ms() -> i64 {
@@ -318,9 +332,10 @@ pub(crate) async fn record_receipt(
     member: &str,
     reference: &str,
 ) -> Result<()> {
-    let (mono, wall) = clock.now();
-    sqlx::query("INSERT INTO candidate_recipient_facts(sequence,member_id,expected,receipted_instance,receipted_mono_us,receipted_wall_ms) SELECT sequence,?,0,?,?,? FROM candidate_batch_items WHERE reference=? ON CONFLICT(sequence,member_id) DO UPDATE SET receipted_instance=COALESCE(receipted_instance,excluded.receipted_instance), receipted_mono_us=COALESCE(receipted_mono_us,excluded.receipted_mono_us), receipted_wall_ms=COALESCE(receipted_wall_ms,excluded.receipted_wall_ms)")
-        .bind(member).bind(&clock.instance).bind(mono).bind(wall).bind(reference)
+    let (mono, wall_us) = clock.now_us();
+    let wall = wall_us.div_euclid(1000);
+    sqlx::query("INSERT INTO candidate_recipient_facts(sequence,member_id,expected,receipted_instance,receipted_mono_us,receipted_wall_ms,receipted_wall_us) SELECT sequence,?,0,?,?,?,? FROM candidate_batch_items WHERE reference=? ON CONFLICT(sequence,member_id) DO UPDATE SET receipted_instance=COALESCE(receipted_instance,excluded.receipted_instance), receipted_mono_us=COALESCE(receipted_mono_us,excluded.receipted_mono_us), receipted_wall_ms=COALESCE(receipted_wall_ms,excluded.receipted_wall_ms), receipted_wall_us=CASE WHEN receipted_instance IS NULL THEN excluded.receipted_wall_us ELSE receipted_wall_us END")
+        .bind(member).bind(&clock.instance).bind(mono).bind(wall).bind(wall_us).bind(reference)
         .execute(conn).await?;
     Ok(())
 }
@@ -364,20 +379,25 @@ impl Store {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         validate_on(&mut tx, binding).await?;
         let (mono, wall) = self.clock.now();
-        sqlx::query("INSERT INTO candidate_wake_attempts(context_id,member_id,through_sequence,kind,outcome,failure,recovery,reported_instance,reported_mono_us,reported_wall_ms,driver_wall_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+        sqlx::query("INSERT INTO candidate_wake_attempts(context_id,member_id,through_sequence,kind,outcome,failure,recovery,reported_instance,reported_mono_us,reported_wall_ms,attempt_wall_us) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
             .bind(&binding.context_id).bind(&binding.member_id).bind(report.through)
             .bind(report.kind.as_str())
             .bind(match report.outcome { WakeOutcome::Accepted => "accepted", WakeOutcome::Failed => "failed" })
             .bind(report.failure.as_deref()).bind(report.recovery)
-            .bind(&self.clock.instance).bind(mono).bind(wall).bind(report.driver_wall_ms)
+            .bind(&self.clock.instance).bind(mono).bind(wall).bind(report.attempt_wall_us)
             .execute(&mut *tx).await?;
         let woken = report.outcome == WakeOutcome::Accepted;
         // Reports reach the core through the driver's queue, so the member may have receipted
         // items since the attempt. Cover what was unread when the driver made it: items still
-        // unread, and items receipted at or after the driver's attempt time. That time is clamped
-        // to MAX_REPORT_DELAY_MS ago, so a wrong driver clock cannot reach far into the past.
-        let attempted = report.driver_wall_ms.max(wall - MAX_REPORT_DELAY_MS);
-        let covered = sqlx::query("INSERT INTO candidate_recipient_facts(sequence,member_id,expected,dispatched_instance,dispatched_mono_us,dispatched_wall_ms,woken_instance,woken_mono_us,woken_wall_ms) SELECT sequence,?,0,?,?,?,?,?,? FROM (SELECT sequence FROM candidate_unread_items WHERE context_id=? AND recipient=? AND sequence<=? UNION SELECT f.sequence FROM candidate_recipient_facts f JOIN candidate_items i ON i.sequence=f.sequence WHERE i.context_id=? AND f.member_id=? AND f.sequence<=? AND f.receipted_wall_ms>=?) WHERE true ON CONFLICT(sequence,member_id) DO UPDATE SET dispatched_instance=COALESCE(dispatched_instance,excluded.dispatched_instance), dispatched_mono_us=COALESCE(dispatched_mono_us,excluded.dispatched_mono_us), dispatched_wall_ms=COALESCE(dispatched_wall_ms,excluded.dispatched_wall_ms), woken_instance=COALESCE(woken_instance,excluded.woken_instance), woken_mono_us=COALESCE(woken_mono_us,excluded.woken_mono_us), woken_wall_ms=COALESCE(woken_wall_ms,excluded.woken_wall_ms)")
+        // unread, and items receipted strictly after the attempt. The driver takes the attempt
+        // time before it notifies the host, and a receipt the notification causes needs the host
+        // to react and call the core first, which takes far longer than a microsecond. So a
+        // receipt in the same microsecond as the attempt, or earlier, came before it. Receipts
+        // stamped before migration 0014 have milliseconds only. The attempt time is clamped to
+        // MAX_REPORT_DELAY_US ago, so a wrong or stepped clock cannot reach far into the past;
+        // a backward clock step can still drop a wake fact, never a delivery.
+        let attempted = report.attempt_wall_us.max(wall_us() - MAX_REPORT_DELAY_US);
+        let covered = sqlx::query("INSERT INTO candidate_recipient_facts(sequence,member_id,expected,dispatched_instance,dispatched_mono_us,dispatched_wall_ms,woken_instance,woken_mono_us,woken_wall_ms) SELECT sequence,?,0,?,?,?,?,?,? FROM (SELECT sequence FROM candidate_unread_items WHERE context_id=? AND recipient=? AND sequence<=? UNION SELECT f.sequence FROM candidate_recipient_facts f JOIN candidate_items i ON i.sequence=f.sequence WHERE i.context_id=? AND f.member_id=? AND f.sequence<=? AND COALESCE(f.receipted_wall_us,f.receipted_wall_ms*1000)>?) WHERE true ON CONFLICT(sequence,member_id) DO UPDATE SET dispatched_instance=COALESCE(dispatched_instance,excluded.dispatched_instance), dispatched_mono_us=COALESCE(dispatched_mono_us,excluded.dispatched_mono_us), dispatched_wall_ms=COALESCE(dispatched_wall_ms,excluded.dispatched_wall_ms), woken_instance=COALESCE(woken_instance,excluded.woken_instance), woken_mono_us=COALESCE(woken_mono_us,excluded.woken_mono_us), woken_wall_ms=COALESCE(woken_wall_ms,excluded.woken_wall_ms)")
             .bind(&binding.member_id).bind(&self.clock.instance).bind(mono).bind(wall)
             .bind(woken.then_some(self.clock.instance.as_str())).bind(woken.then_some(mono)).bind(woken.then_some(wall))
             .bind(&binding.context_id).bind(&binding.member_id).bind(report.through)

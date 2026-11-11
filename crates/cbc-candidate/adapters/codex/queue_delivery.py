@@ -9,6 +9,7 @@ otherwise. A latched hint runs no command and reports nothing.
 from pathlib import Path
 import subprocess
 import threading
+import time
 import uuid
 
 
@@ -31,7 +32,8 @@ class QueueDelivery:
         self.timeout = timeout
         self.runner = runner
         self.status_provider = status_provider
-        # reporter(through, outcome, failure, recovery). Must not block: it only enqueues.
+        # reporter(through, outcome, failure, recovery, attempted_us). Must not block: it only
+        # enqueues. attempted_us is the wall clock just before the queue command ran.
         self.reporter = reporter or (lambda *_args: None)
         self.accepted = None
         self.lock = threading.Lock()
@@ -81,18 +83,19 @@ class QueueDelivery:
         # No shell, new session, model selection, resume, daemon start or permission flags.
         # Nothing from a CBC body or profile credential enters the command arguments.
         command = [self.executable, "queue", "--thread", self.session, "--message", message]
+        attempted_us = time.time_ns() // 1000
         try:
             result = self.runner(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                  stderr=subprocess.DEVNULL, timeout=self.timeout, check=False)
         except (OSError, subprocess.SubprocessError) as error:
             self.event("codex_queue_unavailable", reason=type(error).__name__)
-            self.reporter(hint["sequence"], "failed", "queue_unavailable", recovery)
+            self.reporter(hint["sequence"], "failed", "queue_unavailable", recovery, attempted_us)
             return False
         if result.returncode != 0:
             self.event("codex_queue_unavailable", reason="exit", code=result.returncode)
-            self.reporter(hint["sequence"], "failed", "queue_exit", recovery)
+            self.reporter(hint["sequence"], "failed", "queue_exit", recovery, attempted_us)
             return False
         self.event("codex_queued", sequence=hint["sequence"])
-        self.reporter(hint["sequence"], "accepted", None, recovery)
+        self.reporter(hint["sequence"], "accepted", None, recovery, attempted_us)
         self.accepted = progress if progress is not None else (None, hint["sequence"])
         return True

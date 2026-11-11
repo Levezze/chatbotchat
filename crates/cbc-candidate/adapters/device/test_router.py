@@ -295,7 +295,7 @@ class DeviceTests(unittest.TestCase):
                 return True
             def recover(self, hint):
                 recoveries.append(hint)
-                self.reporter(hint["sequence"], "accepted", None, True)
+                self.reporter(hint["sequence"], "accepted", None, True, 1)
                 return True
         with patch.object(device.codex, "QueueDelivery", FakeQueue):
             router = device.DeviceRouter(self.args())
@@ -904,9 +904,9 @@ class NativeHttpTests(DeviceTests):
         reports = []
         for member, request in self.reports:
             self.assertEqual(request["op"], "wake")
-            self.assertIs(type(request["driver_wall_ms"]), int)
+            self.assertIs(type(request["attempt_wall_us"]), int)
             reports.append((member, {k: v for k, v in request.items()
-                                     if k not in ("op", "driver_wall_ms")}))
+                                     if k not in ("op", "attempt_wall_us")}))
         self.reports.clear()
         return reports
 
@@ -916,6 +916,37 @@ class NativeHttpTests(DeviceTests):
         self.addCleanup(channel.close)
         self.router.channels[CLAUDE] = (channel, threading.Lock())
         return client, channel
+
+    # Codex review 2: the attempt time is taken before the host is notified, so a receipt the
+    # notification causes is always later than it. The fakes stamp the write and then stall.
+    def test_a_channel_wake_reports_the_time_before_the_bell_was_written(self):
+        written = []
+        def ring(_session, _path=None):
+            written.append(time.time_ns() // 1000)
+            time.sleep(0.02)
+            return True
+        self.connect_channel()
+        self.router.ring = ring
+        self.router.core_call = lambda *_args: {"type": "batch", "reference": "r1", "items": [
+            {"sequence": 5, "room": "r", "sender": "a", "kind": "message", "body": "x"}]}
+        self.assertTrue(self.router.notify(CLAUDE)["_notified"])
+        self.assertTrue(self.router.flush_wake_reports(2))
+        (_member, request), = self.reports
+        self.assertLessEqual(request["attempt_wall_us"], written[0])
+
+    def test_a_codex_wake_reports_the_time_before_the_queue_command_ran(self):
+        ran = []
+        def runner(*_args, **_kwargs):
+            ran.append(time.time_ns() // 1000)
+            time.sleep(0.02)
+            return SimpleNamespace(returncode=0)
+        binding = next(b for b in self.profile["bindings"] if b["member"] == "codex")
+        callback = device.codex.QueueDelivery("/usr/local/bin/codex", SESSION, runner=runner,
+            reporter=self.router.codex_reporter(binding))
+        self.assertTrue(callback(HINT))
+        self.assertTrue(self.router.flush_wake_reports(2))
+        (_member, request), = self.reports
+        self.assertLessEqual(request["attempt_wall_us"], ran[0])
 
     def test_a_channel_write_reports_one_wake_through_the_batch(self):
         client, channel = self.connect_channel()
@@ -1106,14 +1137,20 @@ class CodexQueueTests(unittest.TestCase):
         calls, reports = [], []
         state = {"type": "binding_status", "last_receipted_sequence": 0, "first_unread_sequence": 1}
         outcome = {"value": 0}
+        ran = []
         def runner(*args, **_kwargs):
             calls.append(args)
+            ran.append(time.time_ns() // 1000)
             if isinstance(outcome["value"], Exception):
                 raise outcome["value"]
             return SimpleNamespace(returncode=outcome["value"])
+        def reporter(*args):
+            # The fifth argument is the attempt time, taken just before this run.
+            self.assertIs(type(args[4]), int)
+            self.assertLessEqual(args[4], ran[-1])
+            reports.append(args[:4])
         callback = device.codex.QueueDelivery("/usr/local/bin/codex", SESSION, runner=runner,
-            status_provider=lambda: dict(state),
-            reporter=lambda *args: reports.append(args))
+            status_provider=lambda: dict(state), reporter=reporter)
         self.assertTrue(callback(HINT))
         self.assertTrue(callback(HINT | {"sequence": 8}))
         self.assertEqual(len(calls), 1)

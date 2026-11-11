@@ -349,7 +349,7 @@ enum Operation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         failure: Option<String>,
         recovery: bool,
-        driver_wall_ms: i64,
+        attempt_wall_us: i64,
     },
 }
 
@@ -767,7 +767,7 @@ async fn dispatch(
             outcome,
             failure,
             recovery,
-            driver_wall_ms,
+            attempt_wall_us,
         } => Reply::Woken {
             covered: store
                 .record_wake(
@@ -778,7 +778,7 @@ async fn dispatch(
                         outcome,
                         failure,
                         recovery,
-                        driver_wall_ms,
+                        attempt_wall_us,
                     },
                 )
                 .await?,
@@ -923,7 +923,7 @@ impl<'a> LocalClient<'a> {
                 outcome: report.outcome,
                 failure: report.failure,
                 recovery: report.recovery,
-                driver_wall_ms: report.driver_wall_ms,
+                attempt_wall_us: report.attempt_wall_us,
             })
             .await?
         {

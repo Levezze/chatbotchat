@@ -327,22 +327,32 @@ never estimated.
 ### B1 as built
 
 Migration `0014_wake_activity` (schema version 14) adds the
-`candidate_wake_attempts` table and ten nullable columns to each recipient
+`candidate_wake_attempts` table and eleven nullable columns to each recipient
 fact: `dispatched_*`, `woken_*` and `active_*` (each the core instance,
-monotonic and wall stamps) plus `active_operation`.
+monotonic and wall stamps), `active_operation` and `receipted_wall_us`.
 
 **Wake reports.** The connector operation is `wake`, sent with the member's own
 binding: `through`, `kind` (`claude_channel`, `codex_queue` or `claude_mod`),
 `outcome` (`accepted` or `failed`), `failure` (a class label, present exactly
-when the outcome is failed), `recovery` and `driver_wall_ms`. The reply is
+when the outcome is failed), `recovery` and `attempt_wall_us`. The reply is
 `woken` with `covered`, the number of the member's items with a sequence at or
 below `through` that were unread when the driver made the attempt. That is the
-items still unread plus the items receipted at or after `driver_wall_ms`:
+items still unread plus the items receipted strictly after `attempt_wall_us`:
 reports wait in the driver's queue, so the member can receipt an item before
-the report of the wake that announced it arrives. `driver_wall_ms` is clamped to
-ten minutes before the core's clock, the most the queue can hold back, so a
-wrong driver clock cannot reach older receipts. The driver and core share the
-host clock today. One transaction stores the attempt and, for each covered item,
+the report of the wake that announced it arrives.
+
+`attempt_wall_us` is the driver's wall clock in microseconds, taken just before
+it notifies the host: before the channel write, before the Codex queue command
+runs, and before the native 200 is written. Receipts carry a microsecond stamp
+too (`receipted_wall_us`, added by migration 0014; older receipts have
+milliseconds only). The comparison is strict because of causality: a receipt
+the notification causes needs the host to react and call the core, which takes
+far longer than a microsecond, so a receipt in the same microsecond as the
+attempt, or earlier, came before it. The driver and the core run on one host
+and read one realtime clock. `attempt_wall_us` is clamped to ten minutes before
+the core's clock, the most the queue can hold back, so a wrong or stepped clock
+cannot reach older receipts. A backward clock step can drop a wake fact; it
+never affects delivery. One transaction stores the attempt and, for each covered item,
 sets `dispatched_*` on any attempt and `woken_*` only on an accepted one. Both
 are stamped when the core learns of the attempt, so commit to wake includes the
 report's queue time; it is normally empty. The first stamp wins; later attempts change nothing. A sender is
@@ -442,7 +452,14 @@ Mutants, each run against the full crate suite (17):
   hint, so the report undercounted. The last fix reads the feed's undelivered
   hint, outside the native lock, because the feed emits `feed_changed` while
   holding its own lock.
-- Not tested: the clamp on `driver_wall_ms`, which needs a receipt more than
+- Codex's second review found two boundary errors in that fix, both fixed with
+  a test that failed first. The driver took the attempt time after the bell or
+  queue command returned, so a host that receipted before the return lost its
+  wake; it now takes it before notifying. And a receipt in the same millisecond
+  as a later attempt was covered; stamps are now in microseconds and the
+  comparison is strict. The new core test builds the tie from the stored
+  receipt stamp rather than the clock, so it cannot race.
+- Not tested: the clamp on `attempt_wall_us`, which needs a receipt more than
   ten minutes old.
 - Not tested: the fail-soft path of `recovery_due` in `binding_status`. It needs
   a store fault the tests cannot inject without a mock.
