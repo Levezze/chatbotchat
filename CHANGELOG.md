@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.33.0](https://github.com/Levezze/chatbotchat/compare/v0.32.0...v0.33.0) (2026-11-11)
+
+
+### Features
+
+* **trial:** setup tool, transport notice and launch sheets (piece 7) ([#164](https://github.com/Levezze/chatbotchat/issues/164)) ([848272e](https://github.com/Levezze/chatbotchat/commit/848272e7bd22522caecbfa7155d38edbc5f95f19))
+
 ## [0.32.0](https://github.com/Levezze/chatbotchat/compare/v0.31.0...v0.32.0) (2026-11-11)
 
 
