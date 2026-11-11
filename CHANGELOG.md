@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.0](https://github.com/Levezze/chatbotchat/compare/v0.21.0...v0.22.0) (2026-11-11)
+
+
+### Features
+
+* **candidate:** canonical requests and the T-27 waits mapping (R3) ([#139](https://github.com/Levezze/chatbotchat/issues/139)) ([a01eb9e](https://github.com/Levezze/chatbotchat/commit/a01eb9e11627e47eba2233820cb9b3725e306d95))
+
 ## [0.21.0](https://github.com/Levezze/chatbotchat/compare/v0.20.0...v0.21.0) (2026-11-11)
 
 
