@@ -3,7 +3,7 @@ use cbc_candidate::{settings::RuntimeSettings, Sandbox};
 use serde_json::{json, Value};
 use std::{
     fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read, Write},
     os::unix::fs::PermissionsExt,
     path::PathBuf,
     process::{Child, Command as ProcessCommand, Stdio},
@@ -21,11 +21,16 @@ struct Fixture {
 
 impl Fixture {
     fn start() -> Self {
+        Self::start_with(8984, &[]).0
+    }
+
+    /// Start the binary and return its readiness line too.
+    fn start_with(port: u16, extra: &[&str]) -> (Self, Value) {
         let temp = tempdir().unwrap();
         let protected = temp.path().join("daily/state.db");
         let sandbox = Sandbox::initialize(
             &temp.path().join("candidate"),
-            8984,
+            port,
             std::slice::from_ref(&protected),
         )
         .unwrap();
@@ -35,6 +40,7 @@ impl Fixture {
             .arg(&root)
             .arg("--protected-db")
             .arg(&protected)
+            .args(extra)
             .env_remove("CBC_DB")
             .env_remove("CBC_PORT")
             .env_remove("CBC_SERVER")
@@ -64,12 +70,15 @@ impl Fixture {
         let ready: Value = serde_json::from_str(&line).expect("candidate readiness must be JSON");
         assert_eq!(ready["status"], "listening");
         assert!(root.join("connector.sock").exists());
-        Self {
-            _temp: temp,
-            root,
-            protected,
-            server,
-        }
+        (
+            Self {
+                _temp: temp,
+                root,
+                protected,
+                server,
+            },
+            ready,
+        )
     }
 
     fn command(&self, action: &str) -> Command {
@@ -414,4 +423,38 @@ fn retire_cli_ends_the_identity_for_good() {
         .is_err());
     retire(&mut fixture).failure();
     assert!(fixture.server.try_wait().unwrap().is_none());
+}
+
+/// A core started without `--dashboard` mints no sign-in code, so the command fails before it
+/// would open a browser, and it prints nothing. The success path opens the user's real browser,
+/// so it is exercised only by the user, from the launch sheet.
+#[test]
+fn dashboard_cli_refuses_without_a_dashboard_and_prints_nothing() {
+    let fixture = Fixture::start();
+    let output = fixture
+        .command("dashboard")
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    assert!(output.stdout.is_empty());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("login?code="));
+}
+
+/// `serve --dashboard` answers on 127.0.0.1 at the candidate port, and only to a session.
+#[test]
+fn serve_with_dashboard_listens_on_loopback_at_the_candidate_port() {
+    let (fixture, ready) = Fixture::start_with(8997, &["--dashboard"]);
+    assert_eq!(ready["dashboard"], "http://127.0.0.1:8997/");
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", 8997)).unwrap();
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1:8997\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply).unwrap();
+    assert!(reply.starts_with("HTTP/1.1 401"), "{reply}");
+    drop(fixture);
+    let (_plain, ready) = Fixture::start_with(8998, &[]);
+    assert!(ready["dashboard"].is_null());
+    assert!(std::net::TcpStream::connect(("127.0.0.1", 8998)).is_err());
 }

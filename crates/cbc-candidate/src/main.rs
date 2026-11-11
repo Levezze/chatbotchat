@@ -35,6 +35,17 @@ enum Command {
         root: PathBuf,
         #[arg(long)]
         protected_db: PathBuf,
+        /// Also serve the dashboard on 127.0.0.1 at the candidate port.
+        #[arg(long)]
+        dashboard: bool,
+    },
+    /// Open the dashboard in the browser with a fresh single-use sign-in link. The link goes
+    /// straight to the browser and is never printed.
+    Dashboard {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        protected_db: PathBuf,
     },
     /// Trusted owner setup over the running candidate core; never opens another Store.
     Provision {
@@ -215,23 +226,67 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string(&snapshot)?);
             Ok(())
         }
-        Command::Serve { root, protected_db } => {
+        Command::Serve {
+            root,
+            protected_db,
+            dashboard,
+        } => {
             protected_dbs.push(protected_db);
             let sandbox = cbc_candidate::Sandbox::inspect(&root, &protected_dbs)?;
             protect_port(sandbox.port())?;
             let store = cbc_candidate::store::Store::open(&sandbox).await?;
-            let connector = cbc_candidate::connector::LocalConnector::bind(&sandbox, store)?;
+            let mut connector = cbc_candidate::connector::LocalConnector::bind(&sandbox, store)?;
+            let mut address = None;
+            if dashboard {
+                let listener = tokio::net::TcpListener::bind(("127.0.0.1", sandbox.port())).await?;
+                address = Some(format!("http://127.0.0.1:{}/", sandbox.port()));
+                connector = connector.with_dashboard(listener)?;
+            }
             let mut terminate =
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
             println!(
                 "{}",
-                serde_json::json!({"status":"listening","socket":connector.path(),"pid":std::process::id()})
+                serde_json::json!({"status":"listening","socket":connector.path(),"dashboard":address,"pid":std::process::id()})
             );
             connector
                 .run(async {
                     tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
                 })
                 .await
+        }
+        Command::Dashboard { root, protected_db } => {
+            protected_dbs.push(protected_db);
+            let sandbox = cbc_candidate::Sandbox::inspect(&root, &protected_dbs)?;
+            protect_port(sandbox.port())?;
+            let owner = owner_token(&sandbox)?;
+            let socket = sandbox.root().join("connector.sock");
+            let code = cbc_candidate::connector::LocalOwnerClient::new(&socket, &owner)
+                .dashboard_login_code()
+                .await?;
+            let opener = if cfg!(target_os = "macos") {
+                "open"
+            } else {
+                "xdg-open"
+            };
+            let opened = std::process::Command::new(opener)
+                .arg(format!(
+                    "http://127.0.0.1:{}/login?code={code}",
+                    sandbox.port()
+                ))
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            // Never fall back to printing the link: whoever reads it could sign in as the user.
+            ensure!(
+                opened.is_ok_and(|status| status.success()),
+                "could not open a browser; the sign-in link was not shown and expires in 30 seconds"
+            );
+            println!(
+                "{}",
+                serde_json::json!({"status":"dashboard-opened","dashboard":format!("http://127.0.0.1:{}/", sandbox.port())})
+            );
+            Ok(())
         }
         Command::Inspect { root, protected_db } => {
             protected_dbs.push(protected_db);

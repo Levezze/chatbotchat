@@ -132,6 +132,17 @@ impl Store {
             > 0)
     }
 
+    /// Context IDs after `after` ("" for the first page), in ID order, at most `limit`.
+    pub async fn contexts(&self, after: &str, limit: u32) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT context_id FROM candidate_contexts WHERE context_id > ? ORDER BY context_id LIMIT ?",
+        )
+        .bind(after)
+        .bind(i64::from(limit.min(100)))
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     pub async fn close(mut self) {
         self.pool.close().await;
         if let Some(lease) = &mut self.lease {

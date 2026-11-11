@@ -2,6 +2,7 @@
 //! Credentials/references in this wire protocol are adapter-only, never model-facing output.
 use crate::{
     bindings::SessionBinding,
+    dashboard::session::Sessions,
     enrollment::{Connection, ConnectionKind, DirectoryEntry},
     inbox::{Batch, InboxChange, Item, MAX_BATCH_HARD_BYTES, MAX_ITEMS},
     owner::{OwnerControl, ProvisionSpec},
@@ -40,6 +41,7 @@ pub struct LocalConnector {
     store: Store,
     settings: Arc<Mutex<RuntimeSettingsService>>,
     owner: Arc<OwnerControl>,
+    dashboard: Option<(tokio::net::TcpListener, Arc<Sessions>)>,
 }
 impl LocalConnector {
     /// Bind only a new socket inside the validated private candidate root. Never replace paths.
@@ -74,7 +76,15 @@ impl LocalConnector {
             store,
             settings,
             owner,
+            dashboard: None,
         })
+    }
+    /// Also serve the dashboard on `listener`, which must be on 127.0.0.1. Its sessions live in
+    /// this process only; the owner route mints the login codes.
+    pub fn with_dashboard(mut self, listener: tokio::net::TcpListener) -> Result<Self> {
+        crate::dashboard::check_listener(&listener)?;
+        self.dashboard = Some((listener, Sessions::new()));
+        Ok(self)
     }
     pub fn path(&self) -> &Path {
         &self.socket.path
@@ -87,8 +97,24 @@ impl LocalConnector {
             store,
             settings,
             owner,
+            dashboard,
         } = self;
         let store = Arc::new(store);
+        let (sessions, dashboard) = match dashboard {
+            Some((listener, sessions)) => {
+                let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+                let task = tokio::spawn(crate::dashboard::serve(
+                    listener,
+                    store.clone(),
+                    sessions.clone(),
+                    async {
+                        let _ = stopped.await;
+                    },
+                ));
+                (Some(sessions), Some((stop, task)))
+            }
+            None => (None, None),
+        };
         let slots = Arc::new(Semaphore::new(MAX_CLIENTS));
         let (notices, _) = watch::channel(0_u64);
         let mut workers = JoinSet::new();
@@ -123,9 +149,10 @@ impl LocalConnector {
                     let notices = notices.clone();
                     let settings = settings.clone();
                     let owner = owner.clone();
+                    let sessions = sessions.clone();
                     workers.spawn(async move {
                         let _permit = permit;
-                        let _ = serve_one(stream,&store,&settings,&owner,&notices).await;
+                        let _ = serve_one(stream,&store,&settings,&owner,sessions.as_deref(),&notices).await;
                     });
                 }
             }
@@ -133,6 +160,22 @@ impl LocalConnector {
         drop(listener);
         workers.abort_all();
         while workers.join_next().await.is_some() {}
+        let outcome = match dashboard {
+            Some((stop, mut task)) => {
+                let _ = stop.send(());
+                match tokio::time::timeout(Duration::from_secs(5), &mut task).await {
+                    Ok(Ok(Ok(()))) => outcome,
+                    Ok(Ok(Err(error))) => outcome.and(Err(error)),
+                    Ok(Err(error)) => outcome.and(Err(error.into())),
+                    Err(_) => {
+                        task.abort();
+                        let _ = task.await;
+                        outcome.and(Err(anyhow::anyhow!("dashboard did not stop in time")))
+                    }
+                }
+            }
+            None => outcome,
+        };
         let store = Arc::try_unwrap(store)
             .map_err(|_| anyhow::anyhow!("candidate clients still hold the store"))?;
         store.close().await;
@@ -248,6 +291,7 @@ enum OwnerOperation {
     Request {
         request: requests::OwnerRequestOperation,
     },
+    DashboardLogin,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -362,6 +406,7 @@ async fn serve_one(
     store: &Store,
     settings: &Mutex<RuntimeSettingsService>,
     owner: &OwnerControl,
+    sessions: Option<&Sessions>,
     notices: &watch::Sender<u64>,
 ) -> Result<()> {
     ensure!(
@@ -382,7 +427,7 @@ async fn serve_one(
                 }
                 Ok(Inbound::Owner(request)) => match tokio::time::timeout(
                     REQUEST_TIMEOUT,
-                    owner_route(store, settings, owner, request),
+                    owner_route(store, settings, owner, sessions, request),
                 )
                 .await
                 {
@@ -429,6 +474,7 @@ async fn owner_route(
     store: &Store,
     settings: &Mutex<RuntimeSettingsService>,
     owner: &OwnerControl,
+    sessions: Option<&Sessions>,
     request: OwnerRequest,
 ) -> Result<serde_json::Value> {
     ensure!(
@@ -474,6 +520,9 @@ async fn owner_route(
         }
         OwnerOperation::Work { work } => work::owner_dispatch(store, work).await,
         OwnerOperation::Request { request } => requests::owner_dispatch(store, request).await,
+        OwnerOperation::DashboardLogin => Ok(serde_json::json!({
+            "code": sessions.context("no dashboard is running")?.mint_code(),
+        })),
     }
 }
 
@@ -675,6 +724,15 @@ impl<'a> LocalOwnerClient<'a> {
         })
         .await
         .context("candidate owner operation timed out")?
+    }
+    /// A single-use code for `/login`, valid for 30 seconds. It belongs in the browser the
+    /// user's own command opens, never in output a model reads.
+    pub async fn dashboard_login_code(&self) -> Result<String> {
+        let value = self.call(OwnerOperation::DashboardLogin).await?;
+        Ok(value["code"]
+            .as_str()
+            .context("invalid candidate login code")?
+            .to_owned())
     }
     pub async fn provision(&self, spec: ProvisionSpec) -> Result<serde_json::Value> {
         self.call(OwnerOperation::Provision { spec }).await
