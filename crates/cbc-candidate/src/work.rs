@@ -132,6 +132,23 @@ pub enum WorkOutcome {
     NoOp { revision: i64 },
 }
 
+impl WorkOutcome {
+    fn columns(self) -> (&'static str, i64) {
+        match self {
+            Self::Applied { revision } => ("applied", revision),
+            Self::NoOp { revision } => ("noop", revision),
+        }
+    }
+}
+
+/// A registration's result. A replay returns the item as it is now, not as it was registered,
+/// and says so.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Registration {
+    pub item: WorkItem,
+    pub replayed: bool,
+}
+
 impl Store {
     /// A feature lead registers the item it owns. Revision 1 records `["registered"]`.
     pub async fn register_work_item(
@@ -140,7 +157,7 @@ impl Store {
         item: &str,
         summary: &str,
         key: &str,
-    ) -> Result<WorkItem> {
+    ) -> Result<Registration> {
         valid_item(item)?;
         valid_key(key)?;
         let summary = valid_summary(summary)?;
@@ -161,7 +178,10 @@ impl Store {
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("unknown work item"))?;
             tx.commit().await?;
-            return Ok(current);
+            return Ok(Registration {
+                item: current,
+                replayed: true,
+            });
         }
         ensure!(
             load_item(&mut tx, &binding.context_id, item)
@@ -200,7 +220,10 @@ impl Store {
         )
         .await?;
         tx.commit().await?;
-        Ok(created)
+        Ok(Registration {
+            item: created,
+            replayed: false,
+        })
     }
 
     /// The owner patches any of its content fields in one revision. A patch that changes
@@ -236,11 +259,11 @@ impl Store {
             "not authorized: only the owner patches a work item"
         );
         let actor = Actor::Member(binding.member_id.clone());
-        if let Some(revision) =
+        if let Some(outcome) =
             replayed(&mut tx, &binding.context_id, &actor, key, &fingerprint).await?
         {
             tx.commit().await?;
-            return Ok(WorkOutcome::Applied { revision });
+            return Ok(outcome);
         }
         ensure!(
             current.revision == expected_revision,
@@ -280,10 +303,22 @@ impl Store {
             }
         }
         if changed.is_empty() {
-            tx.commit().await?;
-            return Ok(WorkOutcome::NoOp {
+            let outcome = WorkOutcome::NoOp {
                 revision: current.revision,
-            });
+            };
+            record_operation(
+                &mut tx,
+                &binding.context_id,
+                item,
+                &actor,
+                key,
+                &fingerprint,
+                outcome,
+                facts::wall_ms(),
+            )
+            .await?;
+            tx.commit().await?;
+            return Ok(outcome);
         }
         changed.sort_unstable();
         let changed: Vec<String> = changed.into_iter().map(String::from).collect();
@@ -410,7 +445,7 @@ impl Store {
                 "owner" => Actor::Owner,
                 _ => Actor::Member(row.try_get("actor_member")?),
             };
-            let events = sqlx::query("SELECT e.sequence,i.room_id FROM candidate_work_events e JOIN candidate_items i ON i.sequence=e.sequence WHERE e.context_id=? AND e.item_id=? AND e.revision=? ORDER BY e.sequence")
+            let events = sqlx::query("SELECT e.sequence,i.room_id FROM candidate_work_events e JOIN candidate_items i ON i.sequence=e.sequence WHERE e.context_id=? AND e.item_id=? AND e.revision=? AND e.snapshot=0 ORDER BY e.sequence")
                 .bind(context).bind(item).bind(revision).fetch_all(&mut *conn).await?;
             let mut delivered_to = Vec::with_capacity(events.len());
             let mut event_sequences = Vec::with_capacity(events.len());
@@ -443,13 +478,26 @@ impl Store {
         let current = load_item(conn, context, item)
             .await?
             .ok_or_else(|| anyhow::anyhow!("unknown work item"))?;
-        if let Some(revision) = replayed(conn, context, actor, key, &fingerprint).await? {
-            return Ok(WorkOutcome::Applied { revision });
+        if let Some(outcome) = replayed(conn, context, actor, key, &fingerprint).await? {
+            return Ok(outcome);
         }
         if current.hitl == on {
-            return Ok(WorkOutcome::NoOp {
+            // A no-op binds its key too, so a stale retry can't undo a later change.
+            let outcome = WorkOutcome::NoOp {
                 revision: current.revision,
-            });
+            };
+            record_operation(
+                conn,
+                context,
+                item,
+                actor,
+                key,
+                &fingerprint,
+                outcome,
+                facts::wall_ms(),
+            )
+            .await?;
+            return Ok(outcome);
         }
         let mut next = current.clone();
         next.hitl = on;
@@ -514,6 +562,19 @@ impl Store {
             .bind(context).bind(&item.item).bind(item.revision).bind(kind).bind(member)
             .bind(key).bind(&fingerprint[..]).bind(serde_json::to_string(changed)?).bind(at)
             .execute(&mut *conn).await?;
+        record_operation(
+            conn,
+            context,
+            &item.item,
+            actor,
+            key,
+            fingerprint,
+            WorkOutcome::Applied {
+                revision: item.revision,
+            },
+            at,
+        )
+        .await?;
         let body = serde_json::json!({
             "item": item.item,
             "revision": item.revision,
@@ -557,6 +618,50 @@ impl Store {
         }
         Ok(())
     }
+
+    /// Catch a newly created report room up: one event per open item of the child, carrying its
+    /// current state, to the parent only. Called in the transaction that creates the room, so
+    /// nothing committed before it is missed and nothing after it is sent twice. A reused room
+    /// gets none; its parent already received each change as it happened.
+    pub(crate) async fn snapshot_work_items(
+        &self,
+        conn: &mut SqliteConnection,
+        context: &str,
+        room: &str,
+        child: &str,
+        parent: &str,
+    ) -> Result<()> {
+        let items: Vec<String> = sqlx::query_scalar("SELECT item_id FROM candidate_work_items WHERE context_id=? AND owner_member=? AND stage NOT IN ('merged','abandoned') ORDER BY item_id")
+            .bind(context).bind(child).fetch_all(&mut *conn).await?;
+        for id in items {
+            let item = load_item(conn, context, &id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("unknown work item"))?;
+            let body = serde_json::json!({
+                "item": item.item,
+                "revision": item.revision,
+                "snapshot": true,
+                "stage": item.stage,
+                "hitl": item.hitl,
+            })
+            .to_string();
+            let sequence: i64 = sqlx::query_scalar("INSERT INTO candidate_items(context_id,room_id,sender,kind,body) VALUES (?,?,?,'message',?) RETURNING sequence")
+                .bind(context).bind(room).bind(child).bind(&body)
+                .fetch_one(&mut *conn).await?;
+            sqlx::query("INSERT INTO candidate_work_events(sequence,context_id,item_id,revision,snapshot) VALUES (?,?,?,?,1)")
+                .bind(sequence).bind(context).bind(&item.item).bind(item.revision)
+                .execute(&mut *conn).await?;
+            sqlx::query(
+                "INSERT INTO candidate_work_event_recipients(sequence,member_id) VALUES (?,?)",
+            )
+            .bind(sequence)
+            .bind(parent)
+            .execute(&mut *conn)
+            .await?;
+            facts::record_commit(conn, &self.clock, sequence, ItemClass::WorkEvent).await?;
+        }
+        Ok(())
+    }
 }
 
 fn actor_columns(actor: &Actor) -> (&'static str, Option<&str>) {
@@ -566,17 +671,17 @@ fn actor_columns(actor: &Actor) -> (&'static str, Option<&str>) {
     }
 }
 
-/// The revision a key already committed, if the same request is being retried. The same key
-/// with a different request is refused rather than silently ignored.
+/// The first outcome of a key, if the same request is being retried: applied or no-op, with the
+/// revision it saw. The same key with a different request is refused rather than ignored.
 async fn replayed(
     conn: &mut SqliteConnection,
     context: &str,
     actor: &Actor,
     key: &str,
     fingerprint: &[u8; 32],
-) -> Result<Option<i64>> {
+) -> Result<Option<WorkOutcome>> {
     let (kind, member) = actor_columns(actor);
-    let row = sqlx::query("SELECT revision,fingerprint FROM candidate_work_revisions WHERE context_id=? AND actor_kind=? AND coalesce(actor_member,'')=? AND request_key=?")
+    let row = sqlx::query("SELECT outcome,revision,fingerprint FROM candidate_work_operations WHERE context_id=? AND actor_kind=? AND coalesce(actor_member,'')=? AND request_key=?")
         .bind(context).bind(kind).bind(member.unwrap_or("")).bind(key)
         .fetch_optional(conn).await?;
     let Some(row) = row else { return Ok(None) };
@@ -584,7 +689,32 @@ async fn replayed(
         row.try_get::<Vec<u8>, _>("fingerprint")? == fingerprint[..],
         "idempotency key conflicts with an earlier request"
     );
-    Ok(Some(row.try_get("revision")?))
+    let revision = row.try_get("revision")?;
+    Ok(Some(match row.try_get::<String, _>("outcome")?.as_str() {
+        "applied" => WorkOutcome::Applied { revision },
+        _ => WorkOutcome::NoOp { revision },
+    }))
+}
+
+/// Bind a key to its first outcome.
+#[allow(clippy::too_many_arguments)]
+async fn record_operation(
+    conn: &mut SqliteConnection,
+    context: &str,
+    item: &str,
+    actor: &Actor,
+    key: &str,
+    fingerprint: &[u8; 32],
+    outcome: WorkOutcome,
+    at: i64,
+) -> Result<()> {
+    let (kind, member) = actor_columns(actor);
+    let (outcome, revision) = outcome.columns();
+    sqlx::query("INSERT INTO candidate_work_operations(context_id,actor_kind,actor_member,request_key,fingerprint,item_id,outcome,revision,at_wall_ms) VALUES (?,?,?,?,?,?,?,?,?)")
+        .bind(context).bind(kind).bind(member).bind(key).bind(&fingerprint[..])
+        .bind(item).bind(outcome).bind(revision).bind(at)
+        .execute(conn).await?;
+    Ok(())
 }
 
 async fn load_item(

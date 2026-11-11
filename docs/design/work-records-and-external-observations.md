@@ -136,8 +136,8 @@ tests in `tests/work_items.rs`. The connector routes are R2b, below.
 - **Idempotency.** A key belongs to its actor. Retrying the same request with
   the same key returns the first result: the revision for a patch, the item as
   it is now for a registration. The same key with a different request fails
-  with `idempotency key conflicts`. A `NoOp` records nothing, so its key stays
-  unused.
+  with `idempotency key conflicts`. A `NoOp` records no revision. Since R2c it
+  still binds its key (see below).
 - **HITL (T-07).** A repo lead can turn it on. Only the user turns it off,
   through the owner route. The owner can't change it either way, and a content
   patch never touches it. Any active repo lead in the context qualifies; tying
@@ -204,6 +204,43 @@ Three findings from the same review are left for R2c, which needs migration
 - A replayed registration should say it is a replay.
 - An item registered before its owner's report room exists should reach the
   lead as a current snapshot once the room is connected.
+
+### R2c as built: work-item follow-ups
+
+Migration 0010 (schema 10). The changes are in `src/work.rs` and one call in
+`src/enrollment.rs`; tests are in `tests/work_items.rs`.
+
+- **Operation ledger.** Each keyed request is recorded with its first outcome,
+  `applied` or `noop`, and the revision it saw. A retry with the same key
+  returns that outcome, even if the item has changed since. Revisions remain
+  the record of change; the ledger is the record of requests. Without it, a
+  delayed retry of an old "HITL off", sent while HITL was already off, would
+  clear a hold the lead set in between. A no-op patch binds its key the same
+  way, and the key can't be reused for a different change.
+- **Replayed registration.** A registration returns the item and a `replayed`
+  flag. A replay returns the item as it is now. It records nothing, and over
+  the connector it wakes nobody.
+- **Catch-up on connect.** When a report room is created, in the same
+  transaction, the parent receives one work event per open item of the child
+  (any stage but `merged` and `abandoned`). The event carries the item's
+  current state: `item`, `revision`, `snapshot: true`, `stage` and `hitl`, with
+  no intermediate history. The child receives nothing. A reused room gets no
+  catch-up, since its parent received each change as it happened. A
+  replacement room after a close gets one. Catch-up events are tagged
+  `snapshot` and are not counted as a delivery of the revision they carry, so
+  an item's history still shows that a change made with no room reached nobody
+  at the time.
+- **Upgrade.** 0010 copies every key a revision used into the ledger as
+  `applied`. A test builds a schema-9 database with two revisions and checks
+  that a pre-upgrade key is still refused for a different request.
+
+Mutation checks:
+- Not binding a no-op HITL key fails the stale-retry test.
+- Not binding a no-op patch key fails the patch-key test.
+- Skipping the backfill fails the upgrade test.
+- Labelling a replay as new fails the replay test.
+- Skipping the catch-up, including finished items in it, or counting it as a
+  delivery each fail the catch-up test.
 
 ## Registration, controls and eligible merge
 

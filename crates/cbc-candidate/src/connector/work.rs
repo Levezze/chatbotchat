@@ -4,7 +4,7 @@ use super::{LocalClient, LocalOwnerClient, Operation, OwnerOperation, Reply};
 use crate::{
     bindings::SessionBinding,
     store::Store,
-    work::{WorkItem, WorkOutcome, WorkPatch, WorkRevision},
+    work::{Registration, WorkItem, WorkOutcome, WorkPatch, WorkRevision},
 };
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -57,9 +57,10 @@ pub(super) enum OwnerWorkOperation {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum WorkReply {
-    /// A registration, which may have committed a work event.
+    /// A registration. Only a first registration committed a work event.
     Registered {
         item: WorkItem,
+        replayed: bool,
     },
     Outcome {
         outcome: WorkOutcome,
@@ -74,10 +75,12 @@ impl WorkReply {
     pub(super) fn committed(&self) -> bool {
         matches!(
             self,
-            WorkReply::Registered { .. }
-                | WorkReply::Outcome {
-                    outcome: WorkOutcome::Applied { .. }
-                }
+            WorkReply::Registered {
+                replayed: false,
+                ..
+            } | WorkReply::Outcome {
+                outcome: WorkOutcome::Applied { .. }
+            }
         )
     }
 }
@@ -88,11 +91,12 @@ pub(super) async fn dispatch(
     operation: WorkOperation,
 ) -> Result<WorkReply> {
     Ok(match operation {
-        WorkOperation::Register { item, summary, key } => WorkReply::Registered {
-            item: store
+        WorkOperation::Register { item, summary, key } => {
+            let Registration { item, replayed } = store
                 .register_work_item(binding, &item, &summary, &key)
-                .await?,
-        },
+                .await?;
+            WorkReply::Registered { item, replayed }
+        }
         WorkOperation::Update {
             item,
             expected_revision,
@@ -155,7 +159,7 @@ impl LocalClient<'_> {
         item: &str,
         summary: &str,
         key: &str,
-    ) -> Result<WorkItem> {
+    ) -> Result<Registration> {
         match self
             .work(WorkOperation::Register {
                 item: item.into(),
@@ -164,7 +168,7 @@ impl LocalClient<'_> {
             })
             .await?
         {
-            WorkReply::Registered { item } => Ok(item),
+            WorkReply::Registered { item, replayed } => Ok(Registration { item, replayed }),
             _ => bail!("unexpected candidate response"),
         }
     }
