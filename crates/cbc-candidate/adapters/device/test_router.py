@@ -345,6 +345,61 @@ class DeviceTests(unittest.TestCase):
         self.assertEqual(router.recover_once(), 1, "acknowledged: the core's budget decides")
         self.assertEqual(recoveries, [3, 4, 4])
 
+    def recovery_router(self, recover):
+        class FakeQueue:
+            def __init__(self, executable, session, event=None):
+                self.session = session
+            def __call__(self, hint):
+                return True
+            def recover(self, hint):
+                return recover(self, hint)
+        with patch.object(device.codex, "QueueDelivery", FakeQueue):
+            router = device.DeviceRouter(self.args())
+        self.addCleanup(self.cleanup_router, router)
+        router.read_wake_status = lambda grant, _timeout: {
+            "type": "binding_status", "first_unread_sequence": 3,
+            "recovery_due": grant["member"] == "codex"}
+        return router
+
+    def test_a_recovery_acknowledged_before_the_wake_returns_leaves_no_hold(self):
+        # Codex review 4: the hold is registered before the wake, so an early ack clears it.
+        recoveries = []
+        def recover(queue_, hint):
+            recoveries.append(hint["sequence"])
+            queue_.reporter(hint["sequence"], "accepted", None, True, 1)
+            self.assertTrue(router.flush_wake_reports(2))
+            return True
+        router = self.recovery_router(recover)
+        router.wake_sender = lambda grant, request: {"type": "woken", "covered": 1}
+        self.assertEqual(router.recover_once(), 1)
+        self.assertEqual(router.recover_once(), 1, "attempts remain; the core decides")
+        self.assertEqual(recoveries, [3, 3])
+
+    def test_a_failed_recovery_whose_report_is_lost_is_not_repeated(self):
+        # Codex review 4: a failed attempt is still an attempt the core must count.
+        recoveries = []
+        def recover(queue_, hint):
+            recoveries.append(hint["sequence"])
+            queue_.reporter(hint["sequence"], "failed", "queue_exit", True, 1)
+            return False
+        router = self.recovery_router(recover)
+        router.wake_sender = lambda grant, request: {"type": "error", "code": "busy"}
+        self.assertEqual(router.recover_once(), 0)
+        self.assertTrue(router.flush_wake_reports(2))
+        self.assertEqual(router.recover_once(), 0)
+        self.assertEqual(recoveries, [3])
+
+    def test_a_recovery_that_attempted_nothing_holds_nothing(self):
+        recoveries = []
+        def recover(queue_, hint):
+            recoveries.append(hint["sequence"])
+            return False  # e.g. the binding status was unavailable: nothing ran, nothing reported
+        router = self.recovery_router(recover)
+        router.wake_sender = lambda grant, request: self.fail("no attempt, no report")
+        self.assertEqual(router.recover_once(), 0)
+        self.assertEqual(router.recover_once(), 0)
+        self.assertEqual(recoveries, [3, 3])
+
     def test_claude_is_channel_only_before_subscribe_after_refresh_and_restart(self):
         def assert_no_fallback(router, session):
             self.assertIn(session, router.channel_sessions)

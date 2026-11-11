@@ -123,10 +123,12 @@ class DeviceRouter(claude.Router):
         # #113 B1. Reports leave the delivery path through one bounded queue and one worker,
         # so a slow or absent core can never delay or fail a delivery.
         self.wake_reports = queue.Queue(maxsize=256)
-        # The core counts recovery attempts from wake reports. Until it acknowledges one for a
-        # binding, that binding's oldest unread item is not recovered again (Codex review 3).
+        # The core counts recovery attempts from wake reports, which can be lost. A hold is
+        # registered before each recovery and keeps that binding's oldest unread item from being
+        # recovered again until the core acknowledges the attempt's report. It is dropped at
+        # once if no attempt was reported. (Codex reviews 3 and 4.)
         self.recovery_lock = threading.Lock()
-        self.recovery_unacked = {}
+        self.recovery_holds = {}
         self.wake_sender = lambda grant, request: self.bounded_call(grant, request, 2.0)
         self.latest_hint = {}
         self.native_recover = set()
@@ -188,6 +190,11 @@ class DeviceRouter(claude.Router):
                    "recovery": bool(recovery), "attempt_wall_us": attempted_us}
         if failure is not None:
             request["failure"] = failure
+        if recovery:
+            with self.recovery_lock:
+                hold = self.recovery_holds.get((binding["context"], binding["member"]))
+                if hold is not None:
+                    hold["reported"] = True
         try:
             self.wake_reports.put_nowait((dict(binding), request))
         except queue.Full:
@@ -206,8 +213,10 @@ class DeviceRouter(claude.Router):
                 if not isinstance(reply, dict) or reply.get("type") != "woken":
                     self.event("wake_report_failed", member=grant["member"], reason="rejected")
                 elif request.get("recovery") is True:
+                    key = (grant["context"], grant["member"])
                     with self.recovery_lock:
-                        self.recovery_unacked.pop((grant["context"], grant["member"]), None)
+                        if self.recovery_holds.get(key, {}).get("reported"):
+                            del self.recovery_holds[key]
             except Exception as error:  # a lost report must never reach a delivery path
                 self.event("wake_report_failed", member=grant["member"],
                            reason=type(error).__name__)
@@ -258,27 +267,37 @@ class DeviceRouter(claude.Router):
                     or type(first) is not int or first < 1):
                 continue
             key = (binding["context"], binding["member"])
+            hold = {"first": first, "reported": False}
             with self.recovery_lock:
-                unacked = self.recovery_unacked.get(key) == first
-            if unacked:
+                held = self.recovery_holds.get(key, {}).get("first") == first
+                if not held:
+                    self.recovery_holds[key] = hold  # before the wake, so an early ack finds it
+            if held:
                 self.event("recovery_unacknowledged", member=binding["member"])
                 continue
             hint = {"context": binding["context"], "member": binding["member"], "sequence": first}
             done = False
-            if host == "codex":
-                with self.registry_lock:
-                    callback = self.queued.get(session)
-                done = callback is not None and callback.recover(hint) is True
-            elif host == "claude":
-                is_native, channel_missing = self.native_notification_mode(session)
-                if is_native:
-                    self.recover_native(session)
-                    done = True
-                elif not channel_missing:
-                    done = self.notify(session, force=True, recovery=True).get("_notified") is True
-            if done:
+            try:
+                if host == "codex":
+                    with self.registry_lock:
+                        callback = self.queued.get(session)
+                    done = callback is not None and callback.recover(hint) is True
+                elif host == "claude":
+                    is_native, channel_missing = self.native_notification_mode(session)
+                    if is_native:
+                        # The report comes when the mod's next wait answers; the hold waits.
+                        with self.recovery_lock:
+                            hold["reported"] = True
+                        self.recover_native(session)
+                        done = True
+                    elif not channel_missing:
+                        done = self.notify(session, force=True,
+                                           recovery=True).get("_notified") is True
+            finally:
                 with self.recovery_lock:
-                    self.recovery_unacked[key] = first
+                    if self.recovery_holds.get(key) is hold and not hold["reported"]:
+                        del self.recovery_holds[key]  # nothing was attempted, nothing to count
+            if done:
                 count += 1
             else:
                 self.event("recovery_skipped", member=binding["member"])

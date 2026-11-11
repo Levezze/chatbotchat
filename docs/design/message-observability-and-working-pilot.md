@@ -415,11 +415,17 @@ and a positive first unread sequence:
 - Anything else: a `recovery_skipped` event.
 
 The core counts recovery attempts from wake reports, and reports can be lost.
-So once the driver has recovered a binding, it does not recover that binding's
-same oldest unread item again until the core has acknowledged a recovery report
-for it (a `woken` reply). It emits `recovery_unacknowledged` instead. A move of
-the oldest unread item lifts the hold. A lost report therefore costs at most
-the one recovery it described, and `recovery_attempts` stays a real bound.
+So before each recovery the driver registers a hold on the binding's oldest
+unread item. Any recovery report for the binding, accepted or failed, marks the
+hold as attempted; the native path marks it at once, since its report follows
+when the mod next waits. The hold is lifted when the core acknowledges a
+recovery report (a `woken` reply) or the oldest unread item moves, and is
+dropped at once, even if the dispatch raises, when nothing was attempted.
+While it stands the driver emits `recovery_unacknowledged` instead of
+recovering. Registering it before the wake means an acknowledgement that
+arrives before the dispatch returns still finds it. A lost report therefore
+costs at most the one attempt it described, and `recovery_attempts` stays a
+real bound.
 
 A recovery report's `through` is what that path actually covered, as for any
 wake: the batch's highest sequence for a channel, the higher of the first
@@ -480,6 +486,11 @@ Mutants, each run against the full crate suite (17):
   The core test interleaves a receipt with request starts on one task, five
   rounds, and checks that the last start taken before the receipt returned does
   not count.
+- Codex's fourth review found two gaps in that recovery hold, both fixed with a
+  test that failed first: it was registered after the wake, so an early
+  acknowledgement left it stuck; and a failed attempt set none, so a lost
+  failure report allowed unbounded retries. The hold now goes up before the
+  wake and stays for any reported attempt.
 - Not tested: the clamp on `attempt_wall_us`, which needs a receipt more than
   ten minutes old.
 - Not tested: the fail-soft path of `recovery_due` in `binding_status`. It needs
