@@ -42,7 +42,7 @@ fn delivery(member: &str, sequence: i64, committed: i64) -> Delivery {
         receipted: None,
         woken: None,
         active: None,
-        superseded_wall_ms: None,
+        superseded: Superseded::Not,
     }
 }
 
@@ -516,6 +516,20 @@ fn a_withdrawal_with_no_recorded_time_is_counted_not_guessed() {
         o.contains("\n  requests withdrawn with no recorded time: 1 (left out)\n"),
         "{o}"
     );
+
+    // Answered before it was withdrawn: the answer ends the wait, so it is kept and not
+    // counted as undated.
+    let mut answered = facts.clone();
+    answered.requests[0].answered_wall_ms = Some(150);
+    let kept = waits(&answered, window);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(
+        (kept[0].start_ms, kept[0].end_ms, kept[0].open),
+        (110, 150, false)
+    );
+    let mut o = String::new();
+    render_waits(&mut o, &answered, window);
+    assert!(!o.contains("no recorded time"), "{o}");
 }
 
 /// Bindings come from enrolments and rebinds, dated by their identity event, with the host and
@@ -602,47 +616,54 @@ async fn bindings_load_with_their_profile_and_the_time_they_took_effect() {
 }
 
 /// An unread notice is replaced when the newer one arrives. One already offered stays in its batch
-/// until receipt, or until a rebind drops the batch; a receipt by then means it was delivered.
+/// until receipt; a batch's drop is not dated, so one offered and later dropped is replaced at an
+/// unknown time. A receipt, or a batch still holding it at the end, means it was never replaced.
 #[test]
 fn a_notice_is_superseded_when_replaced_unless_offered_first() {
-    let rebound = |at| IdentityFact {
-        context: "t".into(),
-        member: "lead".into(),
-        kind: "rebound".into(),
-        epoch: 2,
-        at_wall_ms: at,
-    };
     let unread = delivery("lead", 4, 110);
-    assert_eq!(superseded_at(&unread, None, &[]), None, "not replaced");
-    assert_eq!(superseded_at(&unread, Some(130), &[]), Some(130));
+    assert_eq!(
+        superseded_at(&unread, None, false),
+        Superseded::Not,
+        "not replaced"
+    );
+    assert_eq!(
+        superseded_at(&unread, Some(130), false),
+        Superseded::At(130)
+    );
 
     let offered = Delivery {
         offered: Some(at("a", 120)),
         ..delivery("lead", 4, 110)
     };
     assert_eq!(
-        superseded_at(&offered, Some(130), &[]),
-        None,
-        "held in its batch"
+        superseded_at(&offered, Some(130), true),
+        Superseded::Not,
+        "still held in a batch at the end, possibly a later one after a rebind"
     );
     assert_eq!(
-        superseded_at(&offered, Some(130), &[rebound(115), rebound(150)]),
-        Some(150),
-        "the first rebind after the offer drops the batch"
+        superseded_at(&offered, Some(130), false),
+        Superseded::Undated,
+        "its batch was dropped unreceipted, at a time no record gives"
     );
     let receipted = Delivery {
         receipted: Some(at("a", 140)),
         ..offered.clone()
     };
-    assert_eq!(superseded_at(&receipted, Some(130), &[rebound(150)]), None);
+    assert_eq!(superseded_at(&receipted, Some(130), false), Superseded::Not);
 
     // In the report: superseded from 130, so pending before it and neither pending nor waited on
-    // after it.
+    // after it. An undated one is left out of pending and the waits, and counted on its own.
     let facts = Facts {
-        deliveries: vec![Delivery {
-            superseded_wall_ms: Some(130),
-            ..unread
-        }],
+        deliveries: vec![
+            Delivery {
+                superseded: Superseded::At(130),
+                ..unread
+            },
+            Delivery {
+                superseded: Superseded::Undated,
+                ..offered
+            },
+        ],
         ..Facts::default()
     };
     let cut = |until_ms| {
@@ -652,17 +673,27 @@ fn a_notice_is_superseded_when_replaced_unless_offered_first() {
         };
         let mut o = String::new();
         render_delivery(&mut o, &facts, window);
-        let open = waits(&facts, window).iter().filter(|w| w.open).count();
+        let open = waits(&facts, window)
+            .iter()
+            .filter(|w| w.open && w.cause == Some(WaitCause::Delivery))
+            .count();
         (o, open)
     };
     let (early, open) = cut(125);
     assert!(early.contains("receipted=0 superseded=0 "), "{early}");
-    assert!(early.contains("never offered=1 "), "{early}");
+    assert!(
+        early.contains("never offered=1 offered, not receipted=0"),
+        "{early}"
+    );
     assert_eq!(open, 1);
     let (late, open) = cut(200);
     assert!(late.contains("receipted=0 superseded=1 "), "{late}");
     assert!(
         late.contains("never offered=0 offered, not receipted=0"),
+        "{late}"
+    );
+    assert!(
+        late.contains("\n  superseded at an unknown time: 1 (offered, then dropped unreceipted; left out of pending and the waits)\n"),
         "{late}"
     );
     assert_eq!(open, 0);

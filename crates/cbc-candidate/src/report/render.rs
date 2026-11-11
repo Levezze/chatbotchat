@@ -240,13 +240,18 @@ pub(super) fn render_delivery(o: &mut String, facts: &Facts, window: Window) {
         .filter(|d| window.seen(&d.receipted).is_some())
         .count();
     let superseded = committed.iter().filter(|d| window.superseded(d)).count();
+    let undated = committed
+        .iter()
+        .filter(|d| d.superseded == Superseded::Undated)
+        .count();
     // Pending only: a receipt with no offer stamp (a fact older than offers) is receipted.
     let never_offered = committed
         .iter()
         .filter(|d| window.seen(&d.receipted).is_none() && !window.superseded(d))
+        .filter(|d| d.superseded != Superseded::Undated)
         .filter(|d| window.seen(&d.offered).is_none())
         .count();
-    let offered_unreceipted = committed.len() - receipted - superseded - never_offered;
+    let offered_unreceipted = committed.len() - receipted - superseded - undated - never_offered;
     let _ = writeln!(
         o,
         "\nDelivery (expected recipients of items committed in the window)"
@@ -261,6 +266,12 @@ pub(super) fn render_delivery(o: &mut String, facts: &Facts, window: Window) {
         o,
         "  pending at until: never offered={never_offered} offered, not receipted={offered_unreceipted}"
     );
+    if undated > 0 {
+        let _ = writeln!(
+            o,
+            "  superseded at an unknown time: {undated} (offered, then dropped unreceipted; left out of pending and the waits)"
+        );
+    }
     let mut wakes: BTreeMap<&str, (usize, BTreeMap<&str, usize>)> = BTreeMap::new();
     for wake in facts
         .wakes
@@ -332,7 +343,8 @@ pub(super) fn render_latency(o: &mut String, facts: &Facts, window: Window) {
                         estimates += usize::from(estimate);
                     }
                     // A replaced notice is never woken for: its successor carries the news.
-                    None if window.superseded(delivery) => {}
+                    None if window.superseded(delivery)
+                        || delivery.superseded == Superseded::Undated => {}
                     None => absent += 1,
                 }
             }

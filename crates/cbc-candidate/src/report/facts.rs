@@ -31,9 +31,17 @@ pub(crate) struct Delivery {
     pub receipted: Option<Stamp>,
     pub woken: Option<Stamp>,
     pub active: Option<Stamp>,
-    /// When an unreceipted room notice stopped being deliverable, if it did by the end snapshot:
-    /// a newer notice for the same room replaced it. See `superseded_at`.
-    pub superseded_wall_ms: Option<i64>,
+    /// Whether a newer notice for the same room replaced this one, and when. See `superseded_at`.
+    pub superseded: Superseded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Superseded {
+    Not,
+    /// Replaced at this wall time: from then it is neither pending nor waited on.
+    At(i64),
+    /// Replaced by the end snapshot, at a time no record gives.
+    Undated,
 }
 
 #[derive(Debug, Clone)]
@@ -92,29 +100,23 @@ pub(crate) struct ConnectionFact {
     pub introduced_wall_ms: Option<i64>,
 }
 
-/// When a room notice was replaced, given the first newer notice for the same room that reached
-/// the same member. Unread notices coalesce, so a replaced notice is never offered or receipted.
-/// One already offered stays in its batch until receipt, or until a rebind or re-enrolment of the
-/// member drops the batch. A receipt by then means it was delivered, not replaced.
+/// Whether a room notice was replaced, given the first newer notice for the same room that
+/// reached the same member and whether a pending batch still held it at the end snapshot.
+/// Unread notices coalesce, so a notice never offered is replaced when the newer one arrives. One
+/// offered stays in its batch until receipt; a rebind drops the batch, and then it is replaced, but
+/// no record dates the drop (a rebind may write no identity event) and a later batch may offer it
+/// again. So an offered notice still held at the end was never replaced, and one no longer held
+/// was replaced at an unknown time. A receipt means it was delivered, not replaced.
 pub(super) fn superseded_at(
     delivery: &Delivery,
     newer_notice_wall_ms: Option<i64>,
-    identity: &[IdentityFact],
-) -> Option<i64> {
-    let newer = newer_notice_wall_ms?;
-    let at = match &delivery.offered {
-        Some(offered) if offered.wall_ms <= newer => identity
-            .iter()
-            .filter(|e| e.context == delivery.context && e.member == delivery.member)
-            .filter(|e| matches!(e.kind.as_str(), "enrolled" | "rebound"))
-            .filter(|e| e.at_wall_ms >= offered.wall_ms)
-            .map(|e| e.at_wall_ms.max(newer))
-            .min()?,
-        _ => newer,
-    };
-    match &delivery.receipted {
-        Some(receipted) if receipted.wall_ms <= at => None,
-        _ => Some(at),
+    held_at_end: bool,
+) -> Superseded {
+    match (newer_notice_wall_ms, &delivery.offered) {
+        _ if delivery.receipted.is_some() || held_at_end => Superseded::Not,
+        (None, _) => Superseded::Not,
+        (Some(newer), None) => Superseded::At(newer),
+        (Some(_), Some(_)) => Superseded::Undated,
     }
 }
 
@@ -171,8 +173,6 @@ impl Facts {
             seats: evidence.seats().await?,
             ..Self::default()
         };
-        // Resolved once identity events are loaded: a rebind can end an offered notice's batch.
-        let mut newer_notices = Vec::new();
         for row in sqlx::query(
             "SELECT f.context_id, r.member_id, r.sequence,
                     f.committed_instance, f.committed_mono_us, f.committed_wall_ms,
@@ -188,7 +188,14 @@ impl Facts {
                        JOIN candidate_notice_recipients nr
                          ON nr.sequence = newer.sequence AND nr.member_id = r.member_id
                        JOIN candidate_item_facts nf ON nf.sequence = newer.sequence
-                      WHERE n.sequence = r.sequence) AS newer_notice_wall_ms
+                      WHERE n.sequence = r.sequence) AS newer_notice_wall_ms,
+                    -- As `candidate_unread_items`: a pending batch of the current epoch holds it.
+                    EXISTS (SELECT 1 FROM candidate_batch_items bi
+                       JOIN candidate_batches b ON b.reference = bi.reference
+                       JOIN candidate_members a ON a.context_id = b.context_id
+                        AND a.member_id = b.member_id AND a.epoch = b.epoch
+                      WHERE bi.sequence = r.sequence AND b.context_id = f.context_id
+                        AND b.member_id = r.member_id AND b.state = 'pending') AS held_at_end
              FROM candidate_recipient_facts r
              JOIN candidate_item_facts f ON f.sequence = r.sequence
              WHERE r.expected = 1
@@ -206,9 +213,14 @@ impl Facts {
                 receipted: stamp(&row, "receipted")?,
                 woken: stamp(&row, "woken")?,
                 active: stamp(&row, "active")?,
-                superseded_wall_ms: None,
+                superseded: Superseded::Not,
             });
-            newer_notices.push(row.try_get::<Option<i64>, _>("newer_notice_wall_ms")?);
+            let delivery = facts.deliveries.last_mut().expect("just pushed");
+            delivery.superseded = superseded_at(
+                delivery,
+                row.try_get("newer_notice_wall_ms")?,
+                row.try_get("held_at_end")?,
+            );
         }
         for row in sqlx::query(
             "SELECT q.context_id, q.request_id, q.callback_member, q.owner_kind, q.owner_member,
@@ -335,9 +347,6 @@ impl Facts {
                 sender: row.try_get("sender")?,
                 wall_ms: row.try_get("committed_wall_ms")?,
             });
-        }
-        for (delivery, newer) in facts.deliveries.iter_mut().zip(newer_notices) {
-            delivery.superseded_wall_ms = superseded_at(delivery, newer, &facts.identity);
         }
         // One revision emits an event per report room; the first commit stands for it.
         let mut merges: BTreeMap<(String, String, i64), i64> = BTreeMap::new();

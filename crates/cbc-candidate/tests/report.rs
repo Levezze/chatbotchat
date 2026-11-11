@@ -4,6 +4,7 @@
 #[path = "support/work_fixture.rs"]
 mod work_fixture;
 use cbc_candidate::{
+    bindings::SessionBinding,
     evidence::{sha256_file, take_snapshot, Snapshot},
     report::{report, ReportArgs},
     requests::RequestOwner,
@@ -222,6 +223,64 @@ async fn a_coalesced_room_notice_is_superseded_not_pending() {
     );
     let waiting = line(&text, "  project/lead — waiting on delivery: ");
     assert!(waiting.contains("count=2 open=0 "), "{waiting}");
+}
+
+async fn notice_every_two(case: &Case, who: &SessionBinding, key: &str) {
+    case.store
+        .send_with_notice_interval(who, &case.report_room, key, key, 2)
+        .await
+        .unwrap();
+}
+
+/// A notice offered, then re-offered in a new batch after a rebind, is still held when a newer
+/// notice arrives: it is pending, not superseded. Once a further rebind drops that batch unreceipted
+/// it is replaced, at a time no record gives.
+#[tokio::test]
+async fn a_notice_held_in_a_batch_across_a_handoff_stays_pending() {
+    let case = fixture().await;
+    let base = snap(&case).await;
+    let manifest = manifest(&base, &sha256_file(&base.file).unwrap());
+    let send = |who, key| notice_every_two(&case, who, key);
+    send(&case.lead, "k1").await;
+    send(&case.lead, "k2").await;
+    assert!(case.store.check(&case.lead, 32).await.unwrap().is_some());
+    let lead = case
+        .store
+        .bind_member("project", "lead", "device", "lead-session-2")
+        .await
+        .unwrap();
+    assert!(
+        case.store.check(&lead, 32).await.unwrap().is_some(),
+        "re-offered"
+    );
+    send(&lead, "k3").await;
+    send(&lead, "k4").await;
+    drain(&case.store, &case.worker).await;
+    let held = snap(&case).await;
+
+    let text = run(&case, &manifest, &held, None, None).await.unwrap();
+    assert!(
+        line(&text, "  committed=").contains(" superseded=0 "),
+        "{text}"
+    );
+    assert_eq!(
+        line(&text, "  pending at until: "),
+        "  pending at until: never offered=1 offered, not receipted=1"
+    );
+    assert!(line(&text, "  project/lead — waiting on delivery: ").contains(" open=2 "));
+
+    case.store
+        .bind_member("project", "lead", "device", "lead-session-3")
+        .await
+        .unwrap();
+    let dropped = snap(&case).await;
+    let text = run(&case, &manifest, &dropped, None, None).await.unwrap();
+    assert_eq!(
+        line(&text, "  pending at until: "),
+        "  pending at until: never offered=1 offered, not receipted=0"
+    );
+    line(&text, "  superseded at an unknown time: 1 ");
+    assert!(line(&text, "  project/lead — waiting on delivery: ").contains(" open=1 "));
 }
 
 #[tokio::test]

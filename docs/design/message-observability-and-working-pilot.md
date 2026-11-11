@@ -639,8 +639,9 @@ sampler and the Cost section it feeds.
   withdrawal emits one only when the owner is a member with an open room, so
   requests to the user and retirement withdrawals had none. The migration
   dates earlier withdrawals from their event where there is one. A withdrawn
-  request still without a time is left out of the waits and counted on its own
-  line, never guessed.
+  request answered first keeps its wait, which the answer ended. One with
+  neither a withdrawal time nor an answer is left out of the waits and counted
+  on its own line, never guessed.
 - **Waits.** Wall time, the one timeline every source shares, clipped to the
   window; an interval still open at `until` is marked open. Per member and
   cause: count, open, sum, n/median/p90/max by nearest rank, and the share of
@@ -656,8 +657,13 @@ sampler and the Cost section it feeds.
   room reaches the same member while it is unread: unread notices coalesce, so
   it is never offered or receipted. It is not pending, its delivery wait ends
   at the newer notice's commit, and it is not counted missing in wake latency.
-  A notice already offered stays in its batch until its receipt, or until the
-  member's next enrolment or rebind drops the batch. Wake attempts reported in the window, by kind, accepted and failed
+  A notice already offered stays in its batch until its receipt. A rebind
+  drops the batch and the notice is then replaced, but no record dates the
+  drop (a plain rebind writes no identity event) and a later batch may offer
+  it again. So an offered notice still held by a pending batch at the end
+  snapshot is pending, and one no longer held, never receipted, was replaced
+  at an unknown time: it is left out of pending and the waits and counted on
+  its own line. Wake attempts reported in the window, by kind, accepted and failed
   by class.
 - **Wake latency.** Per host and profile (for example `claude/desktop`), commit
   to wake accepted and commit to first activity. Each delivery belongs to the
@@ -712,4 +718,7 @@ sampler and the Cost section it feeds.
     emits an event, both close at their withdrawal; the command, run from
     inside the snapshot directory, takes bare file names; and four sends with a
     notice every two messages, then both members drained, give one superseded
-    notice, nothing pending and no open delivery wait.
+    notice, nothing pending and no open delivery wait; and a notice offered,
+    re-offered after a rebind and then joined by a newer one stays pending,
+    until a further rebind drops it unreceipted and it counts as superseded at
+    an unknown time.

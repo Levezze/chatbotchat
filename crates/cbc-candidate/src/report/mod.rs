@@ -49,10 +49,7 @@ impl Window {
     /// Replaced by a newer notice by `until`, with no receipt by then: neither pending nor
     /// waited on.
     fn superseded(&self, delivery: &Delivery) -> bool {
-        self.seen(&delivery.receipted).is_none()
-            && delivery
-                .superseded_wall_ms
-                .is_some_and(|at| at <= self.until_ms)
+        matches!(delivery.superseded, Superseded::At(at) if at <= self.until_ms)
     }
     fn length(&self) -> i64 {
         self.until_ms - self.from_ms
@@ -147,9 +144,11 @@ fn seat_id(context: &str, member: &str) -> SeatId {
     (context.to_owned(), member.to_owned())
 }
 
-/// A withdrawal with no recorded time (from before the time was recorded) cannot be placed.
+/// A withdrawal with no recorded time (from before the time was recorded) and no answer cannot be
+/// placed.
 pub(super) fn untimed(request: &RequestFact) -> bool {
-    request.withdrawn && request.withdrawn_wall_ms.is_none()
+    // A withdrawal comes after any answer, so an answer alone already ends the wait.
+    request.withdrawn && request.withdrawn_wall_ms.is_none() && request.answered_wall_ms.is_none()
 }
 
 /// Waits use wall time, the one timeline that every source shares and the window is cut on.
@@ -198,7 +197,12 @@ pub(crate) fn waits(facts: &Facts, window: Window) -> Vec<WaitInterval> {
             end,
         );
     }
-    for delivery in &facts.deliveries {
+    // A notice replaced at an unknown time has no known end: left out and counted.
+    for delivery in facts
+        .deliveries
+        .iter()
+        .filter(|d| d.superseded != Superseded::Undated)
+    {
         let seat = seat_id(&delivery.context, &delivery.member);
         let id = format!("item {}", delivery.sequence);
         push(
@@ -206,11 +210,11 @@ pub(crate) fn waits(facts: &Facts, window: Window) -> Vec<WaitInterval> {
             Some(WaitCause::Delivery),
             id.clone(),
             delivery.committed.wall_ms,
-            delivery
-                .receipted
-                .as_ref()
-                .map(|s| s.wall_ms)
-                .or(delivery.superseded_wall_ms),
+            match (&delivery.receipted, delivery.superseded) {
+                (Some(receipted), _) => Some(receipted.wall_ms),
+                (None, Superseded::At(at)) => Some(at),
+                (None, _) => None,
+            },
         );
         if let Some(receipted) = window.seen(&delivery.receipted) {
             push(
