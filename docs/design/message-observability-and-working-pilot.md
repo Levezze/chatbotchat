@@ -263,3 +263,185 @@ planning and hierarchy sources rather than leaving installed copies as the only
 record. The unrelated approval prototype remains outside these checkpoints.
 No candidate build, native run, hook installation, service change or adoption is
 authorized by completing this planning review.
+
+## B and C plan (2026-11-11)
+
+The trial report template (section 8 of the
+[working trial protocol](working-trial-protocol.md)) decides what B and C must
+build. Each line of the template is listed here with the record that feeds it,
+whether that record exists, and what fills the gap. Anything with no record is
+built, marked `unknown`, or taken from the user's tally in the manifest. It is
+never estimated.
+
+| Report line | Source | Exists? | Gap and owner |
+|---|---|---|---|
+| Delivery: committed, receipted, failed, pending, lost | item and recipient facts (PR-A) | yes | none; C reads them |
+| Wake latency: commit to wake accepted | wake attempts reported by the device driver | no | B1: wake facts |
+| Wake latency: commit to first activity | the member's first non-transport core operation after receipt | no | B1: activity facts |
+| Waits: user, Primarch, another Chapter Master | open requests by owner (R3) | yes | none |
+| Waits: delivery | committed but unreceipted items | yes | none |
+| Waits: ready but idle | receipt to first activity, per recipient | no | B1: activity facts |
+| Waits: human review, CI | PR observations | no | `unknown` in trial 1; #115 builds the observer |
+| Waits: resource | holds (#114) | no | `unknown` in trial 1 |
+| Approval prompts | host events are not exposed to CBC | no | the user's tally, recorded in the manifest |
+| Autonomy: merges without a Primarch yes | work item revisions and requests | partial | C counts merges from work items; the rest are trial-manager findings |
+| Rooms and identity: duplicates, identity changes | peer room and identity records (R1) | yes | none |
+| Rooms and identity: legacy skills loaded | session transcripts | no | the trial manager's check, in the manifest |
+| Primarch: interventions, turns per hour | core operations by the Primarch | partial | C counts the Primarch's core operations; turns are not observable |
+| Cost: CPU, RSS, disk, normal versus debug | process sampling | no | C: a sampler run beside the core and driver |
+| Manifest, sha256 | none | no | C: the manifest writer |
+
+### B1: wake facts, activity facts, recovery
+
+- **Wake facts.** The device driver already knows when it wrote a Claude
+  channel notification, queued a Codex hint, or answered a native mod wait.
+  A new authenticated connector operation, sent with the member's own binding,
+  reports one wake attempt: the kind, the outcome (accepted or failed with a
+  class), and the highest unread sequence the hint covered. The core stamps it
+  with its own clock and keeps the driver's wall time beside it. For each
+  covered recipient fact it records the first dispatch and the first accepted
+  wake. A wake hint covers a member, not one item, so one attempt can mark many
+  items. The commit to wake interval therefore includes the report's own local
+  socket hop, and the report says so.
+- **Result written is not recorded separately.** Both adapters write the check
+  result to the host and then receipt it, so a receipt bounds result writing
+  from above. The report labels result writing as bounded by the receipt, not
+  measured.
+- **Activity facts.** The core already authenticates every member operation.
+  The first operation after a receipt that is not transport sets the
+  recipient fact's first-activity stamp. Transport is check, receipt, binding
+  status, settings, watch, watch members and the wake report itself.
+  This is the "first observed post-receipt activity" of the issue: it shows the
+  member did something through CBC after receipt, not that it read or used
+  the item. Activity outside CBC is not observable and stays `unknown`.
+- **Recovery.** A live setting, `recovery_after_ms` (default 600000, ten
+  minutes), and a retry bound, `recovery_attempts` (default 3). `binding_status` gains a
+  `recovery_due` flag the core derives from facts. It is true only when the
+  member has an unreceipted item older than the interval and no wake attempt
+  within the interval, and the oldest such item has not used up its attempts.
+  The device driver's existing loop checks its bindings once a minute and
+  re-hints those that are due. No new process, timer per session, or model turn
+  on unchanged state. A member that has used up its attempts stays visible as
+  pending, with its age.
+
+### B1 as built
+
+Migration `0014_wake_activity` (schema version 14) adds the
+`candidate_wake_attempts` table and ten nullable columns to each recipient
+fact: `dispatched_*`, `woken_*` and `active_*` (each the core instance,
+monotonic and wall stamps) plus `active_operation`.
+
+**Wake reports.** The connector operation is `wake`, sent with the member's own
+binding: `through`, `kind` (`claude_channel`, `codex_queue` or `claude_mod`),
+`outcome` (`accepted` or `failed`), `failure` (a class label, present exactly
+when the outcome is failed), `recovery` and `driver_wall_ms`. The reply is
+`woken` with `covered`, the number of the member's unreceipted items with a
+sequence at or below `through`. One transaction stores the attempt and, for
+each covered item, sets `dispatched_*` on any attempt and `woken_*` only on an
+accepted one. The first stamp wins; later attempts change nothing. A sender is
+never a recipient of its own item, and receipted items are not covered.
+
+What "accepted" means, per path:
+
+| Kind | Reported when | Accepted means | `through` |
+|---|---|---|---|
+| `claude_channel` | the router writes the `changed` bell for a batch | the bell was written to the session's channel socket | highest sequence in the batch |
+| `codex_queue` | the queue command actually runs | the command exited 0; a latched hint runs nothing and reports nothing | the hint's sequence (the member's highest unread) |
+| `claude_mod` | a native wait answers `pending` | the HTTP 200 was produced for the mod's wait | the higher of the first unread and the last feed hint |
+
+None of these proves the model read anything. A wake is the transport's last
+observable step; activity is the next one.
+
+The driver never lets a report touch delivery. Reports go into a bounded queue
+(256) and one worker sends each with a 2 second socket timeout. A refused,
+failed or dropped report emits a `wake_report_failed` or `wake_report_dropped`
+event with the error's type name only, and the delivery result is unchanged.
+
+**Activity.** Every connector request is classified before it runs. An
+activity operation (discover, connect, send, close, work, request) takes
+`BEGIN IMMEDIATE` and stamps `active_*` and `active_operation` on each of the
+member's receipted recipient facts in that context that have no activity yet.
+It is recorded before the operation, so a refused send still counts: the member
+acted through CBC. The classification is an exhaustive match, so a new
+operation does not compile until it is placed.
+
+**Recovery.** `binding_status` carries `recovery_due`. The core computes it
+from its own wall clock and the member's live settings. It is false when
+recovery attempts are 0, when there is no unread item, when the oldest unread
+item was committed within `recovery_after_ms` (a missing commit time counts as
+old), when any wake attempt was reported within the interval, or when the
+recovery attempts whose `through` reaches the oldest unread item have used up
+`recovery_attempts`. Ordinary wakes reset the interval but never use an
+attempt. A failure to compute the flag reports `false` instead of failing
+`binding_status`, because the native waiter, the Codex latch and startup
+verification all read that status.
+
+The driver's recovery loop runs every 60 seconds in a thread of the existing
+driver process and stops with the feed. For each binding it reads the status
+with the 2 second bounded call and acts only on `recovery_due` exactly `true`
+and a positive first unread sequence:
+
+- Codex: `QueueDelivery.recover`, which shares the feed worker's lock and
+  bypasses the latch once.
+- Claude with a channel: a forced ring, the same call a channel hello makes.
+- Claude native: a one-shot flag that makes the next wait answer `pending`
+  even with an unchanged cursor.
+- Anything else: a `recovery_skipped` event.
+
+A recovery report's `through` is the first unread sequence, not the highest.
+That is deliberate: it is the item the flag was raised for, and it is what the
+attempt bound counts.
+
+**Compatibility.** `PostReceiptActivity` is a new value in the closed stage
+enum, and the timeline types deny unknown fields. A strict reader built before
+B1 cannot parse a new timeline; nothing outside this crate reads them, so
+`EVENT_SCHEMA` stays 1. The new settings fields default when absent, so an old
+settings file loads.
+
+**Waits.** Ready but idle is receipt to first activity per recipient
+(`to_activity` minus `to_receipt`, both measured from the commit). A recipient
+with a receipt and no activity is idle for as long as the run lasts, and the
+report says it is still open.
+
+**Tests.** `tests/wake_activity.rs` has five tests over real SQLite, one of
+them through the real connector socket. The driver tests cover each wake path,
+a lost report, the recovery paths for all three hosts and the loop's stop.
+
+Mutants, each run against the full crate suite (17):
+
+- Killed (14): failed counts as woken; dispatch first wins; activity needs a
+  receipt; activity first wins; the activity label check; the failure label
+  check; a recent attempt blocks recovery; only recovery attempts use the
+  bound; commit age; check counted as activity; the status flag wired to
+  `binding_status`; the member settings patch applies; the hint bound and the
+  wake stage events (both survived the first run and were killed after the
+  tests were strengthened).
+- Equivalent (2): removing the `through > 0` check (the table's CHECK
+  constraint refuses the row anyway) and removing the zero-attempts early
+  return (zero attempts already compares as used up).
+- Compile error (1): dropping `Check` from the transport list, because the
+  match is exhaustive.
+- Not tested: the fail-soft path of `recovery_due` in `binding_status`. It needs
+  a store fault the tests cannot inject without a mock.
+
+### B2: structured logs
+
+The driver's JSON log and the core's few `eprintln!` lines become one
+versioned schema with run, process instance and correlation fields, bounded in
+file size with rotation and a drop counter, and live level changes through the
+settings file. The core uses the workspace's `tracing` dependency, which is
+already locked. B2 does not feed any report line. It is for diagnosing a failed
+run, so it lands after B1 and does not block trial setup.
+
+### C: manifest, report, sampler
+
+- **Manifest.** One JSON file written before the go: build commit, host and
+  CLI versions, seats with their enrolled identities and role skills, the
+  settings revision, the isolated resources, and the user's approval-prompt
+  tally fields to fill during the run. Its sha256 goes in the report.
+- **Report.** A command that reads the candidate state and the manifest and
+  prints the section 8 template deterministically: the same inputs give the
+  same bytes. Every distribution carries its sample count, and missing
+  measurements are printed as missing.
+- **Sampler.** CPU, RSS and disk for the core and driver processes, sampled at
+  a fixed interval into a local file, normal mode and debug mode labelled.

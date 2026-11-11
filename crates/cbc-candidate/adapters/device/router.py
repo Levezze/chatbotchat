@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import queue
 import re
 import select
 import signal
@@ -119,15 +120,23 @@ class DeviceRouter(claude.Router):
         self.native_sessions = set()
         self.native_pending = set()
         self.native_slots = threading.BoundedSemaphore(native.MAX_WAITERS)
+        # #113 B1. Reports leave the delivery path through one bounded queue and one worker,
+        # so a slow or absent core can never delay or fail a delivery.
+        self.wake_reports = queue.Queue(maxsize=256)
+        self.wake_sender = lambda grant, request: self.bounded_call(grant, request, 2.0)
+        self.latest_hint = {}
+        self.native_recover = set()
+        self.recovery_interval = 60.0
         handlers = {}
         for session, binding in bindings.items():
             key = (binding["context"], binding["member"])
             if targets[session] == "claude":
-                handlers[key] = lambda _hint, session=session: self.deliver_hint(session)
+                handlers[key] = self.claude_handler(session)
             else:
                 queued[session].event = self.event
                 queued[session].status_provider = lambda binding=binding: self.core_call(
                     binding, {"op": "binding_status"})
+                queued[session].reporter = self.codex_reporter(binding)
                 handlers[key] = queued[session]
         self.handlers = handlers
 
@@ -149,6 +158,120 @@ class DeviceRouter(claude.Router):
         if self.quarantined:
             with self.registry_lock:
                 self.install_registry()
+        threading.Thread(target=self.report_worker, name="cbc-wake-reports", daemon=True).start()
+
+    def claude_handler(self, session):
+        def handler(hint):
+            sequence = hint.get("sequence") if isinstance(hint, dict) else None
+            if type(sequence) is int and sequence > 0:
+                with self.native_ready:
+                    self.latest_hint[session] = max(sequence, self.latest_hint.get(session, 0))
+            return self.deliver_hint(session)
+        return handler
+
+    def codex_reporter(self, binding):
+        return lambda through, outcome, failure, recovery: self.report_wake(
+            binding, through, "codex_queue", outcome, failure, recovery)
+
+    def report_wake(self, binding, through, kind, outcome, failure=None, recovery=False):
+        """Enqueue one wake attempt for the core. Never blocks and never raises."""
+        if type(through) is not int or through < 1:
+            return
+        request = {"op": "wake", "through": through, "kind": kind, "outcome": outcome,
+                   "recovery": bool(recovery), "driver_wall_ms": int(time.time() * 1000)}
+        if failure is not None:
+            request["failure"] = failure
+        try:
+            self.wake_reports.put_nowait((dict(binding), request))
+        except queue.Full:
+            self.event("wake_report_dropped", member=binding["member"])
+
+    def report_worker(self):
+        while True:
+            try:
+                grant, request = self.wake_reports.get(timeout=0.2)
+            except queue.Empty:
+                if self.feed.stopped.is_set():
+                    return
+                continue
+            try:
+                reply = self.wake_sender(grant, request)
+                if not isinstance(reply, dict) or reply.get("type") != "woken":
+                    self.event("wake_report_failed", member=grant["member"], reason="rejected")
+            except Exception as error:  # a lost report must never reach a delivery path
+                self.event("wake_report_failed", member=grant["member"],
+                           reason=type(error).__name__)
+            finally:
+                self.wake_reports.task_done()
+
+    def flush_wake_reports(self, timeout):
+        deadline = time.monotonic() + timeout
+        while self.wake_reports.unfinished_tasks:
+            if time.monotonic() > deadline:
+                return False
+            time.sleep(0.005)
+        return True
+
+    def rang(self, session, batch, written, recovery):
+        binding = self.bindings.get(session)
+        sequences = [item.get("sequence") for item in batch.get("items") or []
+                     if isinstance(item, dict)]
+        sequences = [value for value in sequences if type(value) is int and value > 0]
+        if binding and sequences:
+            self.report_wake(binding, max(sequences), "claude_channel",
+                             "accepted" if written else "failed",
+                             None if written else "channel_write_failed", recovery)
+
+    def recover_native(self, session):
+        """The next wait answers pending once even if the cursor has not moved."""
+        with self.native_ready:
+            self.native_recover.add(session)
+        self.wake_native()
+
+    def recover_once(self):
+        """Re-hint each binding the core flags as overdue. Returns how many were re-hinted.
+
+        Codex recovery shares QueueDelivery's lock with the feed worker; a forced channel ring
+        is the same call a hello makes; a native mod gets a one-shot flag. None of them adds a
+        second delivery path."""
+        with self.registry_lock:
+            candidates = [(session, binding, self.targets.get(session))
+                          for session, binding in self.all_bindings.items()
+                          if session not in self.quarantined]
+        count = 0
+        for session, binding, host in candidates:
+            if self.feed.stopped.is_set():
+                break
+            status = self.read_wake_status(binding, 2.0)
+            first = status.get("first_unread_sequence")
+            if (status.get("type") != "binding_status" or status.get("recovery_due") is not True
+                    or type(first) is not int or first < 1):
+                continue
+            hint = {"context": binding["context"], "member": binding["member"], "sequence": first}
+            done = False
+            if host == "codex":
+                with self.registry_lock:
+                    callback = self.queued.get(session)
+                done = callback is not None and callback.recover(hint) is True
+            elif host == "claude":
+                is_native, channel_missing = self.native_notification_mode(session)
+                if is_native:
+                    self.recover_native(session)
+                    done = True
+                elif not channel_missing:
+                    done = self.notify(session, force=True, recovery=True).get("_notified") is True
+            if done:
+                count += 1
+            else:
+                self.event("recovery_skipped", member=binding["member"])
+        return count
+
+    def recovery_loop(self):
+        while not self.feed.stopped.wait(self.recovery_interval):
+            try:
+                self.recover_once()
+            except Exception as error:
+                self.event("recovery_failed", reason=type(error).__name__)
 
     def event(self, kind, **fields):
         # The one watch already emits this after durable changes. Waking HTTP
@@ -179,11 +302,11 @@ class DeviceRouter(claude.Router):
             channel_missing = session in self.channel_sessions and session not in self.channels
         return is_native, channel_missing
 
-    def notify(self, session, force=False):
+    def notify(self, session, force=False, recovery=False):
         """Native wake and unconnected channels must never prefetch an inbox batch."""
         is_native, channel_missing = self.native_notification_mode(session)
         if not is_native and not channel_missing:
-            return super().notify(session, force=force)
+            return super().notify(session, force=force, recovery=recovery)
         if not is_native and not force:
             return {"type": "skipped"}
         binding = self.native_binding(session)
@@ -264,6 +387,9 @@ class DeviceRouter(claude.Router):
 
     def read_wake_status(self, binding, timeout):
         """A bounded non-consuming core call, independent of MCP's long timeout."""
+        return self.bounded_call(binding, {"op": "binding_status"}, timeout)
+
+    def bounded_call(self, binding, request, timeout):
         deadline = time.monotonic() + timeout
         with socket.socket(socket.AF_UNIX) as connection:
             connection.settimeout(timeout)
@@ -271,7 +397,7 @@ class DeviceRouter(claude.Router):
                 connection.connect(self.core)
                 connection.settimeout(max(0.001, deadline - time.monotonic()))
                 connection.sendall((claude.dumps({"v": 1, "auth": binding,
-                    "request": {"op": "binding_status"}}) + "\n").encode())
+                    "request": request}) + "\n").encode())
                 raw = b""
                 while not raw.endswith(b"\n"):
                     remaining = deadline - time.monotonic()
@@ -335,7 +461,11 @@ class DeviceRouter(claude.Router):
             if first is not None and (type(first) is not int or first < 1):
                 return native.response(503)
             token = native.cursor(binding, first) if first is not None else None
-            if token is not None and token != after:
+            with self.native_ready:
+                recovering = session in self.native_recover
+                if token is None:
+                    self.native_recover.discard(session)
+            if token is not None and (token != after or recovering):
                 # Revalidate both native process identity and binding authority
                 # after I/O. Never deliver an event for a replaced/revoked chat.
                 if (self.native_identity(pid, uid) != session
@@ -357,7 +487,12 @@ class DeviceRouter(claude.Router):
                 if (self.native_identity(pid, uid) != session
                         or self.native_binding(session) != binding):
                     return native.response(401)
+                with self.native_ready:
+                    recovery = session in self.native_recover
+                    self.native_recover.discard(session)
+                    through = max(fresh_first, self.latest_hint.get(session, 0))
                 self.event("native_mod_pending", member=binding["member"])
+                self.report_wake(binding, through, "claude_mod", "accepted", None, recovery)
                 return native.response(200, {"v": 1, "type": "pending", "cursor": token})
             with self.native_ready:
                 if generation != self.native_generation:
@@ -458,7 +593,7 @@ class DeviceRouter(claude.Router):
             for session, binding in bindings.items():
                 key = (binding["context"], binding["member"])
                 if targets[session] == "claude":
-                    handlers[key] = lambda _hint, session=session: self.deliver_hint(session)
+                    handlers[key] = self.claude_handler(session)
                 else:
                     if not self.codex_executable:
                         raise ValueError("Codex executable missing")
@@ -466,6 +601,7 @@ class DeviceRouter(claude.Router):
                     callback = (prior if prior and self.all_bindings.get(session) == binding
                                 else codex.QueueDelivery(self.codex_executable, session, self.event))
                     callback.status_provider = lambda binding=binding: self.core_call(binding, {"op": "binding_status"})
+                    callback.reporter = self.codex_reporter(binding)
                     queued[session] = handlers[key] = callback
             self.all_bindings, self.targets, self.queued, self.handlers = bindings, targets, queued, handlers
             self.native_targets = native_targets
@@ -536,6 +672,7 @@ def run(router, listen_path, stopped=None):
     refresh = threading.Event()
     server, inode = claude.listen(listen_path)
     follower = threading.Thread(target=router.follow_feed, name="cbc-shared-device-feed")
+    recovery = threading.Thread(target=router.recovery_loop, name="cbc-wake-recovery")
 
     def stop(*_args):
         stopped.set()
@@ -557,6 +694,7 @@ def run(router, listen_path, stopped=None):
                 pass
         signal.signal(signal.SIGHUP, request_refresh)
     follower.start()
+    recovery.start()
     try:
         while not stopped.is_set():
             ready = select.select([server, router.wake_read, *router.channel_sockets()], [], [])[0]
@@ -588,6 +726,7 @@ def run(router, listen_path, stopped=None):
     finally:
         stop()
         follower.join()
+        recovery.join()
         for connection in router.channel_sockets():
             router.drop_channel(connection)
         router.wake_read.close()

@@ -4,6 +4,7 @@ use crate::{
     bindings::SessionBinding,
     dashboard::session::Sessions,
     enrollment::{Connection, ConnectionKind, DirectoryEntry},
+    facts::{WakeKind, WakeOutcome, WakeReport},
     inbox::{Batch, InboxChange, Item, MAX_BATCH_HARD_BYTES, MAX_ITEMS},
     owner::{OwnerControl, ProvisionSpec},
     settings::{DispatchPolicy, RuntimeSettings, RuntimeSettingsService, SettingsSnapshot},
@@ -339,6 +340,50 @@ enum Operation {
     Request {
         request: requests::RequestOperation,
     },
+    /// The device driver's report of one wake attempt for this binding (#113 B1). Transport:
+    /// it never counts as the member's own activity.
+    Wake {
+        through: i64,
+        kind: WakeKind,
+        outcome: WakeOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure: Option<String>,
+        recovery: bool,
+        driver_wall_ms: i64,
+    },
+}
+
+impl Operation {
+    /// The name recorded as the member's first activity after a receipt. None for transport:
+    /// reading, receipting, status, settings, watching and wake reports are done by the host
+    /// adapters on the member's behalf, so they say nothing about the member itself.
+    fn activity(&self) -> Option<&'static str> {
+        match self {
+            Self::Discover { .. } => Some("discover"),
+            Self::Connect { .. } => Some("connect"),
+            Self::Send { .. } => Some("send"),
+            Self::Close { .. } => Some("close"),
+            Self::Work { .. } => Some("work"),
+            Self::Request { .. } => Some("request"),
+            Self::Check
+            | Self::BindingStatus
+            | Self::Settings
+            | Self::Watch { .. }
+            | Self::WatchMembers { .. }
+            | Self::Receipt { .. }
+            | Self::Wake { .. } => None,
+        }
+    }
+}
+
+/// Content-free snapshot for the device driver, with the recovery flag the core derives from
+/// the member's live settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindingStatus {
+    pub last_receipted_sequence: i64,
+    pub first_unread_sequence: Option<i64>,
+    pub native_target: Option<crate::native_target::NativeTarget>,
+    pub recovery_due: bool,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -349,6 +394,10 @@ enum Reply {
         first_unread_sequence: Option<i64>,
         #[serde(deserialize_with = "crate::native_target::required_target")]
         native_target: Option<crate::native_target::NativeTarget>,
+        recovery_due: bool,
+    },
+    Woken {
+        covered: u64,
     },
     OwnerResult {
         value: serde_json::Value,
@@ -597,13 +646,37 @@ async fn dispatch(
 ) -> Result<Reply> {
     ensure!(request.v == 1, "unsupported candidate protocol");
     let binding = request.auth.binding()?;
+    if let Some(operation) = request.request.activity() {
+        store.record_activity(&binding, operation).await?;
+    }
     Ok(match request.request {
         Operation::BindingStatus => match store.binding_activity(&binding).await? {
-            Some(activity) => Reply::BindingStatus {
-                last_receipted_sequence: activity.last_receipted_sequence,
-                first_unread_sequence: activity.first_unread_sequence,
-                native_target: activity.native_target,
-            },
+            Some(activity) => {
+                // Fail-soft: the native waiter, the Codex latch and startup verification all read
+                // this status, so a recovery computation error must never fail it. A false flag
+                // only skips one recovery pass.
+                let recovery_due = async {
+                    let member = store.current_member(&binding).await?;
+                    let policy = settings
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("settings unavailable"))?
+                        .refresh()
+                        .effective(&member.context_id, member.role.as_str(), &member.member_id)
+                        .policy;
+                    let interval = i64::try_from(policy.recovery_after_ms).unwrap_or(i64::MAX);
+                    store
+                        .recovery_due(&binding, interval, policy.recovery_attempts)
+                        .await
+                }
+                .await
+                .unwrap_or(false);
+                Reply::BindingStatus {
+                    last_receipted_sequence: activity.last_receipted_sequence,
+                    first_unread_sequence: activity.first_unread_sequence,
+                    native_target: activity.native_target,
+                    recovery_due,
+                }
+            }
             None => Reply::Error {
                 code: Some("invalid_binding".into()),
                 message: "invalid or superseded binding".into(),
@@ -684,6 +757,28 @@ async fn dispatch(
         },
         Operation::Request { request } => Reply::Request {
             result: requests::dispatch(store, &binding, request).await?,
+        },
+        Operation::Wake {
+            through,
+            kind,
+            outcome,
+            failure,
+            recovery,
+            driver_wall_ms,
+        } => Reply::Woken {
+            covered: store
+                .record_wake(
+                    &binding,
+                    &WakeReport {
+                        through,
+                        kind,
+                        outcome,
+                        failure,
+                        recovery,
+                        driver_wall_ms,
+                    },
+                )
+                .await?,
         },
     })
 }
@@ -799,6 +894,40 @@ pub struct BoundSettings {
     pub valid: bool,
 }
 impl<'a> LocalClient<'a> {
+    pub async fn binding_status(&self) -> Result<BindingStatus> {
+        match self.call(Operation::BindingStatus).await? {
+            Reply::BindingStatus {
+                last_receipted_sequence,
+                first_unread_sequence,
+                native_target,
+                recovery_due,
+            } => Ok(BindingStatus {
+                last_receipted_sequence,
+                first_unread_sequence,
+                native_target,
+                recovery_due,
+            }),
+            _ => anyhow::bail!("unexpected candidate response"),
+        }
+    }
+    /// Returns how many unread items the attempt covered.
+    pub async fn report_wake(&self, report: &WakeReport) -> Result<u64> {
+        let report = report.clone();
+        match self
+            .call(Operation::Wake {
+                through: report.through,
+                kind: report.kind,
+                outcome: report.outcome,
+                failure: report.failure,
+                recovery: report.recovery,
+                driver_wall_ms: report.driver_wall_ms,
+            })
+            .await?
+        {
+            Reply::Woken { covered } => Ok(covered),
+            _ => anyhow::bail!("unexpected candidate response"),
+        }
+    }
     pub async fn settings(&self) -> Result<BoundSettings> {
         match self.call(Operation::Settings).await? {
             Reply::Settings { settings } => Ok(settings),

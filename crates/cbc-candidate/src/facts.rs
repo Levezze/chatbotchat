@@ -1,9 +1,11 @@
 //! Durable first-occurrence delivery facts and a versioned, content-free event projection (#113 PR-A).
 //!
 //! Facts are written inside the send, check and receipt transactions, so they are durable
-//! whatever the log level and a failed receipt can never leave a false "receipted". Only the
-//! stages the core observes itself have a write path here; dispatch, native wake and result
-//! stages are declared for the schema and are written by the authenticated connector route.
+//! whatever the log level and a failed receipt can never leave a false "receipted". Dispatch and
+//! native wake come from the device driver's authenticated wake reports (#113 B1); the first
+//! activity after a receipt is the member's first non-transport core operation. Result writing
+//! has no record of its own: both adapters write the result before they receipt it.
+use crate::bindings::{validate_on, SessionBinding};
 use crate::store::Store;
 use anyhow::{ensure, Result};
 use rand::{rngs::OsRng, RngCore};
@@ -23,6 +25,9 @@ pub enum Stage {
     InboxOffered,
     ResultWritten,
     Receipted,
+    /// The member's first non-transport CBC operation after the receipt. Not proof the item was
+    /// read or used.
+    PostReceiptActivity,
     ActedOn,
 }
 
@@ -107,6 +112,59 @@ impl Interval {
     }
 }
 
+/// How the device driver tried to wake a native session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeKind {
+    ClaudeChannel,
+    CodexQueue,
+    ClaudeMod,
+}
+
+impl WakeKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ClaudeChannel => "claude_channel",
+            Self::CodexQueue => "codex_queue",
+            Self::ClaudeMod => "claude_mod",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeOutcome {
+    /// The host took the hint: the channel write or queue command succeeded.
+    Accepted,
+    Failed,
+}
+
+/// One wake attempt, reported by the device driver with the member's own binding. A hint covers
+/// the member's unread items up to `through`, so one attempt can stand for many items.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WakeReport {
+    pub through: i64,
+    pub kind: WakeKind,
+    pub outcome: WakeOutcome,
+    /// A short class such as `channel_closed`; required exactly when the outcome is `failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+    /// Sent by the recovery path rather than by a new item.
+    pub recovery: bool,
+    /// The driver's own wall clock when it saw the outcome. Kept beside the core's stamp; never
+    /// compared to it as if the two clocks agreed.
+    pub driver_wall_ms: i64,
+}
+
+/// A failure class or an operation name: 1 to 64 of `[a-z0-9_]`.
+fn valid_label(label: &str) -> bool {
+    (1..=64).contains(&label.len())
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecipientTimeline {
     pub member: String,
@@ -115,9 +173,19 @@ pub struct RecipientTimeline {
     pub offer_count: i64,
     pub offered: Option<Stamp>,
     pub receipted: Option<Stamp>,
-    /// None when either end is unknown.
+    /// The first wake attempt that covered this item, whatever its outcome.
+    pub dispatched: Option<Stamp>,
+    /// The first accepted wake that covered this item.
+    pub woken: Option<Stamp>,
+    /// The first non-transport operation after the receipt, and which one.
+    pub active: Option<Stamp>,
+    pub active_operation: Option<String>,
+    /// None when either end is unknown. Each is measured from the commit.
     pub to_offer: Option<Interval>,
     pub to_receipt: Option<Interval>,
+    /// Includes the report's own hop over the local socket.
+    pub to_wake: Option<Interval>,
+    pub to_activity: Option<Interval>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -269,6 +337,102 @@ impl Store {
         &self.clock.instance
     }
 
+    /// Record one wake attempt reported with the member's own binding, and mark the first
+    /// dispatch (and, if accepted, the first wake) of each of its unread items up to `through`.
+    /// Returns how many unread items the attempt covered, already marked or not.
+    pub async fn record_wake(&self, binding: &SessionBinding, report: &WakeReport) -> Result<u64> {
+        ensure!(report.through > 0, "invalid wake: through must be positive");
+        match (report.outcome, report.failure.as_deref()) {
+            (WakeOutcome::Accepted, None) => {}
+            (WakeOutcome::Failed, Some(failure)) if valid_label(failure) => {}
+            (WakeOutcome::Failed, Some(_)) => {
+                anyhow::bail!("invalid wake: failure must be 1 to 64 of [a-z0-9_]")
+            }
+            _ => anyhow::bail!("invalid wake: a failure class goes with a failed outcome only"),
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        validate_on(&mut tx, binding).await?;
+        let (mono, wall) = self.clock.now();
+        sqlx::query("INSERT INTO candidate_wake_attempts(context_id,member_id,through_sequence,kind,outcome,failure,recovery,reported_instance,reported_mono_us,reported_wall_ms,driver_wall_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+            .bind(&binding.context_id).bind(&binding.member_id).bind(report.through)
+            .bind(report.kind.as_str())
+            .bind(match report.outcome { WakeOutcome::Accepted => "accepted", WakeOutcome::Failed => "failed" })
+            .bind(report.failure.as_deref()).bind(report.recovery)
+            .bind(&self.clock.instance).bind(mono).bind(wall).bind(report.driver_wall_ms)
+            .execute(&mut *tx).await?;
+        let woken = report.outcome == WakeOutcome::Accepted;
+        let covered = sqlx::query("INSERT INTO candidate_recipient_facts(sequence,member_id,expected,dispatched_instance,dispatched_mono_us,dispatched_wall_ms,woken_instance,woken_mono_us,woken_wall_ms) SELECT DISTINCT sequence,?,0,?,?,?,?,?,? FROM candidate_unread_items WHERE context_id=? AND recipient=? AND sequence<=? ON CONFLICT(sequence,member_id) DO UPDATE SET dispatched_instance=COALESCE(dispatched_instance,excluded.dispatched_instance), dispatched_mono_us=COALESCE(dispatched_mono_us,excluded.dispatched_mono_us), dispatched_wall_ms=COALESCE(dispatched_wall_ms,excluded.dispatched_wall_ms), woken_instance=COALESCE(woken_instance,excluded.woken_instance), woken_mono_us=COALESCE(woken_mono_us,excluded.woken_mono_us), woken_wall_ms=COALESCE(woken_wall_ms,excluded.woken_wall_ms)")
+            .bind(&binding.member_id).bind(&self.clock.instance).bind(mono).bind(wall)
+            .bind(woken.then_some(self.clock.instance.as_str())).bind(woken.then_some(mono)).bind(woken.then_some(wall))
+            .bind(&binding.context_id).bind(&binding.member_id).bind(report.through)
+            .execute(&mut *tx).await?.rows_affected();
+        tx.commit().await?;
+        Ok(covered)
+    }
+
+    /// Mark each of the member's receipted items that has no activity yet with this operation.
+    /// Called by the connector before a non-transport operation runs, so an attempt counts.
+    pub async fn record_activity(&self, binding: &SessionBinding, operation: &str) -> Result<()> {
+        ensure!(valid_label(operation), "invalid operation name");
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        validate_on(&mut tx, binding).await?;
+        let (mono, wall) = self.clock.now();
+        sqlx::query("UPDATE candidate_recipient_facts SET active_instance=?, active_mono_us=?, active_wall_ms=?, active_operation=? WHERE member_id=? AND receipted_instance IS NOT NULL AND active_instance IS NULL AND EXISTS (SELECT 1 FROM candidate_items i WHERE i.sequence=candidate_recipient_facts.sequence AND i.context_id=?)")
+            .bind(&self.clock.instance).bind(mono).bind(wall).bind(operation)
+            .bind(&binding.member_id).bind(&binding.context_id)
+            .execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Whether the driver should re-hint the member: an unread item has waited longer than
+    /// `interval_ms` since its commit, no wake attempt came within `interval_ms`, and fewer than
+    /// `attempts` recovery attempts have covered the oldest unread item. Zero attempts is off.
+    /// Read on the core's own wall clock.
+    pub async fn recovery_due(
+        &self,
+        binding: &SessionBinding,
+        interval_ms: i64,
+        attempts: u32,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        validate_on(&mut tx, binding).await?;
+        if attempts == 0 {
+            return Ok(false);
+        }
+        let Some(oldest): Option<i64> = sqlx::query_scalar(
+            "SELECT MIN(sequence) FROM candidate_unread_items WHERE context_id=? AND recipient=?",
+        )
+        .bind(&binding.context_id)
+        .bind(&binding.member_id)
+        .fetch_one(&mut *tx)
+        .await?
+        else {
+            return Ok(false);
+        };
+        let now = wall_ms();
+        // An item committed before the facts existed has no commit time: treat it as old.
+        let committed: Option<i64> = sqlx::query_scalar(
+            "SELECT committed_wall_ms FROM candidate_item_facts WHERE sequence=?",
+        )
+        .bind(oldest)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if now - committed.unwrap_or(0) < interval_ms {
+            return Ok(false);
+        }
+        let row = sqlx::query("SELECT MAX(reported_wall_ms) AS last, COALESCE(SUM(recovery=1 AND through_sequence>=?),0) AS recoveries FROM candidate_wake_attempts WHERE context_id=? AND member_id=?")
+            .bind(oldest).bind(&binding.context_id).bind(&binding.member_id)
+            .fetch_one(&mut *tx).await?;
+        let last: Option<i64> = row.try_get("last")?;
+        let recoveries: i64 = row.try_get("recoveries")?;
+        tx.commit().await?;
+        if last.is_some_and(|last| now - last < interval_ms) {
+            return Ok(false);
+        }
+        Ok(recoveries < i64::from(attempts))
+    }
+
     /// Trusted administration (owner and dashboard). None only when the item does not exist.
     pub async fn delivery_timeline(
         &self,
@@ -328,6 +492,9 @@ impl Store {
         for row in rows {
             let offered = stamp(&row, "offered")?;
             let receipted = stamp(&row, "receipted")?;
+            let dispatched = stamp(&row, "dispatched")?;
+            let woken = stamp(&row, "woken")?;
+            let active = stamp(&row, "active")?;
             let span = |end: &Option<Stamp>| match (&committed, end) {
                 (Some(from), Some(to)) => Some(Interval::between(from, to)),
                 _ => None,
@@ -338,8 +505,14 @@ impl Store {
                 offer_count: row.try_get("offer_count")?,
                 to_offer: span(&offered),
                 to_receipt: span(&receipted),
+                to_wake: span(&woken),
+                to_activity: span(&active),
                 offered,
                 receipted,
+                dispatched,
+                woken,
+                active,
+                active_operation: row.try_get("active_operation")?,
             });
             tags.push(row.try_get("first_batch_tag")?);
         }
@@ -390,6 +563,15 @@ impl Store {
             }
             if let Some(at) = &recipient.receipted {
                 events.push(event(Stage::Receipted, Some(&recipient.member), at, None));
+            }
+            for (stage, at) in [
+                (Stage::DispatchStarted, &recipient.dispatched),
+                (Stage::NativeWakeAccepted, &recipient.woken),
+                (Stage::PostReceiptActivity, &recipient.active),
+            ] {
+                if let Some(at) = at {
+                    events.push(event(stage, Some(&recipient.member), at, None));
+                }
             }
         }
         // Oldest first. Instances are ordered by when they opened (one owner at a time), and

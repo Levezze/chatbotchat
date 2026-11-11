@@ -117,6 +117,7 @@ async fn live_owner_provisioning_discovery_and_settings_share_the_running_core()
             retry_initial_ms: Some(125),
             retry_max_ms: Some(500),
             room_notice_every_messages: Some(99),
+            ..PolicyPatch::default()
         },
     );
     update.members.entry("test".into()).or_default().insert(
