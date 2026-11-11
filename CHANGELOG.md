@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.0](https://github.com/Levezze/chatbotchat/compare/v0.22.0...v0.23.0) (2026-11-11)
+
+
+### Features
+
+* **candidate:** request routes with scoped, paged reads and request-event wakes (R3b) ([#140](https://github.com/Levezze/chatbotchat/issues/140)) ([9334490](https://github.com/Levezze/chatbotchat/commit/9334490dce3ed308eaf36b78c67ff2b8108be41a))
+
 ## [0.22.0](https://github.com/Levezze/chatbotchat/compare/v0.21.0...v0.22.0) (2026-11-11)
 
 
