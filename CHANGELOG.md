@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.28.0](https://github.com/Levezze/chatbotchat/compare/v0.27.0...v0.28.0) (2026-11-11)
+
+
+### Features
+
+* **candidate:** trial snapshots, read-only evidence and the run manifest (C1) ([#152](https://github.com/Levezze/chatbotchat/issues/152)) ([d16a3c5](https://github.com/Levezze/chatbotchat/commit/d16a3c54a2356011df8f92466f05ad6f6872a801))
+
 ## [0.27.0](https://github.com/Levezze/chatbotchat/compare/v0.26.0...v0.27.0) (2026-11-11)
 
 
