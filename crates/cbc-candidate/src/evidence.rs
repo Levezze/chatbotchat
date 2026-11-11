@@ -6,7 +6,7 @@ use crate::{settings::SettingsSnapshot, store::Store, Sandbox, APPLICATION_ID, S
 use anyhow::{ensure, Context, Result};
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use std::{
@@ -17,15 +17,40 @@ use std::{
 };
 
 const SNAPSHOT_DIR: &str = "snapshots";
-/// The kinds of approval prompt the user counts during a run (protocol §6).
-pub const APPROVAL_KINDS: [&str; 4] = ["cbc", "native_setup", "native_refusal", "other"];
 
-/// A frozen copy of the candidate database, written by the core that owns it.
+/// The build a core runs: the compile-time `CBC_BUILD_COMMIT` and the hash of its executable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Build {
+    pub commit: String,
+    pub binary_sha256: String,
+}
+
+static BUILD: std::sync::OnceLock<Build> = std::sync::OnceLock::new();
+
+/// This process's build. The executable is hashed on the first call, so a core calls this as it
+/// starts: a binary replaced on disk later must not be credited with what the core did.
+pub fn build() -> Result<&'static Build> {
+    if let Some(build) = BUILD.get() {
+        return Ok(build);
+    }
+    let build = Build {
+        commit: option_env!("CBC_BUILD_COMMIT")
+            .unwrap_or("unknown")
+            .to_owned(),
+        binary_sha256: sha256_file(&std::env::current_exe()?)?,
+    };
+    Ok(BUILD.get_or_init(|| build))
+}
+
+/// A frozen copy of the candidate database, written by the core that owns it, with the build
+/// of that core: the manifest records the build that produced the evidence, not the caller's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Snapshot {
     pub file: PathBuf,
     pub taken_wall_ms: i64,
+    pub build: Build,
 }
 
 /// Owner operation, run inside the core: `VACUUM INTO` a file created here and now, so a
@@ -68,6 +93,7 @@ pub(crate) async fn take_snapshot(store: &Store, root: &Path) -> Result<Snapshot
     Ok(Snapshot {
         file,
         taken_wall_ms,
+        build: build()?.clone(),
     })
 }
 
@@ -98,8 +124,6 @@ type SeatRow = (
 /// Values the manifest takes from outside the snapshot.
 pub struct ManifestInput {
     pub trial: u32,
-    pub build_commit: String,
-    pub binary_sha256: String,
     pub versions: BTreeMap<String, String>,
     pub notes: BTreeMap<String, String>,
     pub settings: SettingsSnapshot,
@@ -211,18 +235,10 @@ impl Evidence {
             "manifest snapshot differs from the opened evidence"
         );
         let seats = self.seats().await?;
-        let mut approvals = Map::new();
-        for seat in &seats {
-            let tally: Map<String, Value> = APPROVAL_KINDS
-                .iter()
-                .map(|kind| ((*kind).to_owned(), Value::Null))
-                .collect();
-            approvals.insert(format!("{}/{}", seat.context, seat.member), tally.into());
-        }
         Ok(json!({
             "trial": input.trial,
             "schema_version": SCHEMA_VERSION,
-            "build": {"commit": input.build_commit, "binary_sha256": input.binary_sha256},
+            "build": snapshot.build,
             "snapshot": {
                 "file": snapshot.file,
                 "taken_wall_ms": snapshot.taken_wall_ms,
@@ -232,7 +248,6 @@ impl Evidence {
             "notes": input.notes,
             "settings": input.settings,
             "seats": seats,
-            "approval_prompts": approvals,
         }))
     }
 }
@@ -240,7 +255,6 @@ impl Evidence {
 /// Manifest values the operator supplies on the command line.
 pub struct ManifestArgs {
     pub trial: u32,
-    pub build_commit: String,
     pub versions: BTreeMap<String, String>,
     pub notes: BTreeMap<String, String>,
 }
@@ -259,18 +273,25 @@ pub async fn record_manifest(
         .file_name()
         .and_then(|name| name.to_str())
         .context("manifest name must be UTF-8")?;
+    // `out` may spell the root through an alias (on macOS /tmp is /private/tmp). Resolve the
+    // root part only, then write to the sandbox's own spelling of the snapshot directory.
+    let parent = out.parent().filter(|_| out.is_absolute());
+    let in_dir = parent.is_some_and(|parent| {
+        parent.file_name() == Some(std::ffi::OsStr::new(SNAPSHOT_DIR))
+            && parent
+                .parent()
+                .and_then(|root| root.canonicalize().ok())
+                .is_some_and(|root| root == sandbox.root())
+    });
     ensure!(
-        out.is_absolute()
-            && out.parent() == Some(dir.as_path())
-            && name.ends_with(".json")
-            && !name.starts_with('.'),
+        in_dir && name.ends_with(".json") && !name.starts_with('.'),
         "manifest must be a new .json file directly beneath the candidate snapshot directory"
     );
+    let out = &dir.join(name);
     ensure!(
         fs::symlink_metadata(out).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound),
         "manifest file must not exist yet"
     );
-    let binary_sha256 = sha256_file(&std::env::current_exe()?)?;
     let snapshot = owner.snapshot().await?;
     let mut file = fs::OpenOptions::new()
         .write(true)
@@ -287,8 +308,6 @@ pub async fn record_manifest(
                 &snapshot,
                 &ManifestInput {
                     trial: args.trial,
-                    build_commit: args.build_commit,
-                    binary_sha256,
                     versions: args.versions,
                     notes: args.notes,
                     settings,

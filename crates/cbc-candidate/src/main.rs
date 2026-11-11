@@ -152,7 +152,6 @@ async fn main() -> anyhow::Result<()> {
                 &out,
                 cbc_candidate::evidence::ManifestArgs {
                     trial,
-                    build_commit: option_env!("CBC_BUILD_COMMIT").unwrap_or("unknown").into(),
                     versions: versions.into_iter().collect(),
                     notes: notes.into_iter().collect(),
                 },
@@ -285,6 +284,8 @@ async fn main() -> anyhow::Result<()> {
             protected_dbs.push(protected_db);
             let sandbox = cbc_candidate::Sandbox::inspect(&root, &protected_dbs)?;
             protect_port(sandbox.port())?;
+            // Hash the executable now, before a later rebuild can replace it on disk.
+            cbc_candidate::evidence::build()?;
             let store = cbc_candidate::store::Store::open(&sandbox).await?;
             let mut connector = cbc_candidate::connector::LocalConnector::bind(&sandbox, store)?;
             let mut address = None;

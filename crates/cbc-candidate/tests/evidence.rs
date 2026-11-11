@@ -11,7 +11,7 @@ use cbc_candidate::{
 use std::{collections::BTreeMap, os::unix::fs::PermissionsExt};
 
 struct Core {
-    _temp: tempfile::TempDir,
+    temp: tempfile::TempDir,
     sandbox: Sandbox,
     socket: std::path::PathBuf,
     owner_key: String,
@@ -43,7 +43,7 @@ impl Core {
             let _ = stopped.await;
         }));
         let core = Self {
-            _temp: temp,
+            temp,
             sandbox,
             socket,
             owner_key,
@@ -149,8 +149,6 @@ async fn the_manifest_is_canonical_lists_seats_and_carries_no_credentials() {
     let evidence = Evidence::open(&core.sandbox, &snapshot.file).await.unwrap();
     let input = ManifestInput {
         trial: 1,
-        build_commit: "0123abcd".into(),
-        binary_sha256: "ff".repeat(32),
         versions: BTreeMap::from([
             ("os".into(), "26.1".into()),
             ("claude".into(), "2.1".into()),
@@ -189,7 +187,12 @@ async fn the_manifest_is_canonical_lists_seats_and_carries_no_credentials() {
 
     assert_eq!(parsed["trial"], 1);
     assert_eq!(parsed["schema_version"], cbc_candidate::SCHEMA_VERSION);
-    assert_eq!(parsed["build"]["commit"], "0123abcd");
+    // The build is the one the core that took the snapshot reports, not the caller's.
+    assert_eq!(
+        parsed["build"],
+        serde_json::to_value(&snapshot.build).unwrap()
+    );
+    assert_eq!(snapshot.build.binary_sha256.len(), 64);
     assert_eq!(parsed["snapshot"]["sha256"].as_str().unwrap().len(), 64);
     assert_eq!(parsed["versions"]["claude"], "2.1");
     assert_eq!(parsed["notes"]["skills_commit"], "abc");
@@ -200,11 +203,9 @@ async fn the_manifest_is_canonical_lists_seats_and_carries_no_credentials() {
     assert_eq!(lead["role"], "repo_lead");
     assert_eq!(lead["host"], "codex");
     assert_eq!(lead["session"], "lead-native");
-    // The user fills the approval tally during the run; nothing is pre-filled.
-    let tally = &parsed["approval_prompts"]["test/feature"];
-    for kind in ["cbc", "native_setup", "native_refusal", "other"] {
-        assert!(tally[kind].is_null(), "{kind} must start empty");
-    }
+    // The manifest is written once, before the go, and never edited: the user's approval
+    // tally is a separate file the report reads, so the manifest carries no slot for it.
+    assert!(parsed.get("approval_prompts").is_none());
     core.stop().await;
 }
 
@@ -214,7 +215,6 @@ async fn the_manifest_command_writes_a_new_file_beside_its_snapshot_only() {
     let core = Core::start().await;
     let args = || ManifestArgs {
         trial: 2,
-        build_commit: "unknown".into(),
         versions: BTreeMap::new(),
         notes: BTreeMap::new(),
     };
@@ -244,6 +244,22 @@ async fn the_manifest_command_writes_a_new_file_beside_its_snapshot_only() {
         .map(|b| format!("{b:02x}"))
         .collect();
     assert_eq!(parsed["snapshot"]["sha256"], digest);
+
+    // The root given on the command line may be an alias of the sandbox root (on macOS,
+    // /tmp is /private/tmp): the same directory, so the same rule applies.
+    let alias = core.temp.path().join("c/snapshots/trial-3.json");
+    assert_ne!(alias.parent().unwrap(), snapshots.as_path());
+    record_manifest(&core.sandbox, &core.owner(), &alias, args())
+        .await
+        .unwrap();
+    assert!(snapshots.join("trial-3.json").is_file());
+    // An alias still has to name the snapshot directory itself.
+    let beside = core.temp.path().join("c/trial-4.json");
+    assert!(
+        record_manifest(&core.sandbox, &core.owner(), &beside, args())
+            .await
+            .is_err()
+    );
 
     // Never overwritten, and a refused run leaves the existing record as it was.
     assert!(record_manifest(&core.sandbox, &core.owner(), &out, args())

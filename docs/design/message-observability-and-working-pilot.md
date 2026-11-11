@@ -531,8 +531,9 @@ run, so it lands after B1 and does not block trial setup.
 
 - **Manifest.** One JSON file written before the go: build commit, host and
   CLI versions, seats with their enrolled identities and role skills, the
-  settings revision, the isolated resources, and the user's approval-prompt
-  tally fields to fill during the run. Its sha256 goes in the report.
+  settings revision and the isolated resources. Its sha256 goes in the report.
+  The user's approval-prompt tally is a separate file the report reads (see
+  C1 as built): the manifest is written once and never edited.
 - **Report.** A command that reads the candidate state and the manifest and
   prints the section 8 template deterministically: the same inputs give the
   same bytes. Every distribution carries its sample count, and missing
@@ -552,7 +553,10 @@ snapshot that the running core writes on the owner's request.
   `O_NOFOLLOW`, and runs `VACUUM INTO` that file. SQLite writes into an
   existing file only when it is empty. So a snapshot never replaces a file,
   never follows a link, and is never readable by another user. If the VACUUM
-  fails, the empty file is removed. The reply is `{file, taken_wall_ms}`.
+  fails, the empty file is removed. The reply is `{file, taken_wall_ms,
+  build}`, where `build` is the running core's own `{commit,
+  binary_sha256}`. The core hashes its executable when it starts, so a binary
+  rebuilt on disk afterwards is not credited with the core's work.
 - **Evidence.** `evidence::Evidence::open` accepts only a `snapshot-*.sqlite3`
   file directly beneath the snapshot directory. The file must be a private
   regular file with one link. The sandbox is re-inspected first, so the
@@ -566,21 +570,27 @@ snapshot that the running core writes on the owner's request.
 - **Manifest.** `cbc-candidate manifest --root … --protected-db … --out
   <root>/snapshots/<name>.json --trial N [--version k=v]… [--note k=v]…`.
   - The path is checked before anything else, so a bad path or an existing
-    file costs no snapshot. The command then takes a snapshot, reads the
+    file costs no snapshot. Its directory must be named `snapshots` and its
+    parent must resolve to the sandbox root, so an alias of the root (on macOS
+    `/tmp` is `/private/tmp`) is accepted; the file is then written under the
+    sandbox's own spelling of the directory. The command then takes a snapshot, reads the
     settings snapshot, and writes the manifest with `create_new`.
   - Fields:
     - `trial`, `schema_version`;
-    - `build {commit, binary_sha256}`. The commit comes from the
-      compile-time `CBC_BUILD_COMMIT`, which the launch sheet's build command
-      sets, and is `unknown` otherwise.
+    - `build {commit, binary_sha256}`, as the core that took the snapshot
+      reports it, not the build of the command that asked. The commit comes
+      from the compile-time `CBC_BUILD_COMMIT`, which the launch sheet's
+      build command sets, and is `unknown` otherwise.
     - `snapshot {file, taken_wall_ms, sha256}`;
     - `versions`, `notes`;
     - `settings`, the full settings snapshot with its revision;
     - `seats`: context, member, role, active, retired, epoch, native session
-      and host at the current epoch;
-    - `approval_prompts`: one entry per `context/member` with `cbc`,
-      `native_setup`, `native_refusal` and `other`, all `null` until the
-      user fills them in.
+      and host at the current epoch.
+  - No approval-prompt tally. A first draft carried `null` slots for the user
+    to fill, which would have meant editing a hashed record after the go, and
+    keyed seats as `context/member`, which is ambiguous because both may
+    contain `/`. The tally is now its own file, nested by context and member,
+    passed to the report.
   - No credential digest or token is read into it, and a test asserts that
     the bytes contain neither.
   - Output is canonical: pretty JSON with keys sorted at every level and a
@@ -593,5 +603,9 @@ snapshot that the running core writes on the owner's request.
   - junk named like a snapshot is refused;
   - the live database is refused;
   - the manifest fields and canonical form are checked;
-  - the command refuses a path outside the snapshot directory and never
-    overwrites a manifest.
+  - the manifest records the build the core reports;
+  - the command refuses a path outside the snapshot directory, accepts an
+    alias of the root, and never overwrites a manifest.
+- **Review fixes.** Codex's first review of #152 found three P2s, each fixed
+  test-first: the root alias above, the build taken from the calling binary
+  instead of the core, and the ambiguous tally keys.
