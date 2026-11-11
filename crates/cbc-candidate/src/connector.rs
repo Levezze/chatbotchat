@@ -26,6 +26,7 @@ use tokio::{
     task::JoinSet,
 };
 
+mod requests;
 mod work;
 
 const MAX_REQUEST_BYTES: usize = 128 * 1024;
@@ -244,6 +245,9 @@ enum OwnerOperation {
     Work {
         work: work::OwnerWorkOperation,
     },
+    Request {
+        request: requests::OwnerRequestOperation,
+    },
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -283,6 +287,9 @@ enum Operation {
     },
     Work {
         work: work::WorkOperation,
+    },
+    Request {
+        request: requests::RequestOperation,
     },
 }
 #[derive(Serialize, Deserialize)]
@@ -328,6 +335,9 @@ enum Reply {
     },
     Work {
         result: work::WorkReply,
+    },
+    Request {
+        result: requests::RequestReply,
     },
     Error {
         message: String,
@@ -463,6 +473,7 @@ async fn owner_route(
             Ok(serde_json::to_value(snapshot)?)
         }
         OwnerOperation::Work { work } => work::owner_dispatch(store, work).await,
+        OwnerOperation::Request { request } => requests::owner_dispatch(store, request).await,
     }
 }
 
@@ -520,6 +531,7 @@ async fn route(
         &reply,
         Reply::Sent { .. } | Reply::Closed { .. } | Reply::Connected { .. }
     ) || matches!(&reply, Reply::Work { result } if result.committed())
+        || matches!(&reply, Reply::Request { result } if result.committed())
     {
         notices.send_modify(|revision| *revision = revision.wrapping_add(1));
     }
@@ -616,6 +628,9 @@ async fn dispatch(
         },
         Operation::Work { work } => Reply::Work {
             result: work::dispatch(store, &binding, work).await?,
+        },
+        Operation::Request { request } => Reply::Request {
+            result: requests::dispatch(store, &binding, request).await?,
         },
     })
 }

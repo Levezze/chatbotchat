@@ -349,6 +349,71 @@ Mutation checks:
   delivery waits, changing a label or claiming CI is known each fail a waits
   test.
 
+### R3b as built: request routes
+
+`connector/requests.rs` wires the R3 requests into the local connector. As with
+work items, it holds no rules: every authority check stays in
+`crate::requests`, and the connector only adds one variant to each of the
+member operation, owner operation and reply enums.
+
+- **Member routes**, through the member's binding:
+  - `open`, `answer`, `withdraw` and `applied`: the R3 writes. None of them
+    takes a channel or an actor; both come from the binding. Unknown fields
+    are refused, so a caller can't pass either one.
+  - `get`: one request.
+  - `answers`: a page of a request's answers.
+  - `pending`: a page of the member's own waiting requests.
+- **Owner routes:** `answer`, `get`, `answers`, and `pending` across the
+  context. The owner answer is the only route that records the `owner`
+  channel.
+- **Read scope.** A member reads a request if it asked it, if it owns it, or if
+  it is a repo lead, which is the work-item rule. Anyone else gets "unknown
+  request", the same refusal as for a missing one.
+  - A relayer who is none of these can't read the request, and needs nothing
+    more than its unguessable ID to relay. That ID reaches the relayer out of
+    band, normally from the user in chat.
+  - This is part of the relay policy awaiting the user's review.
+  - The `pending` list is the member's own, a repo lead's included. A repo
+    lead reads other members' requests one at a time.
+- **Bounded pages.** The connector refuses the whole call if a reply exceeds
+  its limit (128 KiB plus 8 KiB); it does not truncate.
+  - A question or answer is at most 4000 characters, about 16 KB on the wire
+    at four bytes a character. `MAX_REQUEST_PAGE` is therefore 7, and both
+    lists and answer histories come in pages of at most that.
+  - A test sends a full page of the largest questions, and of the largest
+    answers, over both routes. A cap of 10 fails it.
+  - Requests page by ID and answers by answer ID, so a page never repeats or
+    skips a row.
+  - The unbounded `open_requests` stays a trusted in-process read and is not
+    exposed.
+- **Waking.**
+  - An `open`, `answer` or `withdraw` reply bumps the watch revision, as a
+    committed work event does. A replayed open bumps it too; the watcher finds
+    nothing new and parks again.
+  - `applied` commits no event and wakes nobody.
+  - The owner route already bumps the revision on every success.
+  - Each event path has a parked-watcher test: an open wakes the member owner,
+    a member answer and a relay wake the asker, the user's answer wakes the
+    asker, and a withdrawal wakes the member owner.
+- **Wire refusals are uniform.** Every member error reaches the client as
+  "candidate operation rejected". Wire tests therefore assert only success or
+  failure, and the store tests in `tests/request_reads.rs` assert the reasons.
+
+Mutation checks:
+- Dropping the request arm from the wake condition fails three wake tests.
+  Dropping `open`, `answer` or `withdraw` from `committed` fails the matching
+  one.
+- Each part of the read rule is checked. Letting the asker, the owner or a
+  repo lead not read fails a read test, and so does letting anyone read.
+- Listing others' requests, or listing answered and withdrawn ones, fails the
+  pending test.
+- Repeating the page boundary, or dropping either page cap, fails a paging
+  test.
+- Reading answers of a missing request on the owner route fails the answers
+  test.
+- A page cap of 10 fails the full-page wire test.
+- Accepting unknown fields fails the wire-form unit test.
+
 ## Registration, controls and eligible merge
 
 A Chapter Master registers its work item (assignment summary, branch/worktree,
