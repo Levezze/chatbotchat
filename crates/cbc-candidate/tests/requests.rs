@@ -624,3 +624,43 @@ async fn a_peer_is_asked_in_the_peer_room() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].0, room);
 }
+
+/// The longest question and answer, in the widest characters or the ones that escape worst,
+/// still fit the inbox's item and batch limits and arrive intact.
+#[tokio::test]
+async fn the_largest_question_and_answer_are_delivered() {
+    let case = fixture().await;
+    for (n, text) in ["😀".repeat(4000), "\"".repeat(4000), "\n\\".repeat(2000)]
+        .into_iter()
+        .enumerate()
+    {
+        let request = case
+            .store
+            .open_request(
+                &case.worker,
+                &lead(),
+                None,
+                &format!("q{text}"),
+                &format!("k-{n}"),
+            )
+            .await
+            .unwrap_err();
+        assert!(message(request).contains("longer than"), "4001 characters");
+        let id = case
+            .store
+            .open_request(&case.worker, &lead(), None, &text, &format!("o-{n}"))
+            .await
+            .unwrap()
+            .request;
+        let opened = requests_for(&case.store, &case.lead).await;
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0].1["question"], text.trim());
+        case.store
+            .answer_request(&case.lead, &id, &text, &format!("a-{n}"))
+            .await
+            .unwrap();
+        let answered = requests_for(&case.store, &case.worker).await;
+        assert_eq!(answered.len(), 1);
+        assert_eq!(answered[0].1["body"], text.trim());
+    }
+}
