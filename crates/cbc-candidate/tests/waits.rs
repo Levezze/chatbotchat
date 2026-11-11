@@ -88,24 +88,29 @@ async fn open_requests_and_unread_items_are_classified() {
         )
         .await
         .unwrap();
-    for (id, owner) in [
+    let mut ids = std::collections::HashMap::new();
+    for (name, owner) in [
         ("for-user", RequestOwner::User),
         ("for-lead", RequestOwner::Member("lead".into())),
         ("for-peer", RequestOwner::Member("other".into())),
         ("relayed", RequestOwner::User),
         ("answered", RequestOwner::Member("lead".into())),
     ] {
-        case.store
-            .open_request(&case.worker, id, &owner, None, "?", id)
+        let request = case
+            .store
+            .open_request(&case.worker, &owner, None, "?", name)
             .await
-            .unwrap();
+            .unwrap()
+            .request;
+        ids.insert(request, name);
     }
+    let id = |name: &str| ids.iter().find(|(_, n)| **n == name).unwrap().0.clone();
     case.store
-        .answer_request(&case.worker, "relayed", "the user said yes", "r-1")
+        .answer_request(&case.worker, &id("relayed"), "the user said yes", "r-1")
         .await
         .unwrap();
     case.store
-        .answer_request(&case.lead, "answered", "yes", "a-1")
+        .answer_request(&case.lead, &id("answered"), "yes", "a-1")
         .await
         .unwrap();
     // The worker reads everything it was sent, so only its requests remain.
@@ -122,15 +127,15 @@ async fn open_requests_and_unread_items_are_classified() {
         .await
         .unwrap()
         .into_iter()
-        .map(|wait| (wait.request.unwrap(), wait.cause))
+        .map(|wait| (ids[&wait.request.unwrap()], wait.cause))
         .collect::<Vec<_>>();
     worker.sort();
     assert_eq!(
         worker,
         vec![
-            ("for-lead".into(), Some(WaitCause::Primarch)),
-            ("for-peer".into(), Some(WaitCause::ChapterMaster)),
-            ("for-user".into(), Some(WaitCause::User)),
+            ("for-lead", Some(WaitCause::Primarch)),
+            ("for-peer", Some(WaitCause::ChapterMaster)),
+            ("for-user", Some(WaitCause::User)),
         ]
     );
 

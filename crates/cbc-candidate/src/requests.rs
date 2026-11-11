@@ -13,6 +13,7 @@ use crate::{
     store::Store,
 };
 use anyhow::{anyhow, bail, ensure, Result};
+use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqliteConnection};
@@ -128,19 +129,18 @@ fn relay_allowed(request: &Request) -> Result<()> {
 }
 
 impl Store {
-    /// A member asks the user or another member. A question for a member needs the pair's active
-    /// room, where the owner is told; it is refused rather than stored where nobody sees it. A
-    /// question for the user needs no room.
+    /// A member asks the user or another member. The server picks the request's ID, so no member
+    /// can collide with, or probe for, another's request; the asker's key covers retries. A
+    /// question for a member needs the pair's active room, where the owner is told; it is refused
+    /// rather than stored where nobody sees it. A question for the user needs no room.
     pub async fn open_request(
         &self,
         binding: &SessionBinding,
-        request: &str,
         owner: &RequestOwner,
         item: Option<&str>,
         question: &str,
         key: &str,
     ) -> Result<Request> {
-        valid_id("request id", request)?;
         valid_id("request key", key)?;
         if let Some(item) = item {
             valid_id("work item id", item)?;
@@ -150,7 +150,7 @@ impl Store {
         }
         let question = valid_text("question", question)?;
         let fingerprint = fingerprint(&serde_json::json!({
-            "op": "open", "request": request, "owner": owner, "item": item, "question": question,
+            "op": "open", "owner": owner, "item": item, "question": question,
         }));
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         validate_on(&mut tx, binding).await?;
@@ -170,10 +170,6 @@ impl Store {
             tx.commit().await?;
             return Ok(current);
         }
-        ensure!(
-            load_request(&mut tx, context, request).await?.is_none(),
-            "request already exists"
-        );
         if let Some(item) = item {
             let known: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM candidate_work_items WHERE context_id=? AND item_id=?",
@@ -199,8 +195,9 @@ impl Store {
             }
         };
         let now = facts::wall_ms();
+        let request = &new_request_id()?;
         let created = Request {
-            request: request.into(),
+            request: request.clone(),
             callback: me.clone(),
             owner: owner.clone(),
             item: item.map(Into::into),
@@ -250,7 +247,12 @@ impl Store {
             .ok_or_else(|| anyhow!("unknown request"))?;
         let channel = match &current.owner {
             RequestOwner::Member(owner) if *owner == binding.member_id => AnswerChannel::Member,
-            _ => AnswerChannel::Relayed,
+            RequestOwner::Member(_) => {
+                // The asker knows its request exists; anyone else can't tell it from a missing one.
+                ensure!(current.callback == binding.member_id, "unknown request");
+                bail!("not authorized: only the owner answers a member's request")
+            }
+            RequestOwner::User => AnswerChannel::Relayed,
         };
         let answer = self
             .record_answer(
@@ -315,10 +317,7 @@ impl Store {
         let current = load_request(&mut tx, context, request)
             .await?
             .ok_or_else(|| anyhow!("unknown request"))?;
-        ensure!(
-            current.callback == binding.member_id,
-            "not authorized: only the asker withdraws a request"
-        );
+        ensure!(current.callback == binding.member_id, "unknown request");
         ensure!(
             matches!(current.state, RequestState::Open | RequestState::Relayed),
             "request is {}",
@@ -368,10 +367,7 @@ impl Store {
         let current = load_request(&mut tx, context, request)
             .await?
             .ok_or_else(|| anyhow!("unknown request"))?;
-        ensure!(
-            current.callback == binding.member_id,
-            "not authorized: only the asker marks an answer applied"
-        );
+        ensure!(current.callback == binding.member_id, "unknown request");
         sqlx::query("UPDATE candidate_request_answers SET applied_wall_ms=? WHERE context_id=? AND request_id=? AND answer_id=? AND applied_wall_ms IS NULL")
             .bind(facts::wall_ms()).bind(context).bind(request).bind(answer)
             .execute(&mut *tx).await?;
@@ -395,8 +391,9 @@ impl Store {
         rows.iter().map(answer_from).collect()
     }
 
-    /// Trusted read: the requests still waiting on an answer from the user's side, open or
-    /// relayed, by id.
+    /// Trusted read: every request not yet answered or withdrawn, whoever owns it, by ID. A
+    /// relayed request is included, since the user has not answered it; `waits_now` leaves it
+    /// out, since the asker has an answer to act on.
     pub async fn open_requests(&self, context: &str) -> Result<Vec<Request>> {
         let ids: Vec<String> = sqlx::query_scalar("SELECT request_id FROM candidate_requests WHERE context_id=? AND state IN ('open','relayed') ORDER BY request_id")
             .bind(context).fetch_all(&self.pool).await?;
@@ -644,6 +641,17 @@ fn answer_from(row: &sqlx::sqlite::SqliteRow) -> Result<Answer> {
         at_wall_ms: row.try_get("at_wall_ms")?,
         applied_wall_ms: row.try_get("applied_wall_ms")?,
     })
+}
+
+/// 128 random bits: unguessable, so an ID is only known to whoever was told it.
+fn new_request_id() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    OsRng.try_fill_bytes(&mut bytes)?;
+    Ok(format!("req-{}", hex(&bytes)))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A stable digest of a request, as for work operations, under its own domain.

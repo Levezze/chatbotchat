@@ -257,6 +257,12 @@ reached only through the store.
   optional work item, which must exist, and the question. Its state is `open`,
   `relayed`, `answered` or `withdrawn`. Opening is idempotent per asker and
   key; the same key for a different question is refused.
+- **The server picks the ID.** An ID is `req-` and 128 random bits. With
+  caller-chosen IDs, two members picking the same one would collide, and the
+  refusal would tell one about the other's request. For the same reason a
+  member who is neither the asker nor the owner gets "unknown request" for a
+  member's request, exactly as for one that doesn't exist, and so does anyone
+  but the asker who tries to withdraw a request or mark an answer applied.
 - **The route decides the channel.** The owner route records `owner`. The
   owner member's own binding records `member`. Any other member records
   `relayed`, with the relaying member. Nothing the caller sends can choose the
@@ -277,15 +283,17 @@ reached only through the store.
   the answer is recorded and undelivered. Each event goes to one named
   recipient and has its own delivery class, `request_event`, so the #113 PR-A
   facts cover it.
-- **Answers are append-only.** A second answer from the same channel after
-  `answered` is refused, as is any answer to a withdrawn request, with the
-  withdrawal reason in the error. A retried key returns the first answer
+- **Answers are append-only.** Once a request is `answered`, every further
+  answer is refused, whatever its channel, and so is any answer to a withdrawn
+  request, with the withdrawal reason in the error. Answers already recorded
+  are never changed. A retried key returns the first answer
   before any state check, so a retry still succeeds after the request has
   moved on.
 - **Applied is separate.** Answered, delivered and applied are three facts.
   Only the asker marks an answer applied, and the first time is kept.
-- **Withdrawal and retirement.** Only the asker withdraws, with a reason; the
-  owner of a member's request is told if their room is still active.
+- **Withdrawal and retirement.** Only the asker withdraws, with a reason, and
+  only while the request is open or relayed; the owner of a member's request
+  is told if their room is still active.
   Retirement withdraws every open request the member asked or owns, with
   `retired: <reason>`, in the retirement's transaction. It sends no request
   events, because the member's rooms close in the same transaction and say
@@ -305,20 +313,27 @@ reached only through the store.
   lead is another Chapter Master; any other role has no cause and reports as
   `unknown`), and each item not yet receipted, as waiting on delivery. A
   relayed request is not a wait, because the asker has an answer to act on.
+  `open_requests`, by contrast, lists it, since the user has not answered it.
   The interval calculator stays in #113 C.
 - **Upgrade.** 0011 rebuilds the delivery-facts table to admit the new class.
   A test builds a schema-10 database with a work-event fact and checks it
-  survives.
+  survives. Another checks that, after every migration, no schema object
+  still refers to a renamed-and-dropped table and no foreign key is violated.
 
 Mutation checks:
 - A relay that sets `answered`, or a relay allowed after the user's answer,
   fails the relay test.
+- Accepting a second owner answer, or a second member answer, fails the
+  owner-route or member-owner test.
+- A distinguishable refusal for a request the member can't see, on answer or
+  withdraw, fails the member-owner or withdrawal test.
+- A fixed request ID fails the idempotency test and two others.
 - A non-owner member answering a member's request, or the owner route
   answering one, fails the member-owner test.
 - Storing a member's request with no room fails the room test.
 - Waking the relaying asker fails the relay test.
-- Letting anyone withdraw, or answering a withdrawn request, fails the
-  withdrawal test.
+- Letting anyone withdraw, withdrawing an answered request, or answering a
+  withdrawn request fails the withdrawal test.
 - Skipping the retirement hook, or withdrawing only the asker's side, fails the
   retirement test.
 - Letting anyone mark an answer applied, or overwriting the first applied
