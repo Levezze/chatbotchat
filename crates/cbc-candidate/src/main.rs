@@ -230,8 +230,9 @@ async fn main() -> anyhow::Result<()> {
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default()
             };
-            // The snapshot directory as the sandbox spells it, whatever alias was typed.
-            let end = snapshot
+            // The snapshot directory as the sandbox spells it, whatever alias was typed. A bare
+            // name has an empty parent, so resolve against the working directory first.
+            let end = std::path::absolute(&snapshot)?
                 .parent()
                 .context("snapshot has no parent")?
                 .canonicalize()?

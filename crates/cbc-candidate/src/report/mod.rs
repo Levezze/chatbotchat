@@ -87,10 +87,13 @@ pub(super) fn union_length(intervals: &[(i64, i64)]) -> i64 {
     total + current.map_or(0, |(s, e)| e - s)
 }
 
+/// A seat as (context, member). IDs may contain `/`, so a joined string could collide.
+pub(crate) type SeatId = (String, String);
+
 /// One wait, clipped to the window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WaitInterval {
-    pub seat: String,
+    pub seat: SeatId,
     /// None when the records do not say why: printed as `unknown`.
     pub cause: Option<WaitCause>,
     pub id: String,
@@ -122,19 +125,34 @@ pub(super) fn clip(window: Window, start: i64, end: Option<i64>) -> Option<(i64,
     Some((start.max(window.from_ms), end, open))
 }
 
-pub(super) fn seat_key(context: &str, member: &str) -> String {
-    format!("{context}/{member}")
+/// A seat as printed: `context/member`, each part quoted when either contains `/`, so two
+/// seats never print alike.
+pub(super) fn seat_label(context: &str, member: &str) -> String {
+    if context.contains('/') || member.contains('/') {
+        format!("{context:?}/{member:?}")
+    } else {
+        format!("{context}/{member}")
+    }
+}
+
+fn seat_id(context: &str, member: &str) -> SeatId {
+    (context.to_owned(), member.to_owned())
+}
+
+/// A withdrawal with no recorded time (from before the time was recorded) cannot be placed.
+pub(super) fn untimed(request: &RequestFact) -> bool {
+    request.withdrawn && request.withdrawn_wall_ms.is_none()
 }
 
 /// Waits use wall time, the one timeline that every source shares and the window is cut on.
 pub(crate) fn waits(facts: &Facts, window: Window) -> Vec<WaitInterval> {
-    let roles: BTreeMap<String, &str> = facts
+    let roles: BTreeMap<(&str, &str), &str> = facts
         .seats
         .iter()
-        .map(|s| (seat_key(&s.context, &s.member), s.role.as_str()))
+        .map(|s| ((s.context.as_str(), s.member.as_str()), s.role.as_str()))
         .collect();
     let mut waits = Vec::new();
-    let mut push = |seat: String, cause, id: String, start, end| {
+    let mut push = |seat: (String, String), cause, id: String, start, end| {
         if let Some((start_ms, end_ms, open)) = clip(window, start, end) {
             waits.push(WaitInterval {
                 seat,
@@ -146,13 +164,14 @@ pub(crate) fn waits(facts: &Facts, window: Window) -> Vec<WaitInterval> {
             });
         }
     };
-    for request in &facts.requests {
+    for request in facts.requests.iter().filter(|r| !untimed(r)) {
         // As `waits_now`: the owner's role decides, and a relayed answer ends the wait too,
         // since the asker then has an answer to act on.
-        let role = request
-            .owner_member
-            .as_ref()
-            .and_then(|owner| roles.get(&seat_key(&request.context, owner)).copied());
+        let role = request.owner_member.as_ref().and_then(|owner| {
+            roles
+                .get(&(request.context.as_str(), owner.as_str()))
+                .copied()
+        });
         let cause = match (request.owner_is_user, role) {
             (true, _) => Some(WaitCause::User),
             (false, Some("repo_lead")) => Some(WaitCause::Primarch),
@@ -164,7 +183,7 @@ pub(crate) fn waits(facts: &Facts, window: Window) -> Vec<WaitInterval> {
             (a, w) => a.or(w),
         };
         push(
-            seat_key(&request.context, &request.callback),
+            seat_id(&request.context, &request.callback),
             cause,
             format!("request {}", request.request),
             request.created_wall_ms,
@@ -172,7 +191,7 @@ pub(crate) fn waits(facts: &Facts, window: Window) -> Vec<WaitInterval> {
         );
     }
     for delivery in &facts.deliveries {
-        let seat = seat_key(&delivery.context, &delivery.member);
+        let seat = seat_id(&delivery.context, &delivery.member);
         let id = format!("item {}", delivery.sequence);
         push(
             seat.clone(),

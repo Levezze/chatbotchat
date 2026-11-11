@@ -42,7 +42,22 @@ pub(crate) struct RequestFact {
     pub owner_member: Option<String>,
     pub created_wall_ms: i64,
     pub answered_wall_ms: Option<i64>,
+    /// Withdrawn by the end snapshot. With no time it cannot be placed: left out and counted.
+    pub withdrawn: bool,
     pub withdrawn_wall_ms: Option<i64>,
+}
+
+/// One native binding of a seat, in force from its enrollment or rebind. A delivery belongs to
+/// the binding in force when its item was committed, not to the binding at the end snapshot.
+#[derive(Debug, Clone)]
+pub(crate) struct BindingFact {
+    pub context: String,
+    pub member: String,
+    pub epoch: i64,
+    pub host: String,
+    pub profile: Option<String>,
+    /// `i64::MIN` when no identity event dates it: in force from the start.
+    pub from_wall_ms: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +108,7 @@ pub(crate) struct SentFact {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Facts {
     pub seats: Vec<Seat>,
+    pub bindings: Vec<BindingFact>,
     pub deliveries: Vec<Delivery>,
     pub requests: Vec<RequestFact>,
     pub wakes: Vec<WakeFact>,
@@ -152,14 +168,10 @@ impl Facts {
         }
         for row in sqlx::query(
             "SELECT q.context_id, q.request_id, q.callback_member, q.owner_kind, q.owner_member,
-                    q.created_wall_ms,
+                    q.created_wall_ms, q.state = 'withdrawn' AS withdrawn, q.withdrawn_wall_ms,
                     (SELECT min(a.at_wall_ms) FROM candidate_request_answers a
                       WHERE a.context_id = q.context_id AND a.request_id = q.request_id)
-                      AS answered_wall_ms,
-                    (SELECT min(f.committed_wall_ms) FROM candidate_request_events e
-                      JOIN candidate_item_facts f ON f.sequence = e.sequence
-                      WHERE e.context_id = q.context_id AND e.request_id = q.request_id
-                        AND e.event = 'withdrawn') AS withdrawn_wall_ms
+                      AS answered_wall_ms
              FROM candidate_requests q
              ORDER BY q.context_id, q.request_id",
         )
@@ -174,7 +186,32 @@ impl Facts {
                 owner_member: row.try_get("owner_member")?,
                 created_wall_ms: row.try_get("created_wall_ms")?,
                 answered_wall_ms: row.try_get("answered_wall_ms")?,
+                withdrawn: row.try_get("withdrawn")?,
                 withdrawn_wall_ms: row.try_get("withdrawn_wall_ms")?,
+            });
+        }
+        for row in sqlx::query(
+            "SELECT t.context_id, t.member_id, t.epoch, t.host,
+                    json_extract(t.target_json, '$.profile') AS profile,
+                    (SELECT min(e.at_wall_ms) FROM candidate_identity_events e
+                      WHERE e.context_id = t.context_id AND e.member_id = t.member_id
+                        AND e.epoch = t.epoch AND e.kind IN ('enrolled','rebound'))
+                      AS from_wall_ms
+             FROM candidate_native_targets t
+             ORDER BY t.context_id, t.member_id, t.epoch",
+        )
+        .fetch_all(pool)
+        .await?
+        {
+            facts.bindings.push(BindingFact {
+                context: row.try_get("context_id")?,
+                member: row.try_get("member_id")?,
+                epoch: row.try_get("epoch")?,
+                host: row.try_get("host")?,
+                profile: row.try_get("profile")?,
+                from_wall_ms: row
+                    .try_get::<Option<i64>, _>("from_wall_ms")?
+                    .unwrap_or(i64::MIN),
             });
         }
         for row in sqlx::query(

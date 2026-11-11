@@ -383,8 +383,8 @@ impl Store {
             "request is {}",
             current.state.as_str()
         );
-        sqlx::query("UPDATE candidate_requests SET state='withdrawn', withdraw_reason=? WHERE context_id=? AND request_id=?")
-            .bind(&reason).bind(context).bind(request).execute(&mut *tx).await?;
+        sqlx::query("UPDATE candidate_requests SET state='withdrawn', withdraw_reason=?, withdrawn_wall_ms=? WHERE context_id=? AND request_id=?")
+            .bind(&reason).bind(crate::facts::wall_ms()).bind(context).bind(request).execute(&mut *tx).await?;
         if let RequestOwner::Member(owner) = &current.owner {
             if let Some(room) = pair_room(&mut tx, context, &current.callback, owner).await? {
                 let body = serde_json::json!({
@@ -698,8 +698,8 @@ pub(crate) async fn withdraw_for_retirement(
     member: &str,
     note: &str,
 ) -> Result<()> {
-    sqlx::query("UPDATE candidate_requests SET state='withdrawn', withdraw_reason=? WHERE context_id=? AND state IN ('open','relayed') AND (callback_member=? OR owner_member=?)")
-        .bind(note).bind(context).bind(member).bind(member).execute(conn).await?;
+    sqlx::query("UPDATE candidate_requests SET state='withdrawn', withdraw_reason=?, withdrawn_wall_ms=? WHERE context_id=? AND state IN ('open','relayed') AND (callback_member=? OR owner_member=?)")
+        .bind(note).bind(crate::facts::wall_ms()).bind(context).bind(member).bind(member).execute(conn).await?;
     Ok(())
 }
 

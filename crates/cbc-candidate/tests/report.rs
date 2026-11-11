@@ -141,8 +141,58 @@ async fn the_report_reads_state_at_until_from_timestamps_not_the_end_state() {
     assert_eq!(delivered(&none), (0, 0));
     assert!(!none.contains("project/worker — waiting"), "{none}");
     let carried = line(&none, "  project/lead — ready but idle: ");
-    assert!(carried.contains("count=1 open=1 total=0 ms"), "{carried}");
+    assert!(carried.contains("count=1 open=1 sum=0 ms"), "{carried}");
     line(&none, "  wake attempts: none reported in the window");
+}
+
+#[tokio::test]
+async fn a_withdrawal_ends_the_wait_when_it_happened_even_without_an_inbox_event() {
+    let case = fixture().await;
+    let base = snap(&case).await;
+    let manifest = manifest(&base, &sha256_file(&base.file).unwrap());
+    // Neither withdrawal emits an inbox event: the user has no room, and retirement closes
+    // the owner's rooms in the same transaction.
+    let to_user = case
+        .store
+        .open_request(&case.worker, &RequestOwner::User, None, "Ship it?", "q1")
+        .await
+        .unwrap()
+        .request;
+    case.store
+        .open_request(
+            &case.worker,
+            &RequestOwner::Member("lead".into()),
+            None,
+            "Which port?",
+            "q2",
+        )
+        .await
+        .unwrap();
+    let asked = snap(&case).await;
+    case.store
+        .withdraw_request(&case.worker, &to_user, "not needed")
+        .await
+        .unwrap();
+    case.store
+        .retire_member("project", "lead", "trial seat ended")
+        .await
+        .unwrap();
+    let end = snap(&case).await;
+
+    let open = |text: &str, cause: &str| -> String {
+        line(text, &format!("  project/worker — {cause}: ")).to_owned()
+    };
+    let before = run(&case, &manifest, &end, Some(asked.taken_wall_ms), None)
+        .await
+        .unwrap();
+    assert!(open(&before, "waiting on the user").contains("count=1 open=1"));
+    assert!(open(&before, "waiting on the Primarch").contains("count=1 open=1"));
+    let after = run(&case, &manifest, &end, None, None).await.unwrap();
+    assert!(
+        open(&after, "waiting on the user").contains("count=1 open=0"),
+        "{after}"
+    );
+    assert!(open(&after, "waiting on the Primarch").contains("count=1 open=0"));
 }
 
 #[tokio::test]
@@ -234,4 +284,36 @@ async fn the_report_refuses_inputs_it_cannot_vouch_for() {
     .await
     .unwrap_err();
     assert!(refused.to_string().contains("unknown seat"), "{refused}");
+}
+
+#[tokio::test]
+async fn the_command_takes_bare_file_names_from_inside_the_snapshot_directory() {
+    let case = fixture().await;
+    let base = snap(&case).await;
+    let end = snap(&case).await;
+    let dir = base.file.parent().unwrap().to_path_buf();
+    std::fs::write(
+        dir.join("trial-1.json"),
+        manifest(&base, &sha256_file(&base.file).unwrap()),
+    )
+    .unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cbc-candidate"))
+        .current_dir(&dir)
+        .arg("report")
+        .arg("--root")
+        .arg(case._sandbox.root())
+        .arg("--protected-db")
+        .arg(case._temp.path().join("daily/state.db"))
+        .args(["--manifest", "trial-1.json", "--snapshot"])
+        .arg(end.file.file_name().unwrap())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.starts_with("Trial 1 — build test-build"), "{text}");
+    assert!(line(&text, "End snapshot: ").contains(end.file.file_name().unwrap().to_str().unwrap()));
 }

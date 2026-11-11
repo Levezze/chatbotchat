@@ -116,7 +116,7 @@ pub(crate) fn render(
         let _ = writeln!(
             o,
             "  {}: {sent} CBC items sent in {}.{:03} h",
-            seat_key(&seat.context, &seat.member),
+            seat_label(&seat.context, &seat.member),
             hours_x1000 / 1000,
             hours_x1000 % 1000
         );
@@ -140,7 +140,7 @@ pub(crate) fn render(
 pub(super) fn render_waits(o: &mut String, facts: &Facts, window: Window) {
     let waits = waits(facts, window);
     let _ = writeln!(o, "\nWaits (wall time, clipped to the window)");
-    let mut groups: BTreeMap<(&str, Option<WaitCause>), Vec<&WaitInterval>> = BTreeMap::new();
+    let mut groups: BTreeMap<(&SeatId, Option<WaitCause>), Vec<&WaitInterval>> = BTreeMap::new();
     for wait in &waits {
         groups
             .entry((&wait.seat, wait.cause))
@@ -150,20 +150,32 @@ pub(super) fn render_waits(o: &mut String, facts: &Facts, window: Window) {
     if groups.is_empty() {
         let _ = writeln!(o, "  no waits in the window");
     }
-    for ((seat, cause), group) in &groups {
+    for (((context, member), cause), group) in &groups {
         let durations: Vec<i64> = group.iter().map(|w| w.duration()).collect();
         let spans: Vec<(i64, i64)> = group.iter().map(|w| (w.start_ms, w.end_ms)).collect();
         let open = group.iter().filter(|w| w.open).count();
         let share = union_length(&spans) * 1000 / window.length().max(1);
         let _ = writeln!(
             o,
-            "  {seat} — {}: count={} open={open} total={} ms {} share={}.{}%",
+            "  {} — {}: count={} open={open} sum={} ms {} share={}.{}%",
+            seat_label(context, member),
             cause_label(*cause),
             group.len(),
             durations.iter().sum::<i64>(),
             distribution(&durations),
             share / 10,
             share % 10
+        );
+    }
+    let undated = facts
+        .requests
+        .iter()
+        .filter(|r| untimed(r) && r.created_wall_ms <= window.until_ms)
+        .count();
+    if undated > 0 {
+        let _ = writeln!(
+            o,
+            "  requests withdrawn with no recorded time: {undated} (left out)"
         );
     }
     for cause in WaitCause::ALL {
@@ -189,7 +201,7 @@ pub(super) fn render_waits(o: &mut String, facts: &Facts, window: Window) {
             o,
             "    {} ms — {} — {} — {} — +{} ms .. +{} ms{}",
             wait.duration(),
-            wait.seat,
+            seat_label(&wait.seat.0, &wait.seat.1),
             cause_label(wait.cause),
             wait.id,
             wait.start_ms - window.from_ms,
@@ -202,7 +214,7 @@ pub(super) fn render_waits(o: &mut String, facts: &Facts, window: Window) {
 pub(super) fn render_approvals(o: &mut String, facts: &Facts, tally: Option<&Tally>) {
     let _ = writeln!(o, "\nApproval prompts (per session × kind)");
     for seat in &facts.seats {
-        let key = seat_key(&seat.context, &seat.member);
+        let key = seat_label(&seat.context, &seat.member);
         let kinds = tally
             .and_then(|t| t.counts.get(&seat.context))
             .and_then(|members| members.get(&seat.member));
@@ -273,26 +285,24 @@ pub(super) fn render_delivery(o: &mut String, facts: &Facts, window: Window) {
 }
 
 pub(super) fn render_latency(o: &mut String, facts: &Facts, window: Window) {
-    let hosts: BTreeMap<String, String> = facts
-        .seats
-        .iter()
-        .map(|s| {
-            (
-                seat_key(&s.context, &s.member),
-                s.host.clone().unwrap_or_else(|| "unknown".into()),
-            )
-        })
-        .collect();
-    let mut profiles: BTreeMap<&str, Vec<&Delivery>> = BTreeMap::new();
+    let mut profiles: BTreeMap<String, Vec<&Delivery>> = BTreeMap::new();
     for delivery in facts
         .deliveries
         .iter()
         .filter(|d| window.holds(d.committed.wall_ms))
     {
-        let host = hosts
-            .get(&seat_key(&delivery.context, &delivery.member))
-            .map_or("unknown", String::as_str);
-        profiles.entry(host).or_default().push(delivery);
+        // The binding in force at commit: the latest one dated at or before it.
+        let binding = facts
+            .bindings
+            .iter()
+            .filter(|b| b.context == delivery.context && b.member == delivery.member)
+            .filter(|b| b.from_wall_ms <= delivery.committed.wall_ms)
+            .max_by_key(|b| (b.from_wall_ms, b.epoch));
+        let profile = binding.map_or_else(
+            || "unknown".to_owned(),
+            |b| format!("{}/{}", b.host, b.profile.as_deref().unwrap_or("unknown")),
+        );
+        profiles.entry(profile).or_default().push(delivery);
     }
     let _ = writeln!(
         o,
@@ -369,7 +379,7 @@ pub(super) fn render_rooms_identity(o: &mut String, facts: &Facts, window: Windo
         .map(|e| {
             format!(
                 "{} epoch {} at +{} ms",
-                seat_key(&e.context, &e.member),
+                seat_label(&e.context, &e.member),
                 e.epoch,
                 e.at_wall_ms - window.from_ms
             )

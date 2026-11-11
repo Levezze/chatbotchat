@@ -630,12 +630,20 @@ sampler and the Cost section it feeds.
 - **State at `until`.** Taken from each fact's own timestamp, never from a state
   column, which shows the moment the snapshot was taken. A request closes at
   its first answer on any channel (a relay ends the asker's wait, as in
-  `waits_now`) or at its withdrawal event's commit; a receipt or activity
+  `waits_now`) or at its withdrawal time; a receipt or activity
   after `until` counts as absent. A test cuts one end snapshot at three points
   and gets three different reports.
+- **Withdrawal time.** Migration 0015 (schema 15) adds
+  `candidate_requests.withdrawn_wall_ms`, written by both withdrawals: the
+  asker's and the one retirement does. An event alone could not date them: a
+  withdrawal emits one only when the owner is a member with an open room, so
+  requests to the user and retirement withdrawals had none. The migration
+  dates earlier withdrawals from their event where there is one. A withdrawn
+  request still without a time is left out of the waits and counted on its own
+  line, never guessed.
 - **Waits.** Wall time, the one timeline every source shares, clipped to the
   window; an interval still open at `until` is marked open. Per member and
-  cause: count, open, total, n/median/p90/max by nearest rank, and the share of
+  cause: count, open, sum, n/median/p90/max by nearest rank, and the share of
   the window covered by the union of its intervals. Causes come from the
   request's owner kind and the owner's role, delivery from commit to receipt,
   and ready but idle from receipt to first activity. Then each partial or
@@ -646,9 +654,16 @@ sampler and the Cost section it feeds.
   offered but not receipted. Failed prints missing: no record says delivery
   failed. Wake attempts reported in the window, by kind, accepted and failed
   by class.
-- **Wake latency.** Per host profile, commit to wake accepted and commit to
-  first activity. Monotonic time when both stamps come from one core instance,
+- **Wake latency.** Per host and profile (for example `claude/desktop`), commit
+  to wake accepted and commit to first activity. Each delivery belongs to the
+  binding in force when its item was committed: the native target whose epoch's
+  enrolment or rebind is the latest at or before the commit. A seat that has
+  since been rebound to another host keeps its earlier deliveries under the
+  earlier host. A delivery with no binding by then is `unknown`. Monotonic time when both stamps come from one core instance,
   wall time otherwise, and the latter are counted as estimates.
+- **Seat names.** Seats are grouped by (context, member), never by a joined
+  string, and print as `context/member`, both parts quoted when either
+  contains `/`, so two seats never print alike.
 - **Approval prompts.** From the tally file,
   `{"context":{"member":{"cbc":n,"native_setup":n,"native_refusal":n,"other":n}}}`,
   nested because IDs may contain `/`. A kind absent from the file prints
@@ -677,9 +692,15 @@ sampler and the Cost section it feeds.
   - Unit: nearest-rank percentiles, union of overlapping and touching
     intervals, clipping at both edges, state at `until`, unclassified owners,
     monotonic versus wall latency, the merge filter, the tally format, and the
-    whole template byte for byte from hand-built facts.
+    whole template byte for byte from hand-built facts. Added after review:
+    latency by the binding in force at commit, seats that would print alike,
+    a withdrawal with no time, and bindings loaded from a real provisioned
+    snapshot.
   - `tests/report.rs`, over real snapshots: the three-cut test above, a
     byte-identical repeat with no absolute path, the tally lines, and each
     refusal. At the baseline cut, a wait that began before the window (the
     lead's receipt of the room introduction during setup) is carried in,
-    clipped to the window and shown open, rather than dropped.
+    clipped to the window and shown open, rather than dropped. After review: a
+    request to the user and a request ended by retirement, neither of which
+    emits an event, both close at their withdrawal; and the command, run from
+    inside the snapshot directory, takes bare file names.

@@ -21,6 +21,17 @@ fn seat(member: &str, role: &str, host: &str) -> Seat {
     }
 }
 
+fn binding(member: &str, epoch: i64, host: &str, profile: &str, from: i64) -> BindingFact {
+    BindingFact {
+        context: "t".into(),
+        member: member.into(),
+        epoch,
+        host: host.into(),
+        profile: Some(profile.into()),
+        from_wall_ms: from,
+    }
+}
+
 fn delivery(member: &str, sequence: i64, committed: i64) -> Delivery {
     Delivery {
         context: "t".into(),
@@ -91,6 +102,7 @@ fn waits_take_state_at_until_from_timestamps() {
             owner_member: Some("lead".into()),
             created_wall_ms: 110,
             answered_wall_ms: Some(170),
+            withdrawn: false,
             withdrawn_wall_ms: None,
         }],
         ..Facts::default()
@@ -106,7 +118,7 @@ fn waits_take_state_at_until_from_timestamps() {
         early,
         vec![
             WaitInterval {
-                seat: "t/feature".into(),
+                seat: ("t".into(), "feature".into()),
                 cause: Some(WaitCause::Primarch),
                 id: "request q1".into(),
                 start_ms: 110,
@@ -114,7 +126,7 @@ fn waits_take_state_at_until_from_timestamps() {
                 open: true,
             },
             WaitInterval {
-                seat: "t/feature".into(),
+                seat: ("t".into(), "feature".into()),
                 cause: Some(WaitCause::Delivery),
                 id: "item 5".into(),
                 start_ms: 120,
@@ -159,6 +171,7 @@ fn a_request_to_an_unclassified_owner_is_unknown_and_the_user_is_known() {
             owner_member: owner.map(str::to_owned),
             created_wall_ms: 0,
             answered_wall_ms: None,
+            withdrawn: true,
             withdrawn_wall_ms: Some(5),
         });
     }
@@ -214,6 +227,10 @@ fn the_report_is_the_section_8_template_in_order() {
         seats: vec![
             seat("feature", "feature_lead", "claude"),
             seat("lead", "repo_lead", "codex"),
+        ],
+        bindings: vec![
+            binding("feature", 1, "claude", "desktop", i64::MIN),
+            binding("lead", 1, "codex", "cli", i64::MIN),
         ],
         deliveries: vec![first, second, third],
         wakes: vec![
@@ -296,9 +313,9 @@ Tally: tally.json, sha256 {tally_sha}
 Phase 1: missing (judged by the trial manager against protocol section 4)
 
 Waits (wall time, clipped to the window)
-  t/feature — waiting on delivery: count=1 open=0 total=10 ms n=1 median=10 p90=10 max=10 share=10.0%
-  t/feature — ready but idle: count=1 open=0 total=20 ms n=1 median=20 p90=20 max=20 share=20.0%
-  t/lead — waiting on delivery: count=2 open=2 total=110 ms n=2 median=50 p90=60 max=60 share=60.0%
+  t/feature — waiting on delivery: count=1 open=0 sum=10 ms n=1 median=10 p90=10 max=10 share=10.0%
+  t/feature — ready but idle: count=1 open=0 sum=20 ms n=1 median=20 p90=20 max=20 share=20.0%
+  t/lead — waiting on delivery: count=2 open=2 sum=110 ms n=2 median=50 p90=60 max=60 share=60.0%
   waiting on human review, by policy: partial — a PR observation saying the PR is ready (the HITL flag exists)
   waiting on the Primarch: partial — holds (#114); open requests to the Primarch are derived
   waiting on a resource: missing (holds on named resources (#114))
@@ -321,10 +338,10 @@ Delivery (expected recipients of items committed in the window)
   wake attempts codex_queue: accepted=0 failed=[timeout=1]
 
 Wake latency (monotonic within a core instance; across instances wall time, counted as estimates)
-  claude commit to wake accepted: n=1 median=8 p90=8 max=8 missing=0 estimates=0
-  claude commit to first activity: n=1 median=30 p90=30 max=30 missing=0 estimates=1
-  codex commit to wake accepted: n=0 missing=2 estimates=0
-  codex commit to first activity: n=0 missing=2 estimates=0
+  claude/desktop commit to wake accepted: n=1 median=8 p90=8 max=8 missing=0 estimates=0
+  claude/desktop commit to first activity: n=1 median=30 p90=30 max=30 missing=0 estimates=1
+  codex/cli commit to wake accepted: n=0 missing=2 estimates=0
+  codex/cli commit to first activity: n=0 missing=2 estimates=0
 
 Autonomy
   merges recorded on work items: 1 (from work events; an item with no report room is not seen)
@@ -379,4 +396,176 @@ fn a_tally_must_name_known_seats_and_kinds() {
     assert!(Tally::parse("x", br#"{"t":{"lead":{"cbc":-1}}}"#, &seats).is_err());
     assert!(Tally::parse("x", br#"{"t/lead":{"cbc":3}}"#, &seats).is_err());
     assert!(Tally::parse("x", br#"{"t":{"lead":{"cbc":3}}}"#, &seats).is_ok());
+}
+
+/// A delivery belongs to the binding in force when its item was committed, not to whatever
+/// the seat is bound to in the end snapshot; a seat with no binding then is `unknown`.
+#[test]
+fn latency_groups_by_the_binding_in_force_at_commit() {
+    let mut before = delivery("feature", 5, 120);
+    before.woken = Some(at("a", 125));
+    let mut after = delivery("feature", 6, 160);
+    after.woken = Some(at("a", 162));
+    let facts = Facts {
+        seats: vec![seat("feature", "feature_lead", "codex")],
+        bindings: vec![
+            binding("feature", 1, "claude", "desktop", i64::MIN),
+            binding("feature", 2, "codex", "cli", 150),
+        ],
+        deliveries: vec![before, after, delivery("ghost", 7, 170)],
+        ..Facts::default()
+    };
+    let mut o = String::new();
+    render_latency(
+        &mut o,
+        &facts,
+        Window {
+            from_ms: 100,
+            until_ms: 200,
+        },
+    );
+    assert_eq!(
+        o,
+        "
+Wake latency (monotonic within a core instance; across instances wall time, counted as estimates)
+  claude/desktop commit to wake accepted: n=1 median=5 p90=5 max=5 missing=0 estimates=0
+  claude/desktop commit to first activity: n=0 missing=1 estimates=0
+  codex/cli commit to wake accepted: n=1 median=2 p90=2 max=2 missing=0 estimates=0
+  codex/cli commit to first activity: n=0 missing=1 estimates=0
+  unknown commit to wake accepted: n=0 missing=1 estimates=0
+  unknown commit to first activity: n=0 missing=1 estimates=0
+"
+    );
+}
+
+/// IDs may contain `/`, so two seats can print alike: they are grouped by (context, member)
+/// and printed quoted.
+#[test]
+fn seats_that_would_print_alike_stay_apart_and_are_quoted() {
+    let one = Delivery {
+        context: "a".into(),
+        member: "b/c".into(),
+        ..delivery("x", 1, 110)
+    };
+    let two = Delivery {
+        context: "a/b".into(),
+        member: "c".into(),
+        ..delivery("x", 2, 120)
+    };
+    let facts = Facts {
+        deliveries: vec![one, two],
+        ..Facts::default()
+    };
+    let mut o = String::new();
+    render_waits(
+        &mut o,
+        &facts,
+        Window {
+            from_ms: 100,
+            until_ms: 200,
+        },
+    );
+    assert!(
+        o.contains("\n  \"a\"/\"b/c\" — waiting on delivery: count=1 open=1 sum=90 ms "),
+        "{o}"
+    );
+    assert!(
+        o.contains("\n  \"a/b\"/\"c\" — waiting on delivery: count=1 open=1 sum=80 ms "),
+        "{o}"
+    );
+    assert_eq!(seat_label("t", "lead"), "t/lead");
+}
+
+/// A withdrawal from before withdrawal times were recorded cannot be placed in time: it is
+/// left out of the waits and counted, never guessed.
+#[test]
+fn a_withdrawal_with_no_recorded_time_is_counted_not_guessed() {
+    let facts = Facts {
+        requests: vec![RequestFact {
+            context: "t".into(),
+            request: "q1".into(),
+            callback: "feature".into(),
+            owner_is_user: true,
+            owner_member: None,
+            created_wall_ms: 110,
+            answered_wall_ms: None,
+            withdrawn: true,
+            withdrawn_wall_ms: None,
+        }],
+        ..Facts::default()
+    };
+    let window = Window {
+        from_ms: 100,
+        until_ms: 200,
+    };
+    assert_eq!(waits(&facts, window), vec![]);
+    let mut o = String::new();
+    render_waits(&mut o, &facts, window);
+    assert!(
+        o.contains("\n  requests withdrawn with no recorded time: 1 (left out)\n"),
+        "{o}"
+    );
+}
+
+/// Bindings come from the native targets, dated by the identity event of the same epoch, with
+/// the profile the target recorded.
+#[tokio::test]
+async fn bindings_load_with_their_profile_and_the_time_they_took_effect() {
+    let temp = tempfile::tempdir().unwrap();
+    let sandbox = Sandbox::initialize(
+        &temp.path().join("candidate"),
+        8990,
+        &[temp.path().join("daily/state.db")],
+    )
+    .unwrap();
+    let owner = crate::owner::OwnerControl::open(&sandbox).unwrap();
+    let store = crate::store::Store::open(&sandbox).await.unwrap();
+    let target = |repository: &str| {
+        serde_json::json!({"v":1,"profile":"unknown","repository":repository,"worktree":null,
+            "cwd":format!("/fixtures/{repository}"),"saved_project":{"status":"not_exposed"},
+            "saved_environment":{"status":"not_exposed"},
+            "placement":{"evidence_ref":"synthetic-ui-observation"}})
+    };
+    let spec = serde_json::from_value(serde_json::json!({
+        "context":"demo", "device":"laptop", "members":[
+            {"member":"api","role":"repo_lead","host":"codex","session":"codex-native",
+             "evidence_ref":"read-1","repository":"api","label":"api","summary":"test",
+             "target":target("api")},
+            {"member":"client","role":"feature_lead","host":"claude","session":"claude-native",
+             "evidence_ref":"hook-2","repository":"client","label":"client","summary":"test",
+             "target":target("client")}
+        ], "grants":[]
+    }))
+    .unwrap();
+    let before = crate::facts::wall_ms();
+    owner.provision(&store, spec).await.unwrap();
+    let snapshot = crate::evidence::take_snapshot(&store, sandbox.root())
+        .await
+        .unwrap();
+    let evidence = Evidence::open(&sandbox, &snapshot.file).await.unwrap();
+    let facts = Facts::load(&evidence).await.unwrap();
+    evidence.close().await;
+    let got: Vec<_> = facts
+        .bindings
+        .iter()
+        .map(|b| {
+            (
+                b.member.as_str(),
+                b.epoch,
+                b.host.as_str(),
+                b.profile.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("api", 1, "codex", Some("unknown")),
+            ("client", 1, "claude", Some("unknown")),
+        ]
+    );
+    assert!(facts
+        .bindings
+        .iter()
+        .all(|b| (before..=snapshot.taken_wall_ms).contains(&b.from_wall_ms)));
 }
