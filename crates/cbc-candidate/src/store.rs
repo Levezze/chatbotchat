@@ -223,6 +223,74 @@ async fn connect(path: &Path, journal: SqliteJournalMode) -> Result<SqlitePool> 
 mod tests {
     use super::*;
 
+    /// 0013 adds a column to a table that may already hold answers. Existing rows keep their
+    /// values with no surface, and only an owner answer can carry the dashboard surface.
+    #[tokio::test]
+    async fn migration_13_keeps_existing_answers_and_limits_the_surface() {
+        use std::str::FromStr;
+        let options = sqlx::sqlite::SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .foreign_keys(false);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        let sql = |version: i64| {
+            MIGRATOR
+                .iter()
+                .find(|m| m.version == version)
+                .unwrap()
+                .sql
+                .to_string()
+        };
+        for version in 1..13 {
+            sqlx::raw_sql(&sql(version)).execute(&pool).await.unwrap();
+        }
+        let insert = |channel: &'static str, actor: Option<&'static str>, key: &'static str| {
+            sqlx::query("INSERT INTO candidate_request_answers(context_id,request_id,channel,actor_member,body,request_key,fingerprint,at_wall_ms) VALUES ('c','r',?,?,'b',?,zeroblob(32),1)")
+                .bind(channel).bind(actor).bind(key)
+        };
+        insert("owner", None, "k1").execute(&pool).await.unwrap();
+        insert("relayed", Some("m"), "k2")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(&sql(13)).execute(&pool).await.unwrap();
+
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT channel, surface FROM candidate_request_answers ORDER BY answer_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows, vec![("owner".into(), None), ("relayed".into(), None)]);
+        let with_surface = |channel: &'static str,
+                            actor: Option<&'static str>,
+                            surface: &'static str,
+                            key: &'static str| {
+            sqlx::query("INSERT INTO candidate_request_answers(context_id,request_id,channel,actor_member,surface,body,request_key,fingerprint,at_wall_ms) VALUES ('c','r',?,?,?,'b',?,zeroblob(32),1)")
+                .bind(channel).bind(actor).bind(surface).bind(key)
+        };
+        with_surface("owner", None, "dashboard", "k3")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (channel, actor, surface) in [
+            ("relayed", Some("m"), "dashboard"),
+            ("member", Some("m"), "dashboard"),
+            ("owner", None, "browser"),
+        ] {
+            assert!(
+                with_surface(channel, actor, surface, "k4")
+                    .execute(&pool)
+                    .await
+                    .is_err(),
+                "{channel} {surface}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn implicit_drop_holds_the_owner_lease_until_connections_finish_closing() {
         let temp = tempfile::tempdir().unwrap();

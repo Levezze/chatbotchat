@@ -6,7 +6,7 @@ use cbc_candidate::{
     bindings::{Role, SessionBinding},
     connector::{LocalClient, LocalConnector, LocalOwnerClient},
     enrollment::ConnectionKind,
-    requests::{RequestOwner, MAX_REQUEST_PAGE},
+    requests::{AnswerChannel, AnswerSurface, RequestOwner, RequestState, MAX_REQUEST_PAGE},
     store::Store,
     work::{Stage, WorkPatch},
     Sandbox,
@@ -44,6 +44,31 @@ impl Running {
     }
     async fn get(&self, path: &str, cookie: Option<&str>) -> Response {
         http(self.addr, "GET", path, &self.host(), cookie).await
+    }
+    /// The page's own origin, as a browser sends it on a same-origin form post.
+    fn origin(&self) -> String {
+        format!("http://{}", self.host())
+    }
+    /// Post the answer form. `origin` None sends no Origin header at all.
+    async fn post_answer(
+        &self,
+        cookie: Option<&str>,
+        origin: Option<&str>,
+        form: &str,
+    ) -> Response {
+        let origin = origin
+            .map(|o| format!("Origin: {o}\r\n"))
+            .unwrap_or_default();
+        exchange(
+            self.addr,
+            "POST",
+            "/answer",
+            &self.host(),
+            cookie,
+            &origin,
+            form,
+        )
+        .await
     }
     /// A signed-in browser: mint a code on the owner route and redeem it.
     async fn login(&self) -> String {
@@ -161,14 +186,34 @@ async fn http(
     host: &str,
     cookie: Option<&str>,
 ) -> Response {
+    exchange(addr, method, path, host, cookie, "", "").await
+}
+
+async fn exchange(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    host: &str,
+    cookie: Option<&str>,
+    extra: &str,
+    body: &str,
+) -> Response {
     let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let cookie = cookie
         .map(|c| format!("Cookie: cbc_dashboard_{}={c}\r\n", addr.port()))
         .unwrap_or_default();
+    let length = if method == "POST" {
+        format!(
+            "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n",
+            body.len()
+        )
+    } else {
+        String::new()
+    };
     stream
         .write_all(
             format!(
-                "{method} {path} HTTP/1.1\r\nHost: {host}\r\n{cookie}Connection: close\r\n\r\n"
+                "{method} {path} HTTP/1.1\r\nHost: {host}\r\n{cookie}{extra}{length}Connection: close\r\n\r\n{body}"
             )
             .as_bytes(),
         )
@@ -268,12 +313,13 @@ async fn every_response_carries_the_lockdown_headers() {
         case.get(&format!("/login?code={code}"), None).await,
         case.get("/missing", Some(&cookie)).await,
         http(case.addr, "GET", "/", "evil.example", Some(&cookie)).await,
+        case.post_answer(Some(&cookie), None, "").await,
     ];
     let statuses: Vec<u16> = responses.iter().map(|r| r.status).collect();
-    assert_eq!(statuses, vec![200, 401, 403, 303, 404, 421]);
+    assert_eq!(statuses, vec![200, 401, 403, 303, 404, 421, 403]);
     for response in &responses {
         assert_eq!(response.header("content-security-policy"), Some(CSP));
-        assert_eq!(response.header("referrer-policy"), Some("no-referrer"));
+        assert_eq!(response.header("referrer-policy"), Some("same-origin"));
         assert_eq!(response.header("cache-control"), Some("no-store"));
         assert_eq!(response.header("x-content-type-options"), Some("nosniff"));
         assert!(!response.body.to_ascii_lowercase().contains("<script"));
@@ -766,6 +812,269 @@ async fn revisions_come_in_pages() {
     assert!(
         !second.body.contains("after="),
         "the last page links nowhere"
+    );
+    stop(case).await;
+}
+
+/// The hidden key the page rendered into one request's answer form.
+fn form_key(body: &str, request: &str) -> Option<String> {
+    let at = body.find(&format!("name=\"request\" value=\"{request}\""))?;
+    let rest = &body[at..];
+    let start = rest.find("name=\"key\" value=\"")? + "name=\"key\" value=\"".len();
+    Some(rest[start..start + rest[start..].find('"')?].to_string())
+}
+
+fn answer_form(request: &str, key: &str, body: &str) -> String {
+    url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("context", "project")
+        .append_pair("request", request)
+        .append_pair("key", key)
+        .append_pair("body", body)
+        .finish()
+}
+
+/// D2: the user answers a request for the user from the page. The answer is the owner's own,
+/// recorded on the owner channel with the dashboard as its surface, and it wakes the asker.
+#[tokio::test]
+async fn the_user_answers_from_the_page() {
+    let case = running(true).await;
+    let cookie = case.login().await;
+    let request = case
+        .worker()
+        .open_request(&RequestOwner::User, None, "Ship it?", "k-1")
+        .await
+        .unwrap()
+        .request;
+    let page = case.get("/", Some(&cookie)).await;
+    let key = form_key(&page.body, &request).expect("an answer form");
+    assert_eq!(key.len(), 32);
+    let again = case.get("/", Some(&cookie)).await;
+    assert_ne!(
+        form_key(&again.body, &request).unwrap(),
+        key,
+        "each render has its own key"
+    );
+
+    let posted = case
+        .post_answer(
+            Some(&cookie),
+            Some(&case.origin()),
+            &answer_form(&request, &key, "Yes & <go>"),
+        )
+        .await;
+    assert_eq!(posted.status, 303, "{}", posted.body);
+    assert_eq!(posted.header("location"), Some("/?context=project"));
+
+    let stored = case.owner().request("project", &request).await.unwrap();
+    assert_eq!(stored.state, RequestState::Answered);
+    let answers = case
+        .owner()
+        .request_answers("project", &request, 0, 10)
+        .await
+        .unwrap();
+    assert_eq!(answers.len(), 1);
+    assert_eq!(answers[0].channel, AnswerChannel::Owner);
+    assert_eq!(answers[0].surface, Some(AnswerSurface::Dashboard));
+    assert_eq!(answers[0].actor, None);
+    assert_eq!(answers[0].body, "Yes & <go>");
+
+    let mut bodies = Vec::new();
+    while let Some(batch) = case.worker().check().await.unwrap() {
+        bodies.extend(batch.items.iter().map(|i| i.body.clone()));
+        case.worker().receipt(&batch).await.unwrap();
+    }
+    assert!(
+        bodies
+            .iter()
+            .any(|b| b.contains("\"answered\"") && b.contains("Yes & <go>")),
+        "the asker is woken: {bodies:?}"
+    );
+    let after = case.get("/", Some(&cookie)).await;
+    assert!(
+        form_key(&after.body, &request).is_none(),
+        "nothing left to answer"
+    );
+    stop(case).await;
+}
+
+/// A post needs the session and this page's exact origin; anything else records nothing.
+#[tokio::test]
+async fn an_answer_needs_the_session_and_this_origin() {
+    let case = running(true).await;
+    let cookie = case.login().await;
+    let request = case
+        .worker()
+        .open_request(&RequestOwner::User, None, "Ship it?", "k-1")
+        .await
+        .unwrap()
+        .request;
+    let key = form_key(&case.get("/", Some(&cookie)).await.body, &request).unwrap();
+    let form = answer_form(&request, &key, "yes");
+    let origin = case.origin();
+    let other_port = format!("http://127.0.0.1:{}", case.addr.port() + 1);
+    let refused = [
+        (None, Some(origin.as_str()), 401),
+        (Some(cookie.as_str()), None, 403),
+        (Some(cookie.as_str()), Some("null"), 403),
+        (Some(cookie.as_str()), Some(other_port.as_str()), 403),
+        (Some(cookie.as_str()), Some("http://localhost"), 403),
+    ];
+    for (cookie, origin, status) in refused {
+        let response = case.post_answer(cookie, origin, &form).await;
+        assert_eq!(response.status, status, "{origin:?}");
+    }
+    let stored = case.owner().request("project", &request).await.unwrap();
+    assert_eq!(stored.state, RequestState::Open);
+    assert!(case
+        .owner()
+        .request_answers("project", &request, 0, 10)
+        .await
+        .unwrap()
+        .is_empty());
+    stop(case).await;
+}
+
+/// The form's key makes a resubmit a retry: it returns the first answer. A second answer with
+/// a fresh key is refused, because answers are append-only once a request is answered.
+#[tokio::test]
+async fn a_resubmitted_form_is_one_answer() {
+    let case = running(true).await;
+    let cookie = case.login().await;
+    let request = case
+        .worker()
+        .open_request(&RequestOwner::User, None, "Ship it?", "k-1")
+        .await
+        .unwrap()
+        .request;
+    let key = form_key(&case.get("/", Some(&cookie)).await.body, &request).unwrap();
+    let form = answer_form(&request, &key, "yes");
+    for _ in 0..2 {
+        let posted = case
+            .post_answer(Some(&cookie), Some(&case.origin()), &form)
+            .await;
+        assert_eq!(posted.status, 303);
+    }
+    let late = case
+        .post_answer(
+            Some(&cookie),
+            Some(&case.origin()),
+            &answer_form(&request, &"f".repeat(32), "no"),
+        )
+        .await;
+    assert_eq!(late.status, 409);
+    assert!(late.body.contains("already answered"), "{}", late.body);
+    let answers = case
+        .owner()
+        .request_answers("project", &request, 0, 10)
+        .await
+        .unwrap();
+    assert_eq!(answers.len(), 1);
+    assert_eq!(answers[0].body, "yes");
+    stop(case).await;
+}
+
+/// R3: a relay never answers a request, and the user's own answer is still taken after it.
+#[tokio::test]
+async fn a_relayed_request_is_still_answered_from_the_page() {
+    let case = running(true).await;
+    let cookie = case.login().await;
+    let request = case
+        .worker()
+        .open_request(&RequestOwner::User, None, "Ship it?", "k-1")
+        .await
+        .unwrap()
+        .request;
+    case.lead()
+        .answer_request(&request, "the user said yes", "r-1")
+        .await
+        .unwrap();
+    let key =
+        form_key(&case.get("/", Some(&cookie)).await.body, &request).expect("still answerable");
+    let posted = case
+        .post_answer(
+            Some(&cookie),
+            Some(&case.origin()),
+            &answer_form(&request, &key, "yes"),
+        )
+        .await;
+    assert_eq!(posted.status, 303);
+    let stored = case.owner().request("project", &request).await.unwrap();
+    assert_eq!(stored.state, RequestState::Answered);
+    stop(case).await;
+}
+
+/// A question for a member is that member's to answer: the page offers no form, and a forged
+/// post is refused without recording anything.
+#[tokio::test]
+async fn a_members_request_is_not_answered_from_the_page() {
+    let case = running(true).await;
+    let cookie = case.login().await;
+    let request = case
+        .worker()
+        .open_request(&RequestOwner::Member("lead".into()), None, "Review?", "k-1")
+        .await
+        .unwrap()
+        .request;
+    let page = case.get("/", Some(&cookie)).await;
+    assert!(page.body.contains(&request));
+    assert!(form_key(&page.body, &request).is_none());
+    let forged = case
+        .post_answer(
+            Some(&cookie),
+            Some(&case.origin()),
+            &answer_form(&request, &"a".repeat(32), "yes"),
+        )
+        .await;
+    assert_eq!(forged.status, 409);
+    assert!(case
+        .owner()
+        .request_answers("project", &request, 0, 10)
+        .await
+        .unwrap()
+        .is_empty());
+    stop(case).await;
+}
+
+/// An unknown request and a malformed form get the same answer as a missing page.
+#[tokio::test]
+async fn an_unknown_request_or_a_malformed_form_is_not_found() {
+    let case = running(true).await;
+    let cookie = case.login().await;
+    let origin = case.origin();
+    for form in [
+        answer_form(&format!("req-{}", "0".repeat(32)), &"a".repeat(32), "yes"),
+        "context=project&body=yes".to_string(),
+        String::new(),
+    ] {
+        let response = case.post_answer(Some(&cookie), Some(&origin), &form).await;
+        assert_eq!(response.status, 404, "{form}");
+    }
+    stop(case).await;
+}
+
+/// The form route reads a bounded body: an oversized post is refused before any parsing.
+#[tokio::test]
+async fn an_oversized_answer_is_refused() {
+    let case = running(true).await;
+    let cookie = case.login().await;
+    let request = case
+        .worker()
+        .open_request(&RequestOwner::User, None, "Ship it?", "k-1")
+        .await
+        .unwrap()
+        .request;
+    let form = answer_form(&request, &"a".repeat(32), &"y".repeat(70 * 1024));
+    let response = case
+        .post_answer(Some(&cookie), Some(&case.origin()), &form)
+        .await;
+    assert_eq!(response.status, 413);
+    assert_eq!(
+        case.owner()
+            .request("project", &request)
+            .await
+            .unwrap()
+            .state,
+        RequestState::Open
     );
     stop(case).await;
 }

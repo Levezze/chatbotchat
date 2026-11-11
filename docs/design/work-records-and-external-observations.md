@@ -269,7 +269,8 @@ reached only through the store.
 - **The route decides the channel.** The owner route records `owner`. The
   owner member's own binding records `member`. Any other member records
   `relayed`, with the relaying member. Nothing the caller sends can choose the
-  channel.
+  channel. The channel is the trust class. Since D2 an `owner` answer also
+  records its surface: none for the owner route, `dashboard` for the page.
 - **Relays (proposed default, for the user's review).** The policy is one
   function, `relay_allowed`. Only a question for the user can be relayed, and
   only until the user has answered it on the owner route. Any active member
@@ -460,7 +461,8 @@ outbox timeline are D1b, below.
     function for `& < > " '`.
   - Every response carries `Content-Security-Policy: default-src 'none';
     style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none';
-    base-uri 'none'`, plus `Referrer-Policy: no-referrer`,
+    base-uri 'none'`, plus `Referrer-Policy: no-referrer` (`same-origin`
+    since D2, below),
     `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. That
     includes errors, redirects and the 404.
   - Links carry IDs URL-encoded and then escaped.
@@ -571,6 +573,69 @@ Mutation checks: each of the following fails at least one test.
 - Serving the item or timeline page without a session.
 - Not trimming the entry read past the page.
 - Leaving a missing stage blank instead of "not yet".
+
+### D2 as built: answering from the dashboard
+
+D2 lets the user answer a question for the user from the page (T-11, T-12).
+Migration `0013_answer_surface` adds one column; the schema version is 13.
+
+- **An owner answer with a surface.** A dashboard session can only be started
+  from a code the owner route minted, so an answer from the page is the
+  user's own, authenticated answer. It is recorded on the `owner` channel and
+  follows every owner rule unchanged: only a question for the user, refused
+  once the request is answered or withdrawn, and accepted after a relay
+  (the R3 relay rule above). What differs is the new `surface` column:
+  `dashboard` for the page, empty for the owner route. A CHECK allows a
+  surface only on an `owner` answer. `Answer.surface` is omitted from the
+  wire when empty, so owner-route output is unchanged. The asker's `answered`
+  event is the same as for any owner answer and does not name the surface.
+- **Why a column and not a `dashboard` channel.** Widening the channel CHECK
+  means rebuilding `candidate_request_answers`, which
+  `candidate_request_events.answer_id` references. With foreign keys on, a
+  rebuild inside a migration's transaction fails its foreign-key check at
+  COMMIT, even with `defer_foreign_keys` (measured). The alternative, a
+  migration outside a transaction that switches foreign keys off on a pooled
+  connection, was not worth it for a value that carries no trust of its own.
+  A unit test applies 0013 to a database that already holds answers.
+- **The form.** Each pending question for the user has a form: a textarea of
+  at most 4000 characters and three hidden fields, the context, the request
+  and a key. A question for a member says whose it is and has no form.
+- **The post.** `POST /answer` needs the session (401 otherwise) and exactly
+  one `Origin` header equal to `http://127.0.0.1:<port>` (403 otherwise,
+  `null` included). The session cookie is also `SameSite=Strict`; the Origin
+  check does not rely on that. The body is capped at 64 KiB (413). A missing
+  field, a malformed ID or an unknown request is a 404, as for any missing
+  page. Any other refusal is a 409 that says why: already answered,
+  withdrawn, a member's question, or empty or overlong text. Success is a 303
+  back to the context's panel, where the question is gone.
+- **Resubmitting is a retry.** Each render puts a fresh 128-bit key in each
+  form. Posting the same form twice returns the first answer through the
+  owner route's existing retry path. A new render has a new key, so a second
+  answer from it is refused as already answered.
+- **Referrer policy is now `same-origin`.** Under `no-referrer` a browser
+  sends `Origin: null` on the page's own form post, so the route could not
+  tell its own page from anyone else's. Measured in a Chromium-based browser
+  pane with a throwaway local page: `no-referrer` sent `Origin: null` and
+  `same-origin` sent `Origin: http://127.0.0.1:<port>`. `same-origin` still
+  sends no referrer to any other origin. This changes D1's header contract.
+- **Not in D2.** The plan listed "shared notices" for D2, but nothing in the
+  design defines them, so D2 does not invent a scope for them.
+
+Tests are in `tests/dashboard.rs` (seven new, over a real socket) and a
+migration unit test in `src/store.rs`.
+
+Mutation checks: each of the following fails at least one test.
+- Answering without the session.
+- Skipping the Origin check, accepting `Origin: null`, or accepting any
+  `http://127.0.0.1` origin.
+- Recording no surface for a dashboard answer.
+- Showing a form for a member's question.
+- Rendering the same key every time.
+- Dropping the body limit.
+- Mapping every refusal to 404, or none.
+- Redirecting somewhere other than the context's panel.
+- Keeping `no-referrer`.
+- Dropping the surface CHECK, or letting any channel carry a surface.
 
 ## Registration, controls and eligible merge
 

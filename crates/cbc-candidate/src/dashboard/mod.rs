@@ -1,17 +1,19 @@
 //! The dashboard (T-11): a plain page the core serves on its own loopback port. It reads
 //! through the same trusted owner reads as the owner route and is reached only through a
-//! session that the user's own `dashboard` command starts (T-12). D1 is read-only.
+//! session that the user's own `dashboard` command starts (T-12). Its one write is the user's
+//! answer to a question for the user (D2), recorded as an owner answer.
 pub mod render;
 pub mod session;
 
 use crate::{requests::MAX_REQUEST_PAGE, store::Store};
 use anyhow::{ensure, Context as _, Result};
 use axum::{
-    extract::{RawQuery, Request, State},
+    body::Bytes,
+    extract::{DefaultBodyLimit, RawQuery, Request, State},
     http::{header, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use hyper_util::{
@@ -34,6 +36,9 @@ pub const MAX_OUTBOX_PAGE: u32 = 20;
 /// Open browser connections at once; past this a new one is closed unanswered.
 const MAX_CONNECTIONS: usize = 16;
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// An answer form: 4000 characters of up to four UTF-8 bytes each, percent-encoded, with room
+/// for the hidden fields.
+const MAX_FORM_BYTES: usize = 64 * 1024;
 const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
 struct Dashboard {
@@ -70,6 +75,10 @@ pub async fn serve(
         .route("/login", get(login))
         .route("/item", get(item))
         .route("/timeline", get(timeline))
+        .route(
+            "/answer",
+            post(answer).layer(DefaultBodyLimit::max(MAX_FORM_BYTES)),
+        )
         .fallback(|| async { (StatusCode::NOT_FOUND, plain("Not found.")) })
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state);
@@ -138,7 +147,10 @@ async fn guard(State(d): State<Arc<Dashboard>>, request: Request, next: Next) ->
     let headers = response.headers_mut();
     for (name, value) in [
         (header::CONTENT_SECURITY_POLICY, CSP),
-        (header::REFERRER_POLICY, "no-referrer"),
+        // Not no-referrer: under it a browser sends `Origin: null` on the page's own form post,
+        // and the answer route could not tell its own page from any other. same-origin still
+        // sends no referrer off this origin.
+        (header::REFERRER_POLICY, "same-origin"),
         (header::CACHE_CONTROL, "no-store"),
         (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
     ] {
@@ -346,4 +358,76 @@ async fn timeline_page(store: &Store, query: &Option<String>) -> Result<String> 
         .await?
         .context("unknown event")?;
     Ok(render::timeline(&context, &event))
+}
+
+/// The page's own form post and nothing else: the session, then this origin exactly. The
+/// session cookie is SameSite=Strict as well; the Origin check does not depend on it.
+async fn answer(
+    State(d): State<Arc<Dashboard>>,
+    headers: axum::http::HeaderMap,
+    form: Bytes,
+) -> Response {
+    if !signed_in(&d, &headers) {
+        return signed_out();
+    }
+    let mut origins = headers.get_all(header::ORIGIN).iter();
+    let expected = format!("http://{}", d.host);
+    if !matches!((origins.next(), origins.next()), (Some(o), None) if o == expected.as_str()) {
+        return (
+            StatusCode::FORBIDDEN,
+            plain("This answer did not come from this dashboard's own page."),
+        )
+            .into_response();
+    }
+    let field = |name: &str| {
+        url::form_urlencoded::parse(&form)
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.into_owned())
+    };
+    let (Some(context), Some(request), Some(key), Some(body)) = (
+        field("context"),
+        field("request"),
+        field("key"),
+        field("body"),
+    ) else {
+        return not_found();
+    };
+    match d
+        .store
+        .dashboard_answer_request(&context, &request, &body, &key)
+        .await
+    {
+        Ok(_) => (
+            StatusCode::SEE_OTHER,
+            [(header::LOCATION, format!("/?context={}", query(&context)))],
+        )
+            .into_response(),
+        Err(error) => refused(&error),
+    }
+}
+
+/// A missing or malformed request is not found, like any missing page. Anything else is a
+/// refusal the user should read: already answered, withdrawn, a member's question, bad text.
+fn refused(error: &anyhow::Error) -> Response {
+    let message = error.to_string();
+    let missing = message == "unknown request"
+        || [
+            "invalid context",
+            "invalid request id",
+            "invalid request key",
+        ]
+        .iter()
+        .any(|p| message.starts_with(p));
+    if missing {
+        return not_found();
+    }
+    (
+        StatusCode::CONFLICT,
+        plain(&format!("Not recorded: {message}")),
+    )
+        .into_response()
+}
+
+fn query(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
