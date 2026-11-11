@@ -242,7 +242,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cbc"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -303,7 +303,7 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chatbotchat-client"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "chatbotchat-protocol",
  "reqwest",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "chatbotchat-core"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "axum",
  "chatbotchat-protocol",
@@ -332,7 +332,7 @@ dependencies = [
 
 [[package]]
 name = "chatbotchat-protocol"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -341,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "chatbotchat-server"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "anyhow",
  "axum",
