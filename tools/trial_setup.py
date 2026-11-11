@@ -48,10 +48,12 @@ TEMPLATE = ROOT / "docs/design/trial-launch-sheet-phase{phase}.md"
 SOCKET_LIMIT = 104
 SOCKETS = ("connector.sock", "device.sock")
 LEGACY_SKILL = re.compile(r"^(?:cbc|cbc-.+|emperor)$")
-SEAT_NAME = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+# A seat name is the member ID, so it follows the hierarchy helper's kebab-case rule too.
+SEAT_NAME = re.compile(r"^(?=.{1,32}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 # The case name becomes the context `trial-<name>` and the run `trial-<name>-run1`; a run id is 1 to 64
 # letters, digits, '-', '_' or '.'.
-CASE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,39}$")
+# The context `trial-<name>` must pass the hierarchy helper's kebab-case ID rule.
+CASE_NAME = re.compile(r"^(?=.{1,40}$)[a-z0-9]+(?:-[a-z0-9]+)*$")
 HOSTS = ("claude", "codex")
 PHASES = {1: {"peer-a": "claude", "peer-b": "codex"},
           2: {"primarch": "codex", "cm-a": "claude", "cm-b": "claude"}}
@@ -89,8 +91,8 @@ def canonical(path):
 
 def check_case_name(case):
     if not CASE_NAME.match(Path(case).name):
-        raise ValueError(f"case name must be 1 to 40 lowercase letters, digits, '.', '_' or '-', starting with a "
-                         f"letter or digit, so it can form the run id: {Path(case).name!r}")
+        raise ValueError(f"case name must be 1 to 40 lowercase letters and digits in hyphen-separated words, so "
+                         f"it can form the context and run ids: {Path(case).name!r}")
 
 
 def shell_safe(*paths):
@@ -272,6 +274,10 @@ def prepare(case, project, seat, host, python, claude_skills_dir=Path.home() / "
         previous = json.loads(record_path.read_text())
         if previous["project"] != str(project) or previous["host"] != host:
             raise ValueError(f"seat {seat} is already prepared for {previous['project']} ({previous['host']})")
+    hierarchy = project / ".cbc/hierarchy"
+    if not record_path.exists() and (hierarchy.exists() or hierarchy.is_symlink()):
+        raise ValueError(f"existing hierarchy records in {hierarchy}; teardown would archive them, so use a "
+                         "fresh worktree")
     legacy = sorted(path.name for pattern in ("worker-*.md", "orchestration-*.md")
                     for path in (project / ".cbc").glob(pattern))
     if legacy:

@@ -431,10 +431,36 @@ class PathSafetyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp).resolve()
             source, binary = fake_source(base)
-            for name in ("case+1", "a" * 41, "Case"):
+            for name in ("case+1", "a" * 41, "Case", "c_1", "c.1", "a--b", "a-"):
                 with self.assertRaisesRegex(ValueError, "case name"):
                     setup.pin(source, binary, base / name)
                 self.assertFalse((base / name).exists())
+
+    def test_existing_hierarchy_records_are_refused_but_a_rerun_keeps_its_own(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            case = Case(base)
+            project = fake_project(base)
+            (project / ".cbc/hierarchy").mkdir(parents=True)
+            (project / ".cbc/hierarchy/state.json").write_text("{}\n")
+            with self.assertRaisesRegex(ValueError, "hierarchy"):
+                case.prepare(project, "cm-a", "claude")
+            self.assertFalse((project / ".mcp.json").exists())
+            other = fake_project(base, "cm-b")
+            case.prepare(other, "cm-b", "claude")
+            (other / ".cbc/hierarchy").mkdir(parents=True)
+            (other / ".cbc/hierarchy/state.json").write_text("{}\n")
+            case.prepare(other, "cm-b", "claude")
+
+    def test_seat_names_that_are_not_member_ids_are_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            case = Case(base)
+            project = fake_project(base)
+            for seat in ("cm--a", "cm-", "Cm-a"):
+                with self.assertRaisesRegex(ValueError, "seat names"):
+                    case.prepare(project, seat, "claude")
+            self.assertFalse((project / ".mcp.json").exists())
 
     def test_cases_sharing_a_basename_keep_separate_exclude_blocks(self):
         with tempfile.TemporaryDirectory() as temp:
