@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.27.0](https://github.com/Levezze/chatbotchat/compare/v0.26.0...v0.27.0) (2026-11-11)
+
+
+### Features
+
+* **candidate:** wake facts, activity facts and bounded recovery (B1) ([#150](https://github.com/Levezze/chatbotchat/issues/150)) ([01c16d5](https://github.com/Levezze/chatbotchat/commit/01c16d52526fa0ec66da276e4197829f6575f011))
+
 ## [0.26.0](https://github.com/Levezze/chatbotchat/compare/v0.25.0...v0.26.0) (2026-11-11)
 
 
