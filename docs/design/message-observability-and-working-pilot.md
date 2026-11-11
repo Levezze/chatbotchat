@@ -364,7 +364,7 @@ What "accepted" means, per path:
 |---|---|---|---|
 | `claude_channel` | the router writes the `changed` bell for a batch | the bell was written to the session's channel socket | highest sequence in the batch |
 | `codex_queue` | the queue command actually runs | the command exited 0; a latched hint runs nothing and reports nothing | the hint's sequence (the member's highest unread) |
-| `claude_mod` | a native wait answers `pending` | the HTTP 200 was produced for the mod's wait | the highest of the first unread, the last delivered feed hint and the feed hint not yet delivered |
+| `claude_mod` | a native wait answers `pending` | the HTTP 200 was written to the mod's connection; a failed write reports `failed` with `mod_write_failed` | the highest of the first unread, the last delivered feed hint and the feed hint not yet delivered |
 
 None of these proves the model read anything. A wake is the transport's last
 observable step; activity is the next one.
@@ -499,6 +499,12 @@ Mutants, each run against the full crate suite (17):
   One coalescing remains on the native path: its report comes when the mod next
   waits and marks whichever hold is current, so two native recoveries can share
   one report. That is still at most one unacknowledged report per hold.
+- Codex's sixth review found that the native path reported `accepted` before
+  the 200 was written, so a mod that hung up first left a false wake fact. The
+  attempt time is still taken before the write; the outcome is reported after
+  it, `failed` with `mod_write_failed` when the write fails. The test (red
+  first) closes the mod's end of a real socket pair during the final status
+  check.
 - Not tested: the clamp on `attempt_wall_us`, which needs a receipt more than
   ten minutes old.
 - Not tested: the fail-soft path of `recovery_due` in `binding_status`. It needs

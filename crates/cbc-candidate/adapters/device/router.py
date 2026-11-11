@@ -454,7 +454,7 @@ class DeviceRouter(claude.Router):
             except (OSError, ValueError):
                 return {"type": "error"}
 
-    def handle_native(self, conn, pid, uid, initial):
+    def handle_native(self, conn, pid, uid, initial, wake=None):
         try:
             after = native.read_request(conn, initial)
         except (OSError, ValueError):
@@ -474,13 +474,13 @@ class DeviceRouter(claude.Router):
         if attached:
             self.event("native_mod_attached", member=binding["member"])
         try:
-            return self.wait_native(session, binding, pid, uid, after)
+            return self.wait_native(session, binding, pid, uid, after, wake)
         finally:
             with self.native_ready:
                 self.native_pending.discard(session)
             self.native_slots.release()
 
-    def wait_native(self, session, binding, pid, uid, after):
+    def wait_native(self, session, binding, pid, uid, after, wake=None):
         deadline = time.monotonic() + native.WAIT_SECONDS
         while True:
             with self.native_ready:
@@ -536,9 +536,10 @@ class DeviceRouter(claude.Router):
                     self.native_recover.discard(session)
                     through = max(fresh_first, self.latest_hint.get(session, 0), hinted)
                 self.event("native_mod_pending", member=binding["member"])
-                # Reported before the 200 is written, so this is before the mod hears of it.
-                self.report_wake(binding, through, "claude_mod", "accepted", None, recovery,
-                                 time.time_ns() // 1000)
+                # The attempt time is taken before the 200 is written, so it precedes the mod
+                # hearing of it; serve reports the outcome once the write has succeeded or failed.
+                if wake is not None:
+                    wake.append((binding, through, recovery, time.time_ns() // 1000))
                 return native.response(200, {"v": 1, "type": "pending", "cursor": token})
             with self.native_ready:
                 if generation != self.native_generation:
@@ -567,9 +568,19 @@ class DeviceRouter(claude.Router):
                 return
             pid, uid = claude.peer_credentials(conn)
             if initial not in b"{[ \t\r\n":
-                reply = self.handle_native(conn, pid, uid, initial)
-                conn.settimeout(1)
-                conn.sendall(reply)
+                wake = []
+                reply = self.handle_native(conn, pid, uid, initial, wake)
+                failure = "mod_write_failed"
+                try:
+                    conn.settimeout(1)
+                    conn.sendall(reply)
+                    failure = None
+                finally:
+                    # Acceptance is the pending reaching the mod. (Codex review 6.)
+                    for binding, through, recovery, attempted_us in wake:
+                        self.report_wake(binding, through, "claude_mod",
+                                         "failed" if failure else "accepted", failure,
+                                         recovery, attempted_us)
                 return
             # Preserve the original raw newline JSON protocol and channel ownership.
             conn.settimeout(10)

@@ -1122,6 +1122,26 @@ class NativeHttpTests(DeviceTests):
         self.assertEqual(self.wake_reports(), [("claude", {"through": 12, "kind": "claude_mod",
             "outcome": "accepted", "recovery": False})])
 
+    def test_a_mod_that_hangs_up_before_its_pending_is_written_reports_a_failed_wake(self):
+        # Codex review 6: acceptance is the 200 reaching the mod, not the decision to send it.
+        self.state["first_unread_sequence"] = 4
+        statuses, peer, ready = [], [], threading.Event()
+        def status(grant, timeout):
+            statuses.append(1)
+            if len(statuses) == 2:  # the revalidation just before the 200
+                ready.wait(2)
+                peer[0].shutdown(socket.SHUT_RDWR)
+                peer[0].close()
+            return dict(self.state)
+        self.router.wake_status = status
+        client, worker = self.begin()
+        peer.append(client)
+        ready.set()
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(self.wake_reports(), [("claude", {"through": 4, "kind": "claude_mod",
+            "outcome": "failed", "failure": "mod_write_failed", "recovery": False})])
+
     def test_recovery_re_hints_a_parked_mod_once_even_with_an_unchanged_cursor(self):
         self.state["first_unread_sequence"] = 4
         status, body = self.exchange()
