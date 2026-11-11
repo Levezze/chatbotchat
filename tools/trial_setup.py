@@ -41,8 +41,8 @@ ADAPTERS = "crates/cbc-candidate/adapters"
 # process whose script path carries that segment (sampler::adapter_label).
 PIN_ADAPTERS = "pin/cbc-candidate/adapters"
 PIN_BINARY = "pin/bin/cbc-candidate"
-# Paths that must stay ignored: one probe inside each excluded directory.
-IGNORE_PROBES = (".claude/skills/wip-probe/SKILL.md", ".agents/skills/wip-probe/SKILL.md", ".cbc/hierarchy/probe")
+# Besides the written files and every installed skill file, the hierarchy records must stay ignored.
+IGNORE_PROBES = (".cbc/hierarchy/probe",)
 TEMPLATE = ROOT / "docs/design/trial-launch-sheet-phase{phase}.md"
 # The longest Unix socket path macOS can bind is 103 bytes.
 SOCKET_LIMIT = 104
@@ -144,7 +144,9 @@ def pin(source, binary, case):
         catalog.write_text(json.dumps({"name": market_name(case), "owner": {"name": "CBC trial"},
                                        "plugins": [{"name": PLUGIN, "source": f"./plugins/{PLUGIN}"}]},
                                       indent=2) + "\n")
-        record = {"v": 1, "commit": commit, "files": tree_digests(stage / "pin")}
+        # The marketplace copy is what Claude loads, so it is hashed too.
+        record = {"v": 1, "commit": commit, "files": tree_digests(stage / "pin"),
+                  "market": tree_digests(stage / "market")}
         (stage / "pin/pin.json").write_text(json.dumps(record, indent=2) + "\n")
         if (case / "pin").exists() or (case / "market").exists():
             if (tree_digests(case / "pin") != tree_digests(stage / "pin")
@@ -162,7 +164,8 @@ def verify_pin(case):
     if not record_path.is_file():
         raise ValueError(f"no pin in {case}; run `pin` first")
     record = json.loads(record_path.read_text())
-    if tree_digests(Path(case) / "pin", skip=("pin.json",)) != record["files"]:
+    if (tree_digests(Path(case) / "pin", skip=("pin.json",)) != record["files"]
+            or tree_digests(Path(case) / "market") != record["market"]):
         raise ValueError(f"the pinned files in {case} no longer match pin.json; start a new case")
     return record
 
@@ -230,6 +233,12 @@ def ignored(project, relatives):
     return set(out.splitlines())
 
 
+def redirected(project, relative):
+    """Whether the path or any directory between it and the project is a symlink."""
+    parts = Path(relative).parts
+    return any(project.joinpath(*parts[:depth]).is_symlink() for depth in range(1, len(parts) + 1))
+
+
 def refuse_symlinks(project, relatives):
     for relative in relatives:
         parts = Path(relative).parts
@@ -248,6 +257,8 @@ def prepare(case, project, seat, host, python, claude_skills_dir=Path.home() / "
     case, project = canonical(case), canonical(project)
     check_case_name(case)
     shell_safe(case, project, python)
+    if case == project or case in project.parents or project in case.parents:
+        raise ValueError(f"the case directory must not be inside the seat's worktree or contain it: {case}")
     if not SEAT_NAME.match(seat):
         raise ValueError(f"seat names are lowercase words and hyphens: {seat!r}")
     if host not in HOSTS:
@@ -290,6 +301,7 @@ def prepare(case, project, seat, host, python, claude_skills_dir=Path.home() / "
         exclude.parent.mkdir(parents=True, exist_ok=True)
         exclude.write_text(current + ("" if current.endswith("\n") or not current else "\n") + block)
     exposed = sorted(set([*files, *IGNORE_PROBES]) - ignored(project, [*files, *IGNORE_PROBES]))
+    exposed += [f"{host}/{trial.trial_name('*')}" for host in trial.unignored(project)]
     if exposed:
         if block not in current:
             exclude.write_text(current)
@@ -355,10 +367,10 @@ def remove_skills(project):
 def archive_hierarchy(case, seat, project, removed, kept):
     """Move the hierarchy skill's local records into the private case before their ignore rule goes."""
     hierarchy = project / ".cbc/hierarchy"
-    if not hierarchy.exists() and not hierarchy.is_symlink():
+    if not hierarchy.exists() and not hierarchy.is_symlink() and not hierarchy.parent.is_symlink():
         return
     target = case / "archive" / seat / "hierarchy"
-    if hierarchy.is_symlink() or not hierarchy.is_dir() or target.exists() or target.is_symlink():
+    if redirected(project, ".cbc/hierarchy") or not hierarchy.is_dir() or target.exists() or target.is_symlink():
         kept.append(".cbc/hierarchy")
         return
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -377,7 +389,10 @@ def teardown(case, seat):
     removed, kept = [], []
     for relative, expected in record["files"].items():
         path = project / relative
-        if not path.exists() and not path.is_symlink():
+        if redirected(project, relative):
+            kept.append(relative)
+            continue
+        if not path.exists():
             continue
         if owned(path, expected, case):
             path.unlink()

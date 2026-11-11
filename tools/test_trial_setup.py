@@ -483,6 +483,51 @@ class PathSafetyTest(unittest.TestCase):
             exclude = Path(git(project, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude").strip())
             self.assertNotIn("cbc-trial", exclude.read_text())
 
+    def test_a_case_inside_a_seat_worktree_is_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp).resolve()
+            case = Case(base)
+            project = fake_project(base)
+            inner = project / "c2"
+            setup.pin(case.source, case.binary, inner)
+            with self.assertRaisesRegex(ValueError, "inside"):
+                setup.prepare(inner, project, "cm-a", "claude", python="/usr/bin/python3",
+                              claude_skills_dir=case.skills)
+            self.assertFalse((project / ".mcp.json").exists())
+
+    def test_teardown_keeps_a_file_reached_through_a_symlinked_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            case = Case(base)
+            project = fake_project(base)
+            case.prepare(project, "cm-a", "claude")
+            elsewhere = base / "elsewhere"
+            (project / ".claude").rename(elsewhere)
+            (project / ".claude").symlink_to(elsewhere)
+            removed, kept = setup.teardown(case.dir, "cm-a")
+            self.assertIn(".claude/settings.local.json", kept)
+            self.assertTrue((elsewhere / "settings.local.json").is_file())
+
+    def test_a_negation_exposing_one_installed_skill_is_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            case = Case(base)
+            project = fake_project(base)
+            (project / ".gitignore").write_text(f"!/.agents/skills/{trial.trial_name('cbc-hierarchy')}/\n")
+            git(project, "add", ".gitignore")
+            git(project, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "negate")
+            with self.assertRaisesRegex(ValueError, "not ignored"):
+                case.prepare(project, "cm-a", "claude")
+            self.assertFalse((project / ".agents").exists())
+
+    def test_a_changed_marketplace_plugin_fails_the_pin_check(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            case = Case(base)
+            (case.dir / "market/plugins/cbc-candidate-wake/hooks/register.js").write_text("// swapped\n")
+            with self.assertRaisesRegex(ValueError, "no longer match"):
+                case.prepare(fake_project(base), "cm-a", "claude")
+
     def test_sheets_start_the_sampler_and_feed_it_to_the_report(self):
         for phase, seats in LaunchSheetTest.SEATS.items():
             with tempfile.TemporaryDirectory() as temp:
