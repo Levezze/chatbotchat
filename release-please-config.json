@@ -9,6 +9,11 @@
           "type": "toml",
           "path": "Cargo.toml",
           "jsonpath": "$.workspace.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value == 'cbc' || @.name.value == 'chatbotchat-client' || @.name.value == 'chatbotchat-core' || @.name.value == 'chatbotchat-protocol' || @.name.value == 'chatbotchat-server')].version"
         }
       ]
     }
