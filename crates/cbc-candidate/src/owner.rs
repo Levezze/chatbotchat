@@ -88,6 +88,9 @@ pub struct OwnerControl {
 }
 
 impl OwnerControl {
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
     pub fn open(sandbox: &Sandbox) -> Result<Self> {
         let root = sandbox.root().to_path_buf();
         validate_root(&root)?;

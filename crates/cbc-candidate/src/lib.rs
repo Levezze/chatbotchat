@@ -3,6 +3,7 @@ pub mod bindings;
 pub mod connector;
 pub mod dashboard;
 pub mod enrollment;
+pub mod evidence;
 pub mod facts;
 pub mod inbox;
 pub mod native_target;

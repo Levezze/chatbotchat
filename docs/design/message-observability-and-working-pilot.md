@@ -539,3 +539,59 @@ run, so it lands after B1 and does not block trial setup.
   measurements are printed as missing.
 - **Sampler.** CPU, RSS and disk for the core and driver processes, sampled at
   a fixed interval into a local file, normal mode and debug mode labelled.
+
+### C1 as built: snapshot, evidence, manifest
+
+The core holds an exclusive lease on its database for as long as it runs, so
+nothing else may open the live file. Every trial record therefore reads a
+snapshot that the running core writes on the owner's request.
+
+- **Snapshot.** Owner operation `snapshot`, which only the core runs. It
+  creates `<root>/snapshots/` with mode 0700 if missing. It then creates
+  `snapshot-<wall_ms>-<random>.sqlite3` with `create_new`, mode 0600 and
+  `O_NOFOLLOW`, and runs `VACUUM INTO` that file. SQLite writes into an
+  existing file only when it is empty. So a snapshot never replaces a file,
+  never follows a link, and is never readable by another user. If the VACUUM
+  fails, the empty file is removed. The reply is `{file, taken_wall_ms}`.
+- **Evidence.** `evidence::Evidence::open` accepts only a `snapshot-*.sqlite3`
+  file directly beneath the snapshot directory. The file must be a private
+  regular file with one link. The sandbox is re-inspected first, so the
+  protected-database checks apply as well.
+  - SQLite opens it `read_only` and `immutable`, with no lease, no migration
+    and no core clock.
+  - It refuses a file whose `application_id` is not the candidate's, or whose
+    `user_version` is not the current schema version.
+  - The live database is refused by path, and a unit test shows that a write
+    through Evidence fails.
+- **Manifest.** `cbc-candidate manifest --root … --protected-db … --out
+  <root>/snapshots/<name>.json --trial N [--version k=v]… [--note k=v]…`.
+  - The path is checked before anything else, so a bad path or an existing
+    file costs no snapshot. The command then takes a snapshot, reads the
+    settings snapshot, and writes the manifest with `create_new`.
+  - Fields:
+    - `trial`, `schema_version`;
+    - `build {commit, binary_sha256}`. The commit comes from the
+      compile-time `CBC_BUILD_COMMIT`, which the launch sheet's build command
+      sets, and is `unknown` otherwise.
+    - `snapshot {file, taken_wall_ms, sha256}`;
+    - `versions`, `notes`;
+    - `settings`, the full settings snapshot with its revision;
+    - `seats`: context, member, role, active, retired, epoch, native session
+      and host at the current epoch;
+    - `approval_prompts`: one entry per `context/member` with `cbc`,
+      `native_setup`, `native_refusal` and `other`, all `null` until the
+      user fills them in.
+  - No credential digest or token is read into it, and a test asserts that
+    the bytes contain neither.
+  - Output is canonical: pretty JSON with keys sorted at every level and a
+    final newline. Sorting is explicit because the workspace builds
+    serde_json with `preserve_order`. A test shows the canonical form is a
+    fixed point.
+- **Tests.** `tests/evidence.rs` runs over a real connector:
+  - a snapshot taken before a retirement still shows the seat unretired;
+  - reading changes no bytes;
+  - junk named like a snapshot is refused;
+  - the live database is refused;
+  - the manifest fields and canonical form are checked;
+  - the command refuses a path outside the snapshot directory and never
+    overwrites a manifest.

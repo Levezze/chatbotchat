@@ -69,6 +69,25 @@ enum Command {
         #[arg(long, requires = "file")]
         expected_revision: Option<String>,
     },
+    /// Trial record (C1): the running core snapshots its database, then this writes the
+    /// manifest for that snapshot to a new file in the snapshot directory. Prints both paths.
+    Manifest {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        protected_db: PathBuf,
+        /// New `.json` file directly beneath `<root>/snapshots`; never overwritten.
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        trial: u32,
+        /// Tool version as name=value, e.g. claude=2.1.3; repeatable.
+        #[arg(long = "version", value_parser = key_value)]
+        versions: Vec<(String, String)>,
+        /// Anything else the trial record needs as name=value; repeatable.
+        #[arg(long = "note", value_parser = key_value)]
+        notes: Vec<(String, String)>,
+    },
     /// Revoke only the expected current binding, leaving logical assignment records intact.
     Revoke {
         #[arg(long)]
@@ -113,6 +132,38 @@ async fn main() -> anyhow::Result<()> {
         protected_dbs.push(path.into());
     }
     match Args::parse().command {
+        Command::Manifest {
+            root,
+            protected_db,
+            out,
+            trial,
+            versions,
+            notes,
+        } => {
+            protected_dbs.push(protected_db);
+            let sandbox = cbc_candidate::Sandbox::inspect(&root, &protected_dbs)?;
+            protect_port(sandbox.port())?;
+            let owner = owner_token(&sandbox)?;
+            let socket = sandbox.root().join("connector.sock");
+            let client = cbc_candidate::connector::LocalOwnerClient::new(&socket, &owner);
+            let snapshot = cbc_candidate::evidence::record_manifest(
+                &sandbox,
+                &client,
+                &out,
+                cbc_candidate::evidence::ManifestArgs {
+                    trial,
+                    build_commit: option_env!("CBC_BUILD_COMMIT").unwrap_or("unknown").into(),
+                    versions: versions.into_iter().collect(),
+                    notes: notes.into_iter().collect(),
+                },
+            )
+            .await?;
+            println!(
+                "{}",
+                serde_json::json!({"status":"recorded","manifest":out,"snapshot":snapshot.file})
+            );
+            Ok(())
+        }
         Command::Revoke {
             root,
             protected_db,
@@ -438,6 +489,15 @@ fn reserve_profile(sandbox: &cbc_candidate::Sandbox, path: &Path) -> Result<fs::
         "unsafe private profile file"
     );
     Ok(file)
+}
+
+fn key_value(text: &str) -> Result<(String, String)> {
+    let (key, value) = text.split_once('=').context("expected name=value")?;
+    ensure!(
+        !key.is_empty() && key.len() <= 64 && value.len() <= 256,
+        "name=value out of bounds"
+    );
+    Ok((key.to_owned(), value.to_owned()))
 }
 
 fn protect_port(port: u16) -> anyhow::Result<()> {

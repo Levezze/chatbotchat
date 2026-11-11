@@ -297,6 +297,7 @@ enum OwnerOperation {
         request: requests::OwnerRequestOperation,
     },
     DashboardLogin,
+    Snapshot,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -573,6 +574,9 @@ async fn owner_route(
         }
         OwnerOperation::Work { work } => work::owner_dispatch(store, work).await,
         OwnerOperation::Request { request } => requests::owner_dispatch(store, request).await,
+        OwnerOperation::Snapshot => Ok(serde_json::to_value(
+            crate::evidence::take_snapshot(store, owner.root()).await?,
+        )?),
         OwnerOperation::DashboardLogin => Ok(serde_json::json!({
             "code": sessions.context("no dashboard is running")?.mint_code(),
         })),
@@ -835,6 +839,12 @@ impl<'a> LocalOwnerClient<'a> {
             .as_str()
             .context("invalid candidate login code")?
             .to_owned())
+    }
+    /// C1: the running core freezes its database into a new private snapshot file.
+    pub async fn snapshot(&self) -> Result<crate::evidence::Snapshot> {
+        Ok(serde_json::from_value(
+            self.call(OwnerOperation::Snapshot).await?,
+        )?)
     }
     pub async fn provision(&self, spec: ProvisionSpec) -> Result<serde_json::Value> {
         self.call(OwnerOperation::Provision { spec }).await
