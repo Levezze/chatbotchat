@@ -209,8 +209,13 @@ async fn hitl_authority_holds_over_the_wire() {
         .await
         .is_err());
 
-    let (item, revisions) = owner.work_item("project", "feat-login").await.unwrap();
+    let item = owner.work_item("project", "feat-login").await.unwrap();
     assert!(!item.hitl);
+    assert_eq!(item.revision, 3);
+    let revisions = owner
+        .work_revisions("project", "feat-login", 0, 100)
+        .await
+        .unwrap();
     assert_eq!(revisions.len(), 3);
     assert_eq!(
         revisions
@@ -276,4 +281,53 @@ fn a_patch_on_the_wire_keeps_leave_clear_and_set_apart() {
             serde_json::from_str(&serde_json::to_string(&patch).unwrap()).unwrap();
         assert_eq!(back, patch);
     }
+}
+
+/// History comes in pages of at most 100, so a long-lived item never outgrows the reply limit.
+/// Revisions are append-only, so a page can't contradict an item read taken before or after it.
+#[tokio::test]
+async fn the_owner_reads_revision_history_in_bounded_pages() {
+    let case = running().await;
+    let worker = LocalClient::new(&case.socket, &case.worker);
+    let owner = LocalOwnerClient::new(&case.socket, &case.owner_key);
+    worker
+        .register_work_item("feat-login", "Login flow", "reg-1")
+        .await
+        .unwrap();
+    for n in 0..120 {
+        owner
+            .set_work_hitl("project", "feat-login", n % 2 == 0, &format!("user-{n}"))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        owner
+            .work_item("project", "feat-login")
+            .await
+            .unwrap()
+            .revision,
+        121
+    );
+    let first = owner
+        .work_revisions("project", "feat-login", 0, 1000)
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 100, "the page size is capped");
+    assert_eq!(first[0].revision, 1);
+    assert_eq!(first[99].revision, 100);
+    let rest = owner
+        .work_revisions("project", "feat-login", 100, 1000)
+        .await
+        .unwrap();
+    assert_eq!(
+        rest.iter().map(|r| r.revision).collect::<Vec<_>>(),
+        (101..=121).collect::<Vec<_>>()
+    );
+    assert!(owner
+        .work_revisions("project", "feat-login", 121, 10)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(owner.work_item("project", "missing").await.is_err());
+    stop(case).await;
 }

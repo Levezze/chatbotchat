@@ -763,3 +763,66 @@ async fn a_hidden_work_item_reads_like_a_missing_one() {
         .to_string();
     assert_eq!(hidden, missing);
 }
+
+/// T-07's "Primarch" is the item owner's own repo lead: the one holding an owner-issued report
+/// grant from the owner. Another repo lead in the same context can read the item but can't put
+/// a hold on it, and a revoked grant takes the authority with it.
+#[tokio::test]
+async fn only_the_owners_own_repo_lead_turns_hitl_on() {
+    let case = fixture().await;
+    case.store
+        .register_member("project", "lead2", Role::RepoLead)
+        .await
+        .unwrap();
+    let lead2 = case
+        .store
+        .bind_member("project", "lead2", "device", "lead2-session")
+        .await
+        .unwrap();
+    case.store
+        .register_work_item(&case.worker, "feat-login", "Login flow", "reg-1")
+        .await
+        .unwrap();
+
+    let error = case
+        .store
+        .set_work_hitl(&lead2, "feat-login", true, "h-1")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("not authorized"), "{error}");
+    assert_eq!(
+        case.store
+            .read_work_item(&lead2, "feat-login")
+            .await
+            .unwrap()
+            .revision,
+        1,
+        "reading stays wider than holding"
+    );
+
+    case.store
+        .revoke_connection(
+            "project",
+            "worker",
+            "lead",
+            ConnectionKind::Report,
+            "feature",
+        )
+        .await
+        .unwrap();
+    let error = case
+        .store
+        .set_work_hitl(&case.lead, "feat-login", true, "h-2")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("not authorized"), "{error}");
+    assert_eq!(
+        case.store
+            .work_item("project", "feat-login")
+            .await
+            .unwrap()
+            .unwrap()
+            .revision,
+        1
+    );
+}

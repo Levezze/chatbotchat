@@ -61,7 +61,9 @@ builds it. Only the missing part is built.
 | T-26 peer rooms | Opening is idempotent per pair, kind and `scope_ref`, with a deterministic room ID. Any member can close a room. A closed room refuses to reopen. | Uniqueness per unordered pair, whatever the scope. Close records actor and reason. A replacement room after a close, with a new ID and a link to the room it supersedes. A member's peer rooms go inactive when its identity retires, but not on a handoff. | R1 |
 | T-07, T-09 work items | Nothing. | Work items owned by one member. Revisions as one validated multi-field patch with an expected revision and an idempotency key, committed with one outbox event in the same transaction. A no-op patch produces no event. The HITL flag can be turned on by the user or a repo lead and turned off only on the owner-authenticated route. A feature lead can't change it. | R2 |
 | Outbox | Nothing beyond the inbox. | Outbox events are delivered through the existing inbox as a new item class, so the #113 PR-A delivery facts and waits cover them. No second delivery path. | R2 |
-| Work-item routes | Nothing. | Connector member routes for register, patch, HITL on and read; the owner route for HITL on and off and read; waking watchers when a work event commits. | R2b |
+| Work-item routes | Nothing. | Connector member routes for register, patch, HITL on and read; the owner route for HITL on and off and read; waking watchers when a work event commits. HITL scoped to the owner's own repo lead. | R2b |
+| Work-item follow-ups | R2 and R2b. | A no-op binds its idempotency key; a replayed registration is labelled; an item registered before its report room exists is delivered as a snapshot when the room connects. | R2c |
+| Inactive rooms | R1. | To check: a room set aside by the 0008 upgrade can still be written to. If so, it becomes drain-only: read and receipt, no send. | R1b |
 | T-10, T-12 requests | Nothing. | One canonical request with an owner (who answers) and a callback (who is woken). The answer records its channel. An answer an agent relays from chat is stored as relayed, with the relaying member, and never counts as owner-authenticated (proposed default, for the user's review). The answer wakes the asker through the outbox. | R3 |
 | T-27 waits | First-occurrence commit, offer and receipt facts (#113 PR-A). | A mapping from each wait cause in the trial protocol §6 to the facts it is derived from. CI waits (CM-A's observer), holds (#114) and acted-on (#113 PR-B) can't be observed yet and report `unknown`. The interval calculator itself belongs to the report in #113 C. | R3 |
 
@@ -169,13 +171,39 @@ operation to the member and owner protocols. Tests are in
   unchanged, and errors reach the client in the connector's usual opaque form.
 - **Reading.** A member reads an item it owns, or any item if it is a repo
   lead. Anyone else gets the same answer as for an item that does not exist.
-- **Owner route.** The user turns HITL on or off, and reads an item with its
-  full revision history, on the owner-authenticated route.
+- **Owner route.** The user turns HITL on or off and reads an item on the
+  owner-authenticated route. History is a separate read in pages of at most
+  100 revisions, so a long-lived item never outgrows the connector's reply
+  limit. Revisions are append-only, so pages taken at different times never
+  contradict each other or the item. (Codex review of #135: a single reply
+  could exceed the limit, and reading the item and history on separate
+  connections could disagree under a concurrent update.)
+- **HITL scope.** A repo lead turns HITL on only for an item whose owner holds
+  an active owner-issued report grant to that lead. The grant decides, not an
+  open room, a poll or a connected socket: replacing a room leaves the
+  authority in place, and revoking the grant removes it. Another repo lead in
+  the same context can read the item but can't put a hold on it. (Codex
+  supervision: T-07's Primarch is the owner's own repo lead.)
 - **Wire patch.** An absent field is left alone, `null` clears it, and a value
   sets it. Unknown fields are refused, so HITL can't ride in a patch.
 - **Waking.** A registration or an applied revision wakes parked watchers, the
   same signal a sent message gives. A no-op or a read wakes nobody. A test
   parks a lead's watch, registers an item, and fails if the watch isn't woken.
+
+Mutation checks:
+- Removing the wake fails the parked-watch test.
+- Removing the page cap fails the paging test.
+- Removing the grant check fails the two-lead test.
+- Making the hidden-item error differ fails the store-level read test. The
+  connector flattens member errors, so that test runs against the store.
+
+Three findings from the same review are left for R2c, which needs migration
+0010:
+- A no-op must still bind its idempotency key. Otherwise a delayed retry of an
+  old "HITL off" can clear a newer hold.
+- A replayed registration should say it is a replay.
+- An item registered before its owner's report room exists should reach the
+  lead as a current snapshot once the room is connected.
 
 ## Registration, controls and eligible merge
 

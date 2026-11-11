@@ -46,6 +46,12 @@ pub(super) enum OwnerWorkOperation {
         context: String,
         item: String,
     },
+    Revisions {
+        context: String,
+        item: String,
+        after: i64,
+        limit: u32,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -119,16 +125,21 @@ pub(super) async fn owner_dispatch(
         } => serde_json::json!({
             "outcome": store.owner_set_work_hitl(&context, &item, on, &key).await?,
         }),
-        OwnerWorkOperation::Get { context, item } => {
-            let found = store
+        // The item alone: its history comes in pages, so the reply never outgrows the limit.
+        OwnerWorkOperation::Get { context, item } => serde_json::json!({
+            "item": store
                 .work_item(&context, &item)
                 .await?
-                .context("unknown work item")?;
-            serde_json::json!({
-                "item": found,
-                "revisions": store.work_revisions(&context, &item).await?,
-            })
-        }
+                .context("unknown work item")?,
+        }),
+        OwnerWorkOperation::Revisions {
+            context,
+            item,
+            after,
+            limit,
+        } => serde_json::json!({
+            "revisions": store.work_revision_page(&context, &item, after, limit).await?,
+        }),
     })
 }
 
@@ -219,11 +230,7 @@ impl LocalOwnerClient<'_> {
             .await?;
         serde_json::from_value(value["outcome"].clone()).context("invalid candidate work result")
     }
-    pub async fn work_item(
-        &self,
-        context: &str,
-        item: &str,
-    ) -> Result<(WorkItem, Vec<WorkRevision>)> {
+    pub async fn work_item(&self, context: &str, item: &str) -> Result<WorkItem> {
         let value = self
             .call(OwnerOperation::Work {
                 work: OwnerWorkOperation::Get {
@@ -232,10 +239,28 @@ impl LocalOwnerClient<'_> {
                 },
             })
             .await?;
-        Ok((
-            serde_json::from_value(value["item"].clone()).context("invalid candidate work item")?,
-            serde_json::from_value(value["revisions"].clone())
-                .context("invalid candidate work revisions")?,
-        ))
+        serde_json::from_value(value["item"].clone()).context("invalid candidate work item")
+    }
+    /// Revisions after `after`, oldest first; the core caps a page at
+    /// [`crate::work::MAX_REVISION_PAGE`].
+    pub async fn work_revisions(
+        &self,
+        context: &str,
+        item: &str,
+        after: i64,
+        limit: u32,
+    ) -> Result<Vec<WorkRevision>> {
+        let value = self
+            .call(OwnerOperation::Work {
+                work: OwnerWorkOperation::Revisions {
+                    context: context.into(),
+                    item: item.into(),
+                    after,
+                    limit,
+                },
+            })
+            .await?;
+        serde_json::from_value(value["revisions"].clone())
+            .context("invalid candidate work revisions")
     }
 }

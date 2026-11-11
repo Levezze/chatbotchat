@@ -54,6 +54,10 @@ impl Stage {
     }
 }
 
+/// The most revisions one history page holds, so a reply stays far below the connector's
+/// size limit however long an item lives.
+pub const MAX_REVISION_PAGE: u32 = 100;
+
 /// The owner's content fields. `None` leaves a field as it is; for the clearable fields,
 /// `Some(None)` clears it. HITL is not here: it has its own routes and its own authority.
 ///
@@ -299,7 +303,7 @@ impl Store {
         Ok(WorkOutcome::Applied { revision })
     }
 
-    /// T-07 from a member: a repo lead may turn HITL on; nobody but the user turns it off.
+    /// T-07 from a member: the owner's repo lead may turn HITL on; only the user turns it off.
     pub async fn set_work_hitl(
         &self,
         binding: &SessionBinding,
@@ -316,6 +320,16 @@ impl Store {
             "not authorized: only a repo lead or the user sets HITL"
         );
         ensure!(on, "only the user turns HITL off");
+        // The owner's own repo lead: an active owner-issued report grant from the item's owner
+        // (the child, first) to this lead (the parent, second). Being a repo lead in the same
+        // context is not enough.
+        let granted: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM candidate_work_items w JOIN candidate_route_grants g ON g.context_id=w.context_id AND g.first_member=w.owner_member WHERE w.context_id=? AND w.item_id=? AND g.second_member=? AND g.kind='report' AND g.active=1)")
+            .bind(&binding.context_id).bind(item).bind(&binding.member_id)
+            .fetch_one(&mut *tx).await?;
+        ensure!(
+            granted,
+            "not authorized: only the owner's repo lead or the user sets HITL"
+        );
         let actor = Actor::Member(binding.member_id.clone());
         let outcome = self
             .set_hitl(&mut tx, &binding.context_id, item, on, &actor, key)
@@ -360,10 +374,35 @@ impl Store {
         load_item(&mut conn, context, item).await
     }
 
+    /// Every revision of an item, oldest first. In-process only: a reply over the connector
+    /// uses [`Store::work_revision_page`].
     pub async fn work_revisions(&self, context: &str, item: &str) -> Result<Vec<WorkRevision>> {
+        self.revisions_after(context, item, 0, -1).await
+    }
+
+    /// Revisions after `after`, oldest first, at most [`MAX_REVISION_PAGE`] of them. Revisions
+    /// are append-only, so pages read at different times never contradict each other.
+    pub async fn work_revision_page(
+        &self,
+        context: &str,
+        item: &str,
+        after: i64,
+        limit: u32,
+    ) -> Result<Vec<WorkRevision>> {
+        let limit = i64::from(limit.clamp(1, MAX_REVISION_PAGE));
+        self.revisions_after(context, item, after, limit).await
+    }
+
+    async fn revisions_after(
+        &self,
+        context: &str,
+        item: &str,
+        after: i64,
+        limit: i64,
+    ) -> Result<Vec<WorkRevision>> {
         let mut conn = self.pool.acquire().await?;
-        let rows = sqlx::query("SELECT revision,actor_kind,actor_member,changed,at_wall_ms FROM candidate_work_revisions WHERE context_id=? AND item_id=? ORDER BY revision")
-            .bind(context).bind(item).fetch_all(&mut *conn).await?;
+        let rows = sqlx::query("SELECT revision,actor_kind,actor_member,changed,at_wall_ms FROM candidate_work_revisions WHERE context_id=? AND item_id=? AND revision>? ORDER BY revision LIMIT ?")
+            .bind(context).bind(item).bind(after).bind(limit).fetch_all(&mut *conn).await?;
         let mut revisions = Vec::with_capacity(rows.len());
         for row in rows {
             let revision: i64 = row.try_get("revision")?;
