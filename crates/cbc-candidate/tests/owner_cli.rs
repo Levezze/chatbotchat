@@ -361,3 +361,57 @@ fn revoke_cli_fences_expected_binding_and_refuses_a_stale_revoke() {
         .failure();
     assert!(fixture.server.try_wait().unwrap().is_none());
 }
+
+#[test]
+fn retire_cli_ends_the_identity_for_good() {
+    use cbc_candidate::{bindings::SessionBinding, connector::LocalClient};
+    let mut fixture = Fixture::start();
+    let spec = fixture.spec();
+    let profile = fixture.root.join("native-bindings.json");
+    fixture
+        .command("provision")
+        .arg("--spec")
+        .arg(spec)
+        .arg("--profile-out")
+        .arg(&profile)
+        .assert()
+        .success();
+    let profile: Value = serde_json::from_slice(&fs::read(profile).unwrap()).unwrap();
+    let saved = &profile["bindings"][0];
+    let binding = SessionBinding::from_token(
+        saved["context"].as_str().unwrap(),
+        saved["member"].as_str().unwrap(),
+        saved["device"].as_str().unwrap(),
+        saved["session"].as_str().unwrap(),
+        saved["epoch"].as_i64().unwrap(),
+        saved["token"].as_str().unwrap(),
+    )
+    .unwrap();
+    let socket = fixture.root.join("connector.sock");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let retire = |fixture: &mut Fixture| {
+        fixture
+            .command("retire")
+            .args([
+                "--context",
+                "demo",
+                "--member",
+                "owner",
+                "--reason",
+                "trial ended",
+            ])
+            .assert()
+    };
+    let output = retire(&mut fixture).success().get_output().stdout.clone();
+    let result: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(result["status"], "retired");
+    assert_eq!(result["member"], "owner");
+    assert!(runtime
+        .block_on(LocalClient::new(&socket, &binding).settings())
+        .is_err());
+    retire(&mut fixture).failure();
+    assert!(fixture.server.try_wait().unwrap().is_none());
+}

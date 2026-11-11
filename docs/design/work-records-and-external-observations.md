@@ -87,7 +87,9 @@ Migration 0008 (schema 8). Tests are in `tests/peer_rooms.rs`.
   room membership takes the room out of the pair's active slot. A later
   authorized open gets a replacement, never the revoked room or its history.
 - **Retirement.** `retire_member` is an owner operation, also available on the
-  owner connector route. It closes the member's active rooms in its name with
+  owner connector route and as the owner CLI command `cbc-candidate retire`,
+  which takes `--context`, `--member` and `--reason` beside the usual `--root`
+  and `--protected-db`. It closes the member's active rooms in its name with
   the note `retired: <reason>`, which also fits the 200-character limit. It
   ends the binding and marks the identity retired. Registration, binding and
   enrollment all refuse a retired identity, and retiring twice fails.
