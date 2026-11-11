@@ -650,9 +650,14 @@ sampler and the Cost section it feeds.
   unknown cause with what it lacks, and the ten longest waits, ordered by
   duration, member and ID.
 - **Delivery.** Expected recipients of items committed in the window:
-  committed, receipted by `until`, and pending split into never offered and
-  offered but not receipted. Failed prints missing: no record says delivery
-  failed. Wake attempts reported in the window, by kind, accepted and failed
+  committed, receipted by `until`, superseded, and pending split into never
+  offered and offered but not receipted. Failed prints missing: no record says
+  delivery failed. A room notice is superseded when a newer notice for the same
+  room reaches the same member while it is unread: unread notices coalesce, so
+  it is never offered or receipted. It is not pending, its delivery wait ends
+  at the newer notice's commit, and it is not counted missing in wake latency.
+  A notice already offered stays in its batch until its receipt, or until the
+  member's next enrolment or rebind drops the batch. Wake attempts reported in the window, by kind, accepted and failed
   by class.
 - **Wake latency.** Per host and profile (for example `claude/desktop`), commit
   to wake accepted and commit to first activity. Each delivery belongs to the
@@ -696,13 +701,15 @@ sampler and the Cost section it feeds.
     monotonic versus wall latency, the merge filter, the tally format, and the
     whole template byte for byte from hand-built facts. Added after review:
     latency by the binding in force at commit, seats that would print alike,
-    a withdrawal with no time, and bindings loaded from a real provisioned
-    snapshot.
+    a withdrawal with no time, bindings loaded from a real provisioned
+    snapshot, and when a notice counts as superseded.
   - `tests/report.rs`, over real snapshots: the three-cut test above, a
     byte-identical repeat with no absolute path, the tally lines, and each
     refusal. At the baseline cut, a wait that began before the window (the
     lead's receipt of the room introduction during setup) is carried in,
     clipped to the window and shown open, rather than dropped. After review: a
     request to the user and a request ended by retirement, neither of which
-    emits an event, both close at their withdrawal; and the command, run from
-    inside the snapshot directory, takes bare file names.
+    emits an event, both close at their withdrawal; the command, run from
+    inside the snapshot directory, takes bare file names; and four sends with a
+    notice every two messages, then both members drained, give one superseded
+    notice, nothing pending and no open delivery wait.

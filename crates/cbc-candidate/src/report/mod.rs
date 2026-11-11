@@ -46,6 +46,14 @@ impl Window {
     fn seen<'a>(&self, stamp: &'a Option<Stamp>) -> Option<&'a Stamp> {
         stamp.as_ref().filter(|s| s.wall_ms <= self.until_ms)
     }
+    /// Replaced by a newer notice by `until`, with no receipt by then: neither pending nor
+    /// waited on.
+    fn superseded(&self, delivery: &Delivery) -> bool {
+        self.seen(&delivery.receipted).is_none()
+            && delivery
+                .superseded_wall_ms
+                .is_some_and(|at| at <= self.until_ms)
+    }
     fn length(&self) -> i64 {
         self.until_ms - self.from_ms
     }
@@ -198,7 +206,11 @@ pub(crate) fn waits(facts: &Facts, window: Window) -> Vec<WaitInterval> {
             Some(WaitCause::Delivery),
             id.clone(),
             delivery.committed.wall_ms,
-            delivery.receipted.as_ref().map(|s| s.wall_ms),
+            delivery
+                .receipted
+                .as_ref()
+                .map(|s| s.wall_ms)
+                .or(delivery.superseded_wall_ms),
         );
         if let Some(receipted) = window.seen(&delivery.receipted) {
             push(

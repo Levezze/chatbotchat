@@ -196,6 +196,35 @@ async fn a_withdrawal_ends_the_wait_when_it_happened_even_without_an_inbox_event
 }
 
 #[tokio::test]
+async fn a_coalesced_room_notice_is_superseded_not_pending() {
+    let case = fixture().await;
+    let base = snap(&case).await;
+    let manifest = manifest(&base, &sha256_file(&base.file).unwrap());
+    // A notice to the lead every two messages. The second notice replaces the first while it
+    // is unread, so the first is never offered or receipted: it is superseded, not pending,
+    // and the lead is not still waiting on it.
+    for (n, key) in ["k1", "k2", "k3", "k4"].iter().enumerate() {
+        case.store
+            .send_with_notice_interval(&case.lead, &case.report_room, key, &format!("m{n}"), 2)
+            .await
+            .unwrap();
+    }
+    drain(&case.store, &case.worker).await;
+    drain(&case.store, &case.lead).await;
+    let end = snap(&case).await;
+
+    let text = run(&case, &manifest, &end, None, None).await.unwrap();
+    let delivery = line(&text, "  committed=");
+    assert!(delivery.contains(" superseded=1 "), "{text}");
+    assert_eq!(
+        line(&text, "  pending at until: "),
+        "  pending at until: never offered=0 offered, not receipted=0"
+    );
+    let waiting = line(&text, "  project/lead — waiting on delivery: ");
+    assert!(waiting.contains("count=2 open=0 "), "{waiting}");
+}
+
+#[tokio::test]
 async fn the_report_is_byte_identical_names_files_only_and_prints_the_tally() {
     let case = fixture().await;
     let base = snap(&case).await;

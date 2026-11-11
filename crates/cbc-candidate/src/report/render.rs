@@ -239,19 +239,21 @@ pub(super) fn render_delivery(o: &mut String, facts: &Facts, window: Window) {
         .iter()
         .filter(|d| window.seen(&d.receipted).is_some())
         .count();
+    let superseded = committed.iter().filter(|d| window.superseded(d)).count();
     // Pending only: a receipt with no offer stamp (a fact older than offers) is receipted.
     let never_offered = committed
         .iter()
-        .filter(|d| window.seen(&d.receipted).is_none() && window.seen(&d.offered).is_none())
+        .filter(|d| window.seen(&d.receipted).is_none() && !window.superseded(d))
+        .filter(|d| window.seen(&d.offered).is_none())
         .count();
-    let offered_unreceipted = committed.len() - receipted - never_offered;
+    let offered_unreceipted = committed.len() - receipted - superseded - never_offered;
     let _ = writeln!(
         o,
         "\nDelivery (expected recipients of items committed in the window)"
     );
     let _ = writeln!(
         o,
-        "  committed={} receipted={receipted} failed={}",
+        "  committed={} receipted={receipted} superseded={superseded} failed={}",
         committed.len(),
         missing("no delivery-failure record")
     );
@@ -329,6 +331,8 @@ pub(super) fn render_latency(o: &mut String, facts: &Facts, window: Window) {
                         values.push(ms);
                         estimates += usize::from(estimate);
                     }
+                    // A replaced notice is never woken for: its successor carries the news.
+                    None if window.superseded(delivery) => {}
                     None => absent += 1,
                 }
             }

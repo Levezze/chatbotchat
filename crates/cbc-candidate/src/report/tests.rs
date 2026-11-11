@@ -42,6 +42,7 @@ fn delivery(member: &str, sequence: i64, committed: i64) -> Delivery {
         receipted: None,
         woken: None,
         active: None,
+        superseded_wall_ms: None,
     }
 }
 
@@ -332,7 +333,7 @@ Approval prompts (per session × kind)
   t/lead: cbc=missing (not in the tally) native_setup=missing (not in the tally) native_refusal=missing (not in the tally) other=missing (not in the tally)
 
 Delivery (expected recipients of items committed in the window)
-  committed=3 receipted=1 failed=missing (no delivery-failure record)
+  committed=3 receipted=1 superseded=0 failed=missing (no delivery-failure record)
   pending at until: never offered=1 offered, not receipted=1
   wake attempts claude_channel: accepted=1 failed=[]
   wake attempts codex_queue: accepted=0 failed=[timeout=1]
@@ -598,4 +599,71 @@ async fn bindings_load_with_their_profile_and_the_time_they_took_effect() {
         .iter()
         .all(|b| (before..=snapshot.taken_wall_ms).contains(&b.from_wall_ms)));
     assert!(facts.bindings[2].from_wall_ms >= rebound_after);
+}
+
+/// An unread notice is replaced when the newer one arrives. One already offered stays in its batch
+/// until receipt, or until a rebind drops the batch; a receipt by then means it was delivered.
+#[test]
+fn a_notice_is_superseded_when_replaced_unless_offered_first() {
+    let rebound = |at| IdentityFact {
+        context: "t".into(),
+        member: "lead".into(),
+        kind: "rebound".into(),
+        epoch: 2,
+        at_wall_ms: at,
+    };
+    let unread = delivery("lead", 4, 110);
+    assert_eq!(superseded_at(&unread, None, &[]), None, "not replaced");
+    assert_eq!(superseded_at(&unread, Some(130), &[]), Some(130));
+
+    let offered = Delivery {
+        offered: Some(at("a", 120)),
+        ..delivery("lead", 4, 110)
+    };
+    assert_eq!(
+        superseded_at(&offered, Some(130), &[]),
+        None,
+        "held in its batch"
+    );
+    assert_eq!(
+        superseded_at(&offered, Some(130), &[rebound(115), rebound(150)]),
+        Some(150),
+        "the first rebind after the offer drops the batch"
+    );
+    let receipted = Delivery {
+        receipted: Some(at("a", 140)),
+        ..offered.clone()
+    };
+    assert_eq!(superseded_at(&receipted, Some(130), &[rebound(150)]), None);
+
+    // In the report: superseded from 130, so pending before it and neither pending nor waited on
+    // after it.
+    let facts = Facts {
+        deliveries: vec![Delivery {
+            superseded_wall_ms: Some(130),
+            ..unread
+        }],
+        ..Facts::default()
+    };
+    let cut = |until_ms| {
+        let window = Window {
+            from_ms: 100,
+            until_ms,
+        };
+        let mut o = String::new();
+        render_delivery(&mut o, &facts, window);
+        let open = waits(&facts, window).iter().filter(|w| w.open).count();
+        (o, open)
+    };
+    let (early, open) = cut(125);
+    assert!(early.contains("receipted=0 superseded=0 "), "{early}");
+    assert!(early.contains("never offered=1 "), "{early}");
+    assert_eq!(open, 1);
+    let (late, open) = cut(200);
+    assert!(late.contains("receipted=0 superseded=1 "), "{late}");
+    assert!(
+        late.contains("never offered=0 offered, not receipted=0"),
+        "{late}"
+    );
+    assert_eq!(open, 0);
 }

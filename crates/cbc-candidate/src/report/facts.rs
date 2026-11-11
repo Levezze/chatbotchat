@@ -31,6 +31,9 @@ pub(crate) struct Delivery {
     pub receipted: Option<Stamp>,
     pub woken: Option<Stamp>,
     pub active: Option<Stamp>,
+    /// When an unreceipted room notice stopped being deliverable, if it did by the end snapshot:
+    /// a newer notice for the same room replaced it. See `superseded_at`.
+    pub superseded_wall_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +92,32 @@ pub(crate) struct ConnectionFact {
     pub introduced_wall_ms: Option<i64>,
 }
 
+/// When a room notice was replaced, given the first newer notice for the same room that reached
+/// the same member. Unread notices coalesce, so a replaced notice is never offered or receipted.
+/// One already offered stays in its batch until receipt, or until a rebind or re-enrolment of the
+/// member drops the batch. A receipt by then means it was delivered, not replaced.
+pub(super) fn superseded_at(
+    delivery: &Delivery,
+    newer_notice_wall_ms: Option<i64>,
+    identity: &[IdentityFact],
+) -> Option<i64> {
+    let newer = newer_notice_wall_ms?;
+    let at = match &delivery.offered {
+        Some(offered) if offered.wall_ms <= newer => identity
+            .iter()
+            .filter(|e| e.context == delivery.context && e.member == delivery.member)
+            .filter(|e| matches!(e.kind.as_str(), "enrolled" | "rebound"))
+            .filter(|e| e.at_wall_ms >= offered.wall_ms)
+            .map(|e| e.at_wall_ms.max(newer))
+            .min()?,
+        _ => newer,
+    };
+    match &delivery.receipted {
+        Some(receipted) if receipted.wall_ms <= at => None,
+        _ => Some(at),
+    }
+}
+
 /// The revision a work event records moving its item to `merged`, if it does.
 pub(super) fn merge_revision(body: &str) -> Option<i64> {
     let event: Value = serde_json::from_str(body).ok()?;
@@ -142,13 +171,24 @@ impl Facts {
             seats: evidence.seats().await?,
             ..Self::default()
         };
+        // Resolved once identity events are loaded: a rebind can end an offered notice's batch.
+        let mut newer_notices = Vec::new();
         for row in sqlx::query(
             "SELECT f.context_id, r.member_id, r.sequence,
                     f.committed_instance, f.committed_mono_us, f.committed_wall_ms,
                     r.offered_instance, r.offered_mono_us, r.offered_wall_ms,
                     r.receipted_instance, r.receipted_mono_us, r.receipted_wall_ms,
                     r.woken_instance, r.woken_mono_us, r.woken_wall_ms,
-                    r.active_instance, r.active_mono_us, r.active_wall_ms
+                    r.active_instance, r.active_mono_us, r.active_wall_ms,
+                    (SELECT min(nf.committed_wall_ms)
+                       FROM candidate_room_notices n
+                       JOIN candidate_room_notices newer
+                         ON newer.context_id = n.context_id AND newer.room_id = n.room_id
+                        AND newer.message_count > n.message_count
+                       JOIN candidate_notice_recipients nr
+                         ON nr.sequence = newer.sequence AND nr.member_id = r.member_id
+                       JOIN candidate_item_facts nf ON nf.sequence = newer.sequence
+                      WHERE n.sequence = r.sequence) AS newer_notice_wall_ms
              FROM candidate_recipient_facts r
              JOIN candidate_item_facts f ON f.sequence = r.sequence
              WHERE r.expected = 1
@@ -166,7 +206,9 @@ impl Facts {
                 receipted: stamp(&row, "receipted")?,
                 woken: stamp(&row, "woken")?,
                 active: stamp(&row, "active")?,
+                superseded_wall_ms: None,
             });
+            newer_notices.push(row.try_get::<Option<i64>, _>("newer_notice_wall_ms")?);
         }
         for row in sqlx::query(
             "SELECT q.context_id, q.request_id, q.callback_member, q.owner_kind, q.owner_member,
@@ -293,6 +335,9 @@ impl Facts {
                 sender: row.try_get("sender")?,
                 wall_ms: row.try_get("committed_wall_ms")?,
             });
+        }
+        for (delivery, newer) in facts.deliveries.iter_mut().zip(newer_notices) {
+            delivery.superseded_wall_ms = superseded_at(delivery, newer, &facts.identity);
         }
         // One revision emits an event per report room; the first commit stands for it.
         let mut merges: BTreeMap<(String, String, i64), i64> = BTreeMap::new();
