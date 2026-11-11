@@ -214,6 +214,17 @@ pub struct DeliveryEvent {
     pub batch_tag: Option<String>,
 }
 
+/// How far before the core's receipt of a wake report its attempt may lie. The driver's queue
+/// holds at most 256 reports sent with a 2 second timeout each.
+const MAX_REPORT_DELAY_MS: i64 = 600_000;
+
+/// When a member request started, on this core instance's clock. Opaque outside the crate.
+#[derive(Debug, Clone, Copy)]
+pub struct RequestStart {
+    mono_us: i64,
+    wall_ms: i64,
+}
+
 /// One per Store::open: a random instance ID and a monotonic origin.
 pub(crate) struct CoreClock {
     instance: String,
@@ -361,25 +372,51 @@ impl Store {
             .bind(&self.clock.instance).bind(mono).bind(wall).bind(report.driver_wall_ms)
             .execute(&mut *tx).await?;
         let woken = report.outcome == WakeOutcome::Accepted;
-        let covered = sqlx::query("INSERT INTO candidate_recipient_facts(sequence,member_id,expected,dispatched_instance,dispatched_mono_us,dispatched_wall_ms,woken_instance,woken_mono_us,woken_wall_ms) SELECT DISTINCT sequence,?,0,?,?,?,?,?,? FROM candidate_unread_items WHERE context_id=? AND recipient=? AND sequence<=? ON CONFLICT(sequence,member_id) DO UPDATE SET dispatched_instance=COALESCE(dispatched_instance,excluded.dispatched_instance), dispatched_mono_us=COALESCE(dispatched_mono_us,excluded.dispatched_mono_us), dispatched_wall_ms=COALESCE(dispatched_wall_ms,excluded.dispatched_wall_ms), woken_instance=COALESCE(woken_instance,excluded.woken_instance), woken_mono_us=COALESCE(woken_mono_us,excluded.woken_mono_us), woken_wall_ms=COALESCE(woken_wall_ms,excluded.woken_wall_ms)")
+        // Reports reach the core through the driver's queue, so the member may have receipted
+        // items since the attempt. Cover what was unread when the driver made it: items still
+        // unread, and items receipted at or after the driver's attempt time. That time is clamped
+        // to MAX_REPORT_DELAY_MS ago, so a wrong driver clock cannot reach far into the past.
+        let attempted = report.driver_wall_ms.max(wall - MAX_REPORT_DELAY_MS);
+        let covered = sqlx::query("INSERT INTO candidate_recipient_facts(sequence,member_id,expected,dispatched_instance,dispatched_mono_us,dispatched_wall_ms,woken_instance,woken_mono_us,woken_wall_ms) SELECT sequence,?,0,?,?,?,?,?,? FROM (SELECT sequence FROM candidate_unread_items WHERE context_id=? AND recipient=? AND sequence<=? UNION SELECT f.sequence FROM candidate_recipient_facts f JOIN candidate_items i ON i.sequence=f.sequence WHERE i.context_id=? AND f.member_id=? AND f.sequence<=? AND f.receipted_wall_ms>=?) WHERE true ON CONFLICT(sequence,member_id) DO UPDATE SET dispatched_instance=COALESCE(dispatched_instance,excluded.dispatched_instance), dispatched_mono_us=COALESCE(dispatched_mono_us,excluded.dispatched_mono_us), dispatched_wall_ms=COALESCE(dispatched_wall_ms,excluded.dispatched_wall_ms), woken_instance=COALESCE(woken_instance,excluded.woken_instance), woken_mono_us=COALESCE(woken_mono_us,excluded.woken_mono_us), woken_wall_ms=COALESCE(woken_wall_ms,excluded.woken_wall_ms)")
             .bind(&binding.member_id).bind(&self.clock.instance).bind(mono).bind(wall)
             .bind(woken.then_some(self.clock.instance.as_str())).bind(woken.then_some(mono)).bind(woken.then_some(wall))
             .bind(&binding.context_id).bind(&binding.member_id).bind(report.through)
+            .bind(&binding.context_id).bind(&binding.member_id).bind(report.through).bind(attempted)
             .execute(&mut *tx).await?.rows_affected();
         tx.commit().await?;
         Ok(covered)
     }
 
+    /// The core clock at the moment a request starts, before it waits for the store.
+    pub fn request_start(&self) -> RequestStart {
+        let (mono_us, wall_ms) = self.clock.now();
+        RequestStart { mono_us, wall_ms }
+    }
+
     /// Mark each of the member's receipted items that has no activity yet with this operation.
-    /// Called by the connector before a non-transport operation runs, so an attempt counts.
     pub async fn record_activity(&self, binding: &SessionBinding, operation: &str) -> Result<()> {
+        self.record_activity_since(binding, operation, &self.request_start())
+            .await
+    }
+
+    /// As `record_activity`, for a request that started at `started`. Called by the connector
+    /// before a non-transport operation runs, so an attempt counts.
+    pub async fn record_activity_since(
+        &self,
+        binding: &SessionBinding,
+        operation: &str,
+        started: &RequestStart,
+    ) -> Result<()> {
         ensure!(valid_label(operation), "invalid operation name");
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         validate_on(&mut tx, binding).await?;
-        let (mono, wall) = self.clock.now();
-        sqlx::query("UPDATE candidate_recipient_facts SET active_instance=?, active_mono_us=?, active_wall_ms=?, active_operation=? WHERE member_id=? AND receipted_instance IS NOT NULL AND active_instance IS NULL AND EXISTS (SELECT 1 FROM candidate_items i WHERE i.sequence=candidate_recipient_facts.sequence AND i.context_id=?)")
-            .bind(&self.clock.instance).bind(mono).bind(wall).bind(operation)
-            .bind(&binding.member_id).bind(&binding.context_id)
+        // Stamped with the request's start, and only receipts committed before it count: a
+        // request that was already waiting for the store when a receipt landed did not follow it.
+        // A receipt from an earlier core instance always came first.
+        sqlx::query("UPDATE candidate_recipient_facts SET active_instance=?, active_mono_us=?, active_wall_ms=?, active_operation=? WHERE member_id=? AND receipted_instance IS NOT NULL AND (receipted_instance<>? OR receipted_mono_us<=?) AND active_instance IS NULL AND EXISTS (SELECT 1 FROM candidate_items i WHERE i.sequence=candidate_recipient_facts.sequence AND i.context_id=?)")
+            .bind(&self.clock.instance).bind(started.mono_us).bind(started.wall_ms).bind(operation)
+            .bind(&binding.member_id).bind(&self.clock.instance).bind(started.mono_us)
+            .bind(&binding.context_id)
             .execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(())

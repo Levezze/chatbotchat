@@ -66,8 +66,15 @@ fn wake(through: i64, outcome: WakeOutcome, failure: Option<&str>, recovery: boo
         outcome,
         failure: failure.map(str::to_owned),
         recovery,
-        driver_wall_ms: 1_700_000_000_000,
+        driver_wall_ms: now_ms(),
     }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
 }
 
 fn accepted(through: i64) -> WakeReport {
@@ -175,6 +182,57 @@ async fn a_wake_marks_each_item_it_covers_once() {
         0,
         "a sender is not a recipient of its own items"
     );
+    c.store.close().await;
+}
+
+/// The driver sends reports from a queue, so one can reach the core after the member has
+/// already receipted what it covered. The attempt still covers every item that was unread when
+/// the driver made it, and nothing receipted before that.
+#[tokio::test]
+async fn a_report_that_arrives_after_the_receipt_still_covers_its_items() {
+    let c = pair().await;
+    let one = c
+        .store
+        .send(&c.alice, "peer-room", "k1", "one")
+        .await
+        .unwrap();
+    let attempted = accepted(one);
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    read_all(&c.store, &c.bob).await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let late = accepted(one);
+    assert_eq!(
+        c.store.record_wake(&c.bob, &late).await.unwrap(),
+        0,
+        "receipted before this attempt"
+    );
+    assert!(bob_in(&c.store, one).await.dispatched.is_none());
+    assert_eq!(c.store.record_wake(&c.bob, &attempted).await.unwrap(), 1);
+    let bob = bob_in(&c.store, one).await;
+    assert!(bob.woken.is_some());
+    assert!(bob.receipted.is_some());
+    c.store.close().await;
+}
+
+/// An activity request that was already waiting for the store when a receipt committed did not
+/// start after that receipt, so it is not post-receipt activity.
+#[tokio::test]
+async fn activity_that_started_before_the_receipt_is_not_post_receipt() {
+    let c = pair().await;
+    let one = c
+        .store
+        .send(&c.alice, "peer-room", "k1", "one")
+        .await
+        .unwrap();
+    let started = c.store.request_start();
+    read_all(&c.store, &c.bob).await;
+    c.store
+        .record_activity_since(&c.bob, "send", &started)
+        .await
+        .unwrap();
+    assert!(bob_in(&c.store, one).await.active.is_none());
+    c.store.record_activity(&c.bob, "send").await.unwrap();
+    assert!(bob_in(&c.store, one).await.active.is_some());
     c.store.close().await;
 }
 

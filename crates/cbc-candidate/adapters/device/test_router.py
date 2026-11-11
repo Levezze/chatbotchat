@@ -967,6 +967,16 @@ class NativeHttpTests(DeviceTests):
         self.assertEqual(self.exchange(request), (204, None))
         self.assertEqual(self.wake_reports(), [], "an unchanged cursor is not a new wake")
 
+    def test_a_mod_woken_before_the_hint_is_delivered_still_reports_the_hint(self):
+        # feed_changed wakes a parked waiter before the delivery worker runs the handler.
+        self.router.feed.dispatch({"type": "members_changed", "sequence": 12, "members": [
+            {"context": "project", "member": "claude", "sequence": 12}]}, 0)
+        self.state["first_unread_sequence"] = 4
+        status, _body = self.exchange()
+        self.assertEqual(status, 200)
+        self.assertEqual(self.wake_reports(), [("claude", {"through": 12, "kind": "claude_mod",
+            "outcome": "accepted", "recovery": False})])
+
     def test_recovery_re_hints_a_parked_mod_once_even_with_an_unchanged_cursor(self):
         self.state["first_unread_sequence"] = 4
         status, body = self.exchange()

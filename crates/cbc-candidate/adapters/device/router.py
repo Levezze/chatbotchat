@@ -487,10 +487,13 @@ class DeviceRouter(claude.Router):
                 if (self.native_identity(pid, uid) != session
                         or self.native_binding(session) != binding):
                     return native.response(401)
+                # Read outside native_ready: dispatch emits feed_changed (which takes
+                # native_ready) while holding the feed's lock.
+                hinted = self.feed.hinted((binding["context"], binding["member"]))
                 with self.native_ready:
                     recovery = session in self.native_recover
                     self.native_recover.discard(session)
-                    through = max(fresh_first, self.latest_hint.get(session, 0))
+                    through = max(fresh_first, self.latest_hint.get(session, 0), hinted)
                 self.event("native_mod_pending", member=binding["member"])
                 self.report_wake(binding, through, "claude_mod", "accepted", None, recovery)
                 return native.response(200, {"v": 1, "type": "pending", "cursor": token})

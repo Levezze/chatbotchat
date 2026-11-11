@@ -335,10 +335,17 @@ monotonic and wall stamps) plus `active_operation`.
 binding: `through`, `kind` (`claude_channel`, `codex_queue` or `claude_mod`),
 `outcome` (`accepted` or `failed`), `failure` (a class label, present exactly
 when the outcome is failed), `recovery` and `driver_wall_ms`. The reply is
-`woken` with `covered`, the number of the member's unreceipted items with a
-sequence at or below `through`. One transaction stores the attempt and, for
-each covered item, sets `dispatched_*` on any attempt and `woken_*` only on an
-accepted one. The first stamp wins; later attempts change nothing. A sender is
+`woken` with `covered`, the number of the member's items with a sequence at or
+below `through` that were unread when the driver made the attempt. That is the
+items still unread plus the items receipted at or after `driver_wall_ms`:
+reports wait in the driver's queue, so the member can receipt an item before
+the report of the wake that announced it arrives. `driver_wall_ms` is clamped to
+ten minutes before the core's clock, the most the queue can hold back, so a
+wrong driver clock cannot reach older receipts. The driver and core share the
+host clock today. One transaction stores the attempt and, for each covered item,
+sets `dispatched_*` on any attempt and `woken_*` only on an accepted one. Both
+are stamped when the core learns of the attempt, so commit to wake includes the
+report's queue time; it is normally empty. The first stamp wins; later attempts change nothing. A sender is
 never a recipient of its own item, and receipted items are not covered.
 
 What "accepted" means, per path:
@@ -347,7 +354,7 @@ What "accepted" means, per path:
 |---|---|---|---|
 | `claude_channel` | the router writes the `changed` bell for a batch | the bell was written to the session's channel socket | highest sequence in the batch |
 | `codex_queue` | the queue command actually runs | the command exited 0; a latched hint runs nothing and reports nothing | the hint's sequence (the member's highest unread) |
-| `claude_mod` | a native wait answers `pending` | the HTTP 200 was produced for the mod's wait | the higher of the first unread and the last feed hint |
+| `claude_mod` | a native wait answers `pending` | the HTTP 200 was produced for the mod's wait | the highest of the first unread, the last delivered feed hint and the feed hint not yet delivered |
 
 None of these proves the model read anything. A wake is the transport's last
 observable step; activity is the next one.
@@ -361,6 +368,10 @@ event with the error's type name only, and the delivery result is unchanged.
 activity operation (discover, connect, send, close, work, request) takes
 `BEGIN IMMEDIATE` and stamps `active_*` and `active_operation` on each of the
 member's receipted recipient facts in that context that have no activity yet.
+The stamp is the request's start on the core clock, taken before it waits for
+the store, and only receipts committed before that start count. A request that
+was already queued behind a receipt did not follow it. A receipt from an
+earlier core instance always counts.
 It is recorded before the operation, so a refused send still counts: the member
 acted through CBC. The classification is an exhaustive match, so a new
 operation does not compile until it is placed.
@@ -388,9 +399,12 @@ and a positive first unread sequence:
   even with an unchanged cursor.
 - Anything else: a `recovery_skipped` event.
 
-A recovery report's `through` is the first unread sequence, not the highest.
-That is deliberate: it is the item the flag was raised for, and it is what the
-attempt bound counts.
+A recovery report's `through` is what that path actually covered, as for any
+wake: the batch's highest sequence for a channel, the higher of the first
+unread and the latest feed hint for a mod. A Codex recovery hint carries the
+first unread sequence, deliberately: it is the item the flag was raised for. The
+attempt bound counts every recovery attempt whose `through` reaches the oldest
+unread item, and all three paths reach it.
 
 **Compatibility.** `PostReceiptActivity` is a new value in the closed stage
 enum, and the timeline types deny unknown fields. A strict reader built before
@@ -403,7 +417,7 @@ settings file loads.
 with a receipt and no activity is idle for as long as the run lasts, and the
 report says it is still open.
 
-**Tests.** `tests/wake_activity.rs` has five tests over real SQLite, one of
+**Tests.** `tests/wake_activity.rs` has seven tests over real SQLite, one of
 them through the real connector socket. The driver tests cover each wake path,
 a lost report, the recovery paths for all three hosts and the loop's stop.
 
@@ -421,6 +435,15 @@ Mutants, each run against the full crate suite (17):
   return (zero attempts already compares as used up).
 - Compile error (1): dropping `Check` from the transport list, because the
   match is exhaustive.
+- Codex's first review found three ordering races, all fixed with a test that
+  failed first: a report that reached the core after the receipt covered
+  nothing; a request queued behind a receipt counted as post-receipt activity;
+  and `feed_changed` could wake a mod before the delivery handler recorded the
+  hint, so the report undercounted. The last fix reads the feed's undelivered
+  hint, outside the native lock, because the feed emits `feed_changed` while
+  holding its own lock.
+- Not tested: the clamp on `driver_wall_ms`, which needs a receipt more than
+  ten minutes old.
 - Not tested: the fail-soft path of `recovery_due` in `binding_status`. It needs
   a store fault the tests cannot inject without a mock.
 

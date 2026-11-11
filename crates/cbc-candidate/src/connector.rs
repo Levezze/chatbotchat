@@ -644,10 +644,13 @@ async fn dispatch(
     settings: &Mutex<RuntimeSettingsService>,
     request: Request,
 ) -> Result<Reply> {
+    let started = store.request_start();
     ensure!(request.v == 1, "unsupported candidate protocol");
     let binding = request.auth.binding()?;
     if let Some(operation) = request.request.activity() {
-        store.record_activity(&binding, operation).await?;
+        store
+            .record_activity_since(&binding, operation, &started)
+            .await?;
     }
     Ok(match request.request {
         Operation::BindingStatus => match store.binding_activity(&binding).await? {

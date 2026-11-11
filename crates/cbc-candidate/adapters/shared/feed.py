@@ -189,6 +189,15 @@ class ChangeFeed:
         self.emit("feed_changed", sequence=reply["sequence"], targets=len(changes))
         return reply["sequence"]
 
+    def hinted(self, key):
+        """The highest sequence hinted for a member and not yet delivered, or 0.
+
+        Set before feed_changed is emitted, so a waiter woken by that event can read it even
+        though the delivery worker has not run the member's handler yet."""
+        with self.ready:
+            state = self.pending.get(key)
+            return state["hint"]["sequence"] if state else 0
+
     def pending_count(self):
         with self.ready:
             return len(self.pending)
