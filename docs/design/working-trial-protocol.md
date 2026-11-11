@@ -164,7 +164,8 @@ Reachability, by trial step:
   - Codex seat: `.codex/config.toml` registers `cbc-trial` with `default_tools_approval_mode = "approve"` and sets `[mcp_servers.chatbotchat] enabled = false`.
   - One marked block in the repository's shared `info/exclude` covers every file `prepare` writes, the skill directories and `.cbc/hierarchy/`.
   - Nothing is written unless every check passes. It refuses a symlink on any written path, a path git tracks, an existing file that differs, an edited exclude block, a pin whose files no longer match `pin.json`, a seat name already used for another project, and a project with legacy `.cbc/worker-*.md` or `.cbc/orchestration-*.md` files. Rerunning it changes nothing.
-- `sheet` renders `docs/design/trial-launch-sheet-phase1.md` or `-phase2.md` into the case directory, filling the case paths and each seat's worktree. It refuses a missing seat or an unfilled placeholder. The committed templates hold no local paths.
+- `sheet` renders `docs/design/trial-launch-sheet-phase1.md` or `-phase2.md` into the case directory, filling the case paths and each seat's worktree. It refuses a missing seat, an unfilled placeholder, and a case that holds seats of both phases. The committed templates hold no local paths, and every command names its run and its terminal literally.
+- One case per phase. `init` needs a new core root, so phase 1, phase 2 and any rerun under T-16 each get their own case directory, pin and seats.
 - `teardown` removes a seat's files only if they are unchanged since `prepare`, then the skills, the directories it created and, once the last seat in that repository has gone, the exclude block. `settings.local.json` still counts as unchanged when the only additions are the two entries the local plugin install writes. A changed file is kept and listed, and the seat stays on record.
 
 **What it does not do.** The tool never reads the core's keys or the device profile, starts nothing and installs nothing. These stay user steps on the launch sheet:
@@ -179,6 +180,7 @@ Reachability, by trial step:
 
 **Known gaps.**
 
+- The commit in `pin.json` is the adapters' source commit. `cbc-candidate` does not report the commit it was built from, so the binary's hash is the only evidence of which build ran. Build it from the same checkout before pinning.
 - Codex has no per-project switch for user skills. The legacy `cbc*` skills in the Codex home stay visible to the Primarch, and the transport notice is the only guard there.
 - `skillOverrides` and the MCP deny are project-local settings that Claude Code documents. Neither has been observed in a trial session yet. The Stage A tool check is the observation for the MCP side. Loading a legacy skill is caught afterwards from the transcripts (section 6).
 - The global Claude hooks stay installed: `cbc hook session-start`, `cbc hook stop` and the compaction hook. The first two act only on `.cbc/worker-*.md` and `.cbc/orchestration-*.md` files, which `prepare` refuses and the hierarchy skill never writes. The compaction hook acts only for enrolled sessions, and trial copies refuse enrollment. All three are therefore inert in a trial project. The tool does not turn hooks off, because the wake mod is itself a hook module.

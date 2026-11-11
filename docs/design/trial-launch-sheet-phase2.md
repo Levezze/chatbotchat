@@ -6,6 +6,9 @@
 Case `<CASE>`. Context `<CONTEXT>`. Pinned commit `<COMMIT>`.
 Protocol: [working-trial-protocol.md](working-trial-protocol.md) sections 4 to 7.
 
+One case per phase: `init` needs a new core root, so phase 1, phase 2 and any rerun (T-16) each
+get their own case directory, pin and seats. `sheet` refuses a case that holds seats of both phases.
+
 | Seat | Member | Role | App | Worktree |
 |---|---|---|---|---|
 | primarch | `primarch` | `repo_lead` | Codex | `<PRIMARCH_WORKTREE>` |
@@ -31,9 +34,8 @@ opens a session, answers a native prompt or runs the dashboard command.
 ## 1. Start the core (terminal 1)
 
 ```sh
-RUN=<CONTEXT>-run1
 <BINARY> init --root <CORE> --port 18485 --protected-db ~/.chatbotchat/state.db
-<BINARY> serve --root <CORE> --protected-db ~/.chatbotchat/state.db --run "$RUN" --dashboard
+<BINARY> serve --root <CORE> --protected-db ~/.chatbotchat/state.db --run <CONTEXT>-run1 --dashboard
 ```
 
 `init` needs a new root. 18485 is metadata, not a listener; the daily 8484 is never used. `serve`
@@ -104,7 +106,7 @@ Write `<CORE>/provision.json`, replacing every `ACTUAL_*` from step 4:
 ```sh
 chmod 600 <CORE>/provision.json
 <BINARY> provision --root <CORE> --protected-db ~/.chatbotchat/state.db --spec <CORE>/provision.json --profile-out <CORE>/device-profile.json
-<PYTHON> -B -I <ROUTER> --profile <CORE>/device-profile.json --listen <CORE>/device.sock --sessions-dir ACTUAL_CLAUDE_SESSIONS_DIR --codex-executable ACTUAL_CODEX_EXECUTABLE --log-dir <CORE>/device-log --run "$RUN"
+<PYTHON> -B -I <ROUTER> --profile <CORE>/device-profile.json --listen <CORE>/device.sock --sessions-dir ACTUAL_CLAUDE_SESSIONS_DIR --codex-executable ACTUAL_CODEX_EXECUTABLE --log-dir <CORE>/device-log --run <CONTEXT>-run1
 ```
 
 Do not retry an uncertain provision. The driver keeps terminal 2.
@@ -175,8 +177,22 @@ the report's tally file.
 1. `<BINARY> snapshot --root <CORE> --protected-db ~/.chatbotchat/state.db`
 2. Write the prompt tally as `<CORE>/tally.json`, shaped `{"<CONTEXT>":{"cm-a":{"cbc":0},...}}`.
 3. `<BINARY> report --root <CORE> --protected-db ~/.chatbotchat/state.db --manifest <CORE>/snapshots/manifest-run1.json --snapshot ACTUAL_END_SNAPSHOT --tally <CORE>/tally.json`
-4. Retire each member: `<BINARY> retire --root <CORE> --protected-db ~/.chatbotchat/state.db --context <CONTEXT> --member primarch --reason "run ended"`, then `cm-a`, then `cm-b`. Retiring ends the binding, closes the member's rooms and withdraws its requests.
+4. Retire each member. Retiring ends the binding, closes the member's rooms and withdraws its requests.
+
+   ```sh
+   <BINARY> retire --root <CORE> --protected-db ~/.chatbotchat/state.db --context <CONTEXT> --member primarch --reason "run ended"
+   <BINARY> retire --root <CORE> --protected-db ~/.chatbotchat/state.db --context <CONTEXT> --member cm-a --reason "run ended"
+   <BINARY> retire --root <CORE> --protected-db ~/.chatbotchat/state.db --context <CONTEXT> --member cm-b --reason "run ended"
+   ```
+
 5. Stop the driver (terminal 2), then the core (terminal 1). Stop nothing else; the hosts' own MCP processes belong to the apps.
 6. Desktop seats: `claude plugin uninstall <PLUGIN>@<MARKET_NAME> --scope local` and `claude plugin marketplace remove <MARKET_NAME>` in each Claude worktree.
-7. `<SETUP> teardown --case <CASE> --seat primarch`, then `cm-a`, then `cm-b`. A file changed since `prepare` is kept and listed.
+7. Remove each seat's wiring. A file changed since `prepare` is kept and listed.
+
+   ```sh
+   <SETUP> teardown --case <CASE> --seat primarch
+   <SETUP> teardown --case <CASE> --seat cm-a
+   <SETUP> teardown --case <CASE> --seat cm-b
+   ```
+
 8. Keep `<CASE>` as the private evidence (T-22). Only the report goes to GitHub.

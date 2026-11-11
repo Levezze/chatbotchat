@@ -16,18 +16,25 @@ no assignment. The operator is the user.
 
 ## 0. Already done by the trial manager
 
-`<SETUP> pin` copied the adapters and core binary at `<COMMIT>` into `<CASE>/pin`, and
-`<SETUP> prepare` wrote each seat's project-local wiring, as in the phase 2 sheet. The Claude seat
-denies `mcp__chatbotchat__*` and allows only `mcp__<SERVER>__*`. The Codex seat disables
-`chatbotchat` in its project and pre-approves `<SERVER>`.
+- `<SETUP> pin` copied the adapters and the core binary at `<COMMIT>` into `<CASE>/pin`. Every host
+  configuration below points there, never at a worktree (T-15).
+- `<SETUP> prepare` wrote each seat's project-local files, installed the `wip-` skills, and added one
+  marked block to the repository's `info/exclude`. The per-seat record is in `<CASE>/seats/`.
+- The Claude seat allows only `mcp__<SERVER>__*`, denies `mcp__chatbotchat__*` and turns the global
+  legacy CBC skills off. The Codex seat disables `chatbotchat` in its project and pre-approves
+  `<SERVER>`. Codex has no per-project switch for user skills; the transport notice in every `wip-`
+  skill is the only guard there.
+- One case per phase: phase 2 gets its own case directory, because `init` needs a new core root.
 
 ## 1. Start the core (terminal 1)
 
 ```sh
-RUN=<CONTEXT>-run1
 <BINARY> init --root <CORE> --port 18485 --protected-db ~/.chatbotchat/state.db
-<BINARY> serve --root <CORE> --protected-db ~/.chatbotchat/state.db --run "$RUN"
+<BINARY> serve --root <CORE> --protected-db ~/.chatbotchat/state.db --run <CONTEXT>-run1
 ```
+
+`init` needs a new root. 18485 is metadata, not a listener; the daily 8484 is never used. `serve`
+keeps this terminal. Do not print `<CORE>/owner.key` or the generated profile.
 
 ## 2. Host preparation (user steps)
 
@@ -66,12 +73,22 @@ file), the Codex thread ID, and each exact working directory in `<CASE>/evidence
 ],"grants":[{"requester":"peer-a","target":"peer-b","kind":"peer","scope_ref":"smoke"}]}
 ```
 
+Provision, then start the driver. Both run in terminal 2, and the driver keeps it.
+
 ```sh
 chmod 600 <CORE>/provision.json
 <BINARY> provision --root <CORE> --protected-db ~/.chatbotchat/state.db --spec <CORE>/provision.json --profile-out <CORE>/device-profile.json
-<PYTHON> -B -I <ROUTER> --profile <CORE>/device-profile.json --listen <CORE>/device.sock --sessions-dir ACTUAL_CLAUDE_SESSIONS_DIR --codex-executable ACTUAL_CODEX_EXECUTABLE --log-dir <CORE>/device-log --run "$RUN"
+<PYTHON> -B -I <ROUTER> --profile <CORE>/device-profile.json --listen <CORE>/device.sock --sessions-dir ACTUAL_CLAUDE_SESSIONS_DIR --codex-executable ACTUAL_CODEX_EXECUTABLE --log-dir <CORE>/device-log --run <CONTEXT>-run1
+```
+
+Do not retry an uncertain provision. Then record the settings and the manifest in terminal 3:
+
+```sh
+<BINARY> settings --root <CORE> --protected-db ~/.chatbotchat/state.db
 <BINARY> manifest --root <CORE> --protected-db ~/.chatbotchat/state.db --out <CORE>/snapshots/manifest-run1.json --trial 1 --version claude=ACTUAL --version codex=ACTUAL --version macos=ACTUAL --note case=<CASE> --note commit=<COMMIT> --note fallback=off
 ```
+
+Confirm the settings show no fallback (T-05).
 
 ## 5. Stage B: the smoke test
 
@@ -105,8 +122,27 @@ Then, step by step, as the operator:
 
 A failure is fixed before phase 2 starts (protocol section 4).
 
-## 6. End of run
+## 6. End of run (terminal 3)
 
-As in the phase 2 sheet, section 8: snapshot, tally, report, retire `peer-a` and `peer-b`, stop the
-driver and then the core, uninstall the local plugin, then
-`<SETUP> teardown --case <CASE> --seat peer-a` and `--seat peer-b`.
+1. `<BINARY> snapshot --root <CORE> --protected-db ~/.chatbotchat/state.db`
+2. Write the prompt tally as `<CORE>/tally.json`, shaped `{"<CONTEXT>":{"peer-a":{"cbc":0},"peer-b":{"cbc":0}}}`.
+3. `<BINARY> report --root <CORE> --protected-db ~/.chatbotchat/state.db --manifest <CORE>/snapshots/manifest-run1.json --snapshot ACTUAL_END_SNAPSHOT --tally <CORE>/tally.json`
+4. Retire both members. Retiring ends the binding, closes the member's rooms and withdraws its requests.
+
+   ```sh
+   <BINARY> retire --root <CORE> --protected-db ~/.chatbotchat/state.db --context <CONTEXT> --member peer-a --reason "run ended"
+   <BINARY> retire --root <CORE> --protected-db ~/.chatbotchat/state.db --context <CONTEXT> --member peer-b --reason "run ended"
+   ```
+
+5. Stop the driver (terminal 2), then the core (terminal 1). Stop nothing else; the hosts' own MCP
+   processes belong to the apps.
+6. Desktop seat: `claude plugin uninstall <PLUGIN>@<MARKET_NAME> --scope local` and
+   `claude plugin marketplace remove <MARKET_NAME>` in `<PEER_A_WORKTREE>`.
+7. Remove each seat's wiring. A file changed since `prepare` is kept and listed.
+
+   ```sh
+   <SETUP> teardown --case <CASE> --seat peer-a
+   <SETUP> teardown --case <CASE> --seat peer-b
+   ```
+
+8. Keep `<CASE>` as the private evidence (T-22). Only the report goes to GitHub.

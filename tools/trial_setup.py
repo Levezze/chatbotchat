@@ -358,6 +358,10 @@ def render_sheet(case, phase, template=None):
             seats[seat] = json.loads(path.read_text())
             if seats[seat]["host"] != host:
                 raise ValueError(f"seat {seat} must be a {host} seat for phase {phase}")
+    others = sorted(seat for other, hosts in PHASES.items() if other != phase
+                    for seat in hosts if seat_path(case, seat).exists())
+    if others:
+        raise ValueError(f"one case per phase: this case also holds {', '.join(others)}")
     missing = sorted(set(PHASES[phase]) - set(seats))
     if missing:
         raise ValueError(f"prepare these seats first: {', '.join(missing)}")

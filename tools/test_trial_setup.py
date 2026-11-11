@@ -427,6 +427,31 @@ class LaunchSheetTest(unittest.TestCase):
                 self.assertIn(str(case.dir / "pin/cbc-candidate"), text)
                 self.assertIn(str(case.dir / "pin/adapters/device/router.py"), text)
 
+    def test_each_sheet_stands_alone_and_names_its_run_literally(self):
+        for phase, seats in self.SEATS.items():
+            with tempfile.TemporaryDirectory() as temp:
+                base = Path(temp)
+                case = Case(base)
+                for seat, host in seats.items():
+                    case.prepare(fake_project(base, seat), seat, host)
+                text = setup.render_sheet(case.dir, phase).read_text()
+                self.assertNotIn("$RUN", text)
+                self.assertNotIn("phase 2 sheet", text)
+                self.assertIn(f"--run trial-{case.dir.name}-run1", text)
+                for seat in seats:
+                    self.assertRegex(text, rf"retire [^\n]*--member {re.escape(seat)}\b")
+                    self.assertRegex(text, rf"teardown --case [^\n]*--seat {re.escape(seat)}\b")
+
+    def test_a_case_holding_seats_of_both_phases_is_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            case = Case(base)
+            for seat, host in {**self.SEATS[1], **self.SEATS[2]}.items():
+                case.prepare(fake_project(base, seat), seat, host)
+            for phase in self.SEATS:
+                with self.assertRaisesRegex(ValueError, "one case per phase"):
+                    setup.render_sheet(case.dir, phase)
+
     def test_rendering_refuses_a_missing_seat(self):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
