@@ -37,6 +37,8 @@ pub enum ItemClass {
     Notice,
     /// The room-closed marker.
     Closure,
+    /// A work-item revision delivered through the outbox (R2).
+    WorkEvent,
 }
 
 impl ItemClass {
@@ -46,6 +48,7 @@ impl ItemClass {
             Self::Introduction => "introduction",
             Self::Notice => "notice",
             Self::Closure => "closure",
+            Self::WorkEvent => "work_event",
         }
     }
 
@@ -55,6 +58,7 @@ impl ItemClass {
             "introduction" => Self::Introduction,
             "notice" => Self::Notice,
             "closure" => Self::Closure,
+            "work_event" => Self::WorkEvent,
             other => anyhow::bail!("unknown item class {other}"),
         })
     }
