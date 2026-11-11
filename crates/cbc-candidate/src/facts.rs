@@ -39,6 +39,8 @@ pub enum ItemClass {
     Closure,
     /// A work-item revision delivered through the outbox (R2).
     WorkEvent,
+    /// A request opened, answered or withdrawn (R3).
+    RequestEvent,
 }
 
 impl ItemClass {
@@ -49,6 +51,7 @@ impl ItemClass {
             Self::Notice => "notice",
             Self::Closure => "closure",
             Self::WorkEvent => "work_event",
+            Self::RequestEvent => "request_event",
         }
     }
 
@@ -59,6 +62,7 @@ impl ItemClass {
             "notice" => Self::Notice,
             "closure" => Self::Closure,
             "work_event" => Self::WorkEvent,
+            "request_event" => Self::RequestEvent,
             other => anyhow::bail!("unknown item class {other}"),
         })
     }

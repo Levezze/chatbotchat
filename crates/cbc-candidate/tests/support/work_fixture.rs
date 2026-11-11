@@ -105,3 +105,51 @@ pub async fn drain(store: &Store, who: &SessionBinding) -> Vec<(String, Value)> 
 pub fn patch() -> WorkPatch {
     WorkPatch::default()
 }
+
+/// A database migrated only up to (not including) migration `first_missing`, for upgrade tests.
+/// The pool is returned open so a test can write rows in the old schema, then close it.
+pub async fn database_before(
+    sandbox: &Sandbox,
+    scratch: &std::path::Path,
+    first_missing: &str,
+) -> sqlx::SqlitePool {
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    let old = scratch.join(format!("migrations-before-{first_missing}"));
+    std::fs::create_dir(&old).unwrap();
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    for entry in std::fs::read_dir(&source).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+        if name.as_str() < first_missing {
+            std::fs::copy(&path, old.join(name)).unwrap();
+        }
+    }
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(sandbox.database_path())
+                .create_if_missing(true)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+    sqlx::migrate::Migrator::new(old.as_path())
+        .await
+        .unwrap()
+        .run(&pool)
+        .await
+        .unwrap();
+    pool
+}
+
+/// Close an old-schema pool and give the file the permissions the store requires.
+pub async fn release(pool: sqlx::SqlitePool, sandbox: &Sandbox) {
+    use std::os::unix::fs::PermissionsExt;
+    pool.close().await;
+    std::fs::set_permissions(
+        sandbox.database_path(),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+}

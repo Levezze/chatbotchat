@@ -6,6 +6,7 @@ pub mod facts;
 pub mod inbox;
 pub mod native_target;
 pub mod owner;
+pub mod requests;
 pub mod settings;
 pub mod store;
 pub mod work;
@@ -35,7 +36,7 @@ const FILES: [&str; 14] = [
     "owner.key",
 ];
 pub const APPLICATION_ID: u32 = 0x43424332;
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 11;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

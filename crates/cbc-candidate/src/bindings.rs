@@ -188,6 +188,7 @@ impl Store {
         for room in rooms {
             crate::inbox::close_on(&mut tx, &self.clock, context, &room, member, &note).await?;
         }
+        crate::requests::withdraw_for_retirement(&mut tx, context, member, &note).await?;
         let epoch: i64 = sqlx::query_scalar("UPDATE candidate_members SET retired=1, epoch = CASE WHEN active=1 AND epoch < 9223372036854775807 THEN epoch+1 ELSE epoch END, active=0, device_id=NULL, native_session_id=NULL, credential_digest=NULL WHERE context_id=? AND member_id=? RETURNING epoch")
             .bind(context).bind(member).fetch_one(&mut *tx).await?;
         detach_on(&mut tx, context, member).await?;
