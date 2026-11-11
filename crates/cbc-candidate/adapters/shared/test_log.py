@@ -166,6 +166,17 @@ class EventLogTests(unittest.TestCase):
                         str(pathlib.Path(__file__).with_name("log.py")), self.dir], check=True)
         self.assertEqual([l["event"] for l in lines(self.path)], ["first", "log_dropped", "kept"])
 
+    def test_a_log_left_readable_by_the_previous_writer_is_made_private_and_kept(self):
+        # The router's previous log writer used open(path, "a"), so its file is 0644 under a
+        # usual umask. Refusing it would drop every new line without a word.
+        os.mkdir(self.dir, 0o700)
+        with open(self.path, "w") as f:
+            f.write('{"event":"old"}\n')
+        os.chmod(self.path, 0o644)
+        self.open().write("info", "new", {})
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o600)
+        self.assertEqual([l["event"] for l in lines(self.path)], ["old", "new"])
+
     def test_a_write_never_raises(self):
         events = self.open()
         shutil.rmtree(self.dir)

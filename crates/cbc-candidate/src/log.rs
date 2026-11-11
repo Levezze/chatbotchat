@@ -15,7 +15,7 @@ use anyhow::{ensure, Result};
 use std::{
     fs,
     io::Write,
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU8, Ordering},
@@ -134,8 +134,10 @@ impl LogFile {
     }
 
     /// Opens without following a link and without blocking (a FIFO with no reader would hang
-    /// the open), then keeps only a private regular file with no other name: a hardlink to a
-    /// file elsewhere is refused, so the log never writes outside its directory.
+    /// the open), then keeps only a regular file of ours with no other name: a hardlink to a
+    /// file elsewhere is refused, so the log never writes outside its directory. A file an
+    /// earlier writer left readable is made private through this descriptor, not refused, so
+    /// an upgraded log keeps writing.
     fn reopen(&mut self) -> std::io::Result<()> {
         let file = fs::OpenOptions::new()
             .append(true)
@@ -143,11 +145,15 @@ impl LogFile {
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(&self.path)?;
-        let meta = file.metadata()?;
-        if !meta.is_file() || meta.mode() & 0o077 != 0 || meta.nlink() != 1 {
+        let mut meta = file.metadata()?;
+        if !meta.is_file() || meta.nlink() != 1 || meta.uid() != crate::effective_uid() {
             return Err(std::io::Error::other(
-                "the log file must be a private file with one name",
+                "the log file must be a regular file of ours with one name",
             ));
+        }
+        if meta.mode() & 0o077 != 0 {
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            meta = file.metadata()?;
         }
         self.size = meta.len();
         self.file = Some(file);
@@ -353,7 +359,6 @@ pub fn init(root: &Path, run: Option<String>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     fn lines(path: &Path) -> Vec<serde_json::Value> {
         fs::read_to_string(path)
@@ -581,6 +586,21 @@ mod tests {
             fs::read_to_string(dir.join("core.jsonl")).unwrap(),
             "{\"first\":1}\n{\"kept\":3}\n"
         );
+    }
+
+    #[test]
+    fn a_log_left_readable_by_an_earlier_writer_is_made_private_and_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("logs");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.join("core.jsonl");
+        fs::write(&path, b"old\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let mut file = LogFile::open(&dir, "core.jsonl", MAX_BYTES, 2).unwrap();
+        assert!(file.append(b"new\n"));
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+        assert_eq!(fs::read(&path).unwrap(), b"old\nnew\n");
     }
 
     #[test]

@@ -557,8 +557,12 @@ converts that log rather than adding a second one.
   `O_NOFOLLOW` in a 0700 directory, and a directory open to others is refused
   at start.
   - The open is non-blocking, so a FIFO at the log's path cannot hang it. Only
-    a private regular file with exactly one link is kept: a hardlink to a file
+    a regular file of ours with exactly one link is kept: a hardlink to a file
     elsewhere is refused, so the log never writes outside its directory.
+  - A file an earlier writer left readable to others is made 0600 through the
+    open descriptor rather than refused. The router's previous writer used
+    `open(path, "a")`, so an upgraded router finds a 0644 file; refusing it
+    would drop every line with no error.
   - Each file is opened when its log is created, so later descriptor pressure
     cannot cost it a line; if that first open fails, every write retries.
   - At 8 MiB the file rotates to `name.1`, keeping three older files.
@@ -618,7 +622,8 @@ converts that log rather than adding a second one.
     reported (a link at the log's path is refused, not followed), a hardlink
     at the log's path refused with its target left empty, a FIFO refused
     within five seconds, a partly written line cut back (a child process
-    lowers its own file-size limit mid-line), the request line by identifiers only, and a private
+    lowers its own file-size limit mid-line), a 0644 file made private with its
+    old lines kept, the request line by identifiers only, and a private
     file in a refused shared directory.
   - `tests/logs.rs`, a real `serve --run trial-1`: no request lines at normal;
     after switching to debug the switching request is not logged and the next
@@ -634,7 +639,8 @@ converts that log rather than adding a second one.
   - `adapters/shared/test_log.py`: the same header and allowlist, parity with
     the Rust list, debug filtering and an ignored unknown level, rotation, a
     counted and reported drop, a hardlink and a FIFO refused and a partly
-    written line cut back as in Rust, a
+    written line cut back as in Rust, a legacy 0644 router log made private
+    and kept, a
     write that never raises, private files and a refused shared directory, the
     run id rule, and a scan of every adapter source: each field passed to an
     `event` call must be on the allowlist, since the log drops an unknown one
@@ -681,6 +687,11 @@ converts that log rather than adding a second one.
   failed partway left half a line, and the next line joined it, so neither
   parsed. Both writers now cut the file back to the last whole line; a child
   process with a lowered file-size limit reproduces the failure in each test.
+
+  The third review (099f704) found that a log file the previous router wrote,
+  mode 0644, was refused for good, so an upgraded router logged nothing and
+  said nothing. Both writers now make such a file private through the open
+  descriptor, when it is a regular file of ours with one link.
 
 ### C: manifest, report, sampler
 
