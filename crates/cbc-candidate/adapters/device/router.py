@@ -126,7 +126,8 @@ class DeviceRouter(claude.Router):
         # The core counts recovery attempts from wake reports, which can be lost. A hold is
         # registered before each recovery and keeps that binding's oldest unread item from being
         # recovered again until the core acknowledges the attempt's report. It is dropped at
-        # once if no attempt was reported. (Codex reviews 3 and 4.)
+        # once if no attempt was reported. An ack lifts only the hold its report marked.
+        # (Codex reviews 3, 4 and 5.)
         self.recovery_lock = threading.Lock()
         self.recovery_holds = {}
         self.wake_sender = lambda grant, request: self.bounded_call(grant, request, 2.0)
@@ -190,20 +191,21 @@ class DeviceRouter(claude.Router):
                    "recovery": bool(recovery), "attempt_wall_us": attempted_us}
         if failure is not None:
             request["failure"] = failure
+        hold = None
         if recovery:
             with self.recovery_lock:
                 hold = self.recovery_holds.get((binding["context"], binding["member"]))
                 if hold is not None:
                     hold["reported"] = True
         try:
-            self.wake_reports.put_nowait((dict(binding), request))
+            self.wake_reports.put_nowait((dict(binding), request, hold))
         except queue.Full:
             self.event("wake_report_dropped", member=binding["member"])
 
     def report_worker(self):
         while True:
             try:
-                grant, request = self.wake_reports.get(timeout=0.2)
+                grant, request, hold = self.wake_reports.get(timeout=0.2)
             except queue.Empty:
                 if self.feed.stopped.is_set():
                     return
@@ -212,10 +214,12 @@ class DeviceRouter(claude.Router):
                 reply = self.wake_sender(grant, request)
                 if not isinstance(reply, dict) or reply.get("type") != "woken":
                     self.event("wake_report_failed", member=grant["member"], reason="rejected")
-                elif request.get("recovery") is True:
+                elif hold is not None:
+                    # Only the hold this report marked: a late ack for an older item must not
+                    # lift a newer item's hold. (Codex review 5.)
                     key = (grant["context"], grant["member"])
                     with self.recovery_lock:
-                        if self.recovery_holds.get(key, {}).get("reported"):
+                        if self.recovery_holds.get(key) is hold:
                             del self.recovery_holds[key]
             except Exception as error:  # a lost report must never reach a delivery path
                 self.event("wake_report_failed", member=grant["member"],

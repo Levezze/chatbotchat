@@ -491,6 +491,14 @@ Mutants, each run against the full crate suite (17):
   acknowledgement left it stuck; and a failed attempt set none, so a lost
   failure report allowed unbounded retries. The hold now goes up before the
   wake and stays for any reported attempt.
+- Codex's fifth review found that an acknowledgement for an older item could lift
+  a newer item's hold, when the oldest unread item moved while the older report
+  was still queued. Each queued report now carries the hold it marked, and its
+  acknowledgement lifts only that hold. The test (red first) delays the older
+  acknowledgement until a newer recovery has run and its report has been lost.
+  One coalescing remains on the native path: its report comes when the mod next
+  waits and marks whichever hold is current, so two native recoveries can share
+  one report. That is still at most one unacknowledged report per hold.
 - Not tested: the clamp on `attempt_wall_us`, which needs a receipt more than
   ten minutes old.
 - Not tested: the fail-soft path of `recovery_due` in `binding_status`. It needs

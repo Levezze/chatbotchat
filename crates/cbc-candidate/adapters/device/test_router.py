@@ -389,6 +389,31 @@ class DeviceTests(unittest.TestCase):
         self.assertEqual(router.recover_once(), 0)
         self.assertEqual(recoveries, [3])
 
+    def test_a_late_ack_for_an_older_item_leaves_the_newer_hold(self):
+        # Codex review 5: an ack clears only the hold its own report marked.
+        recoveries, status, gate = [], {"first": 3}, threading.Event()
+        def recover(queue_, hint):
+            recoveries.append(hint["sequence"])
+            queue_.reporter(hint["sequence"], "accepted", None, True, 1)
+            return True
+        def sender(grant, request):
+            if request["through"] == 3:
+                gate.wait(2)
+                return {"type": "woken", "covered": 1}
+            return {"type": "error", "code": "busy"}  # the newer report is lost
+        router = self.recovery_router(recover)
+        router.read_wake_status = lambda grant, _timeout: {
+            "type": "binding_status", "first_unread_sequence": status["first"],
+            "recovery_due": grant["member"] == "codex"}
+        router.wake_sender = sender
+        self.assertEqual(router.recover_once(), 1)
+        status["first"] = 4
+        self.assertEqual(router.recover_once(), 1, "the member moved on")
+        gate.set()
+        self.assertTrue(router.flush_wake_reports(2))
+        self.assertEqual(router.recover_once(), 0, "item 4's attempt is still unacknowledged")
+        self.assertEqual(recoveries, [3, 4])
+
     def test_a_recovery_that_attempted_nothing_holds_nothing(self):
         recoveries = []
         def recover(queue_, hint):
