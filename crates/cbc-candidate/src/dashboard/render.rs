@@ -233,7 +233,7 @@ fn outbox_table(body: &mut String, context: &str, events: &[ItemTimeline]) {
                 ),
                 esc(event.class.map_or("", |c| c.as_str())),
                 esc(&event.room),
-                stamp(event.committed.as_ref()),
+                committed(event.committed.as_ref()),
                 format!("{receipted} of {}", event.recipients.len()),
             ],
         );
@@ -243,6 +243,11 @@ fn outbox_table(body: &mut String, context: &str, events: &[ItemTimeline]) {
 
 fn stamp(at: Option<&Stamp>) -> String {
     at.map_or_else(|| "not yet".into(), |s| utc(s.wall_ms))
+}
+
+/// A commit always happened; a missing stamp means it was not recorded, not that it is pending.
+fn committed(at: Option<&Stamp>) -> String {
+    at.map_or_else(|| "unknown".into(), |s| utc(s.wall_ms))
 }
 
 fn interval(span: Option<&Interval>) -> String {
@@ -355,7 +360,7 @@ pub fn timeline(context: &str, event: &ItemTimeline) -> String {
         ("Context", esc(context)),
         ("Room", esc(&event.room)),
         ("Class", esc(event.class.map_or("unknown", |c| c.as_str()))),
-        ("Committed (UTC)", stamp(event.committed.as_ref())),
+        ("Committed (UTC)", committed(event.committed.as_ref())),
     ] {
         row(&mut body, &[esc(name), value]);
     }

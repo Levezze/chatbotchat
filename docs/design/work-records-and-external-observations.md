@@ -510,9 +510,9 @@ timeout. Both are plain settings of the accept loop.
 
 ### D1b as built: work items and the outbox timeline
 
-D1b completes the read side of the dashboard skeleton (T-11). It needs no
-migration: it reads the R2 and R3 records and the PR-A delivery facts as they
-are.
+D1b completes the read side of the dashboard skeleton (T-11). It reads the R2
+and R3 records and the PR-A delivery facts as they are, and adds one index
+(migration `0012_outbox_index`, schema version 12).
 
 - **The front page.** Each context's panel has three lists, each with its own
   paging. Every next link is built by reading one entry past the page, so a
@@ -532,7 +532,8 @@ are.
   each room its event went to, linked to that event's timeline. A revision
   that reached no room says "nobody".
 - **An event's timeline** (`/timeline?context=…&sequence=…`) shows the room,
-  the class and the commit time, then per recipient: whether it was in the
+  the class and the commit time ("unknown" if none was recorded), then per
+  recipient: whether it was in the
   commit-time snapshot, how many times it was offered, when it was first
   offered and receipted ("not yet" until then), and the time from commit to
   each. An interval says whether it is exact (one core instance's monotonic
@@ -540,10 +541,24 @@ are.
 - **Missing equals hidden.** An unknown context, item or sequence, a sequence
   from another context, or a malformed parameter all get the same 404. Every
   page needs the session; without it the answer is 401.
+- **Any event has a timeline.** `/timeline` is not limited to outbox
+  classes: a participant message or notice in the same context has one too,
+  reachable by typing its sequence. The page shows delivery metadata only,
+  never content, so this exposes nothing the session could not already see.
 - **Store reads.** `Store::work_items` (paged by item ID, one transaction) and
   `Store::outbox_timelines` (newest first, projected through the existing
   `delivery_timeline`) are trusted administration reads, used only by the
   dashboard.
+- **The outbox index.** `candidate_outbox_facts` is a partial index on
+  `candidate_item_facts(context_id, sequence)` for the two outbox classes.
+  Without it the newest-first page walked the whole facts history backwards
+  until it found 21 matches, so a quiet context in a busy store cost a full
+  scan on the store's one connection (found by Codex's review). A unit test
+  asserts the query plan reads through the index with no temporary sort.
+  The query's class filter must stay textually identical to the index's, or
+  SQLite will not use it.
+- **Not optimised.** Each outbox row costs one `delivery_timeline` read, so a
+  page is up to 21 small indexed queries. That is fine at trial scale.
 
 Tests are in `tests/dashboard.rs`. The fixture now gives the worker a report
 room to a repo lead, so its revisions go out through the outbox.
