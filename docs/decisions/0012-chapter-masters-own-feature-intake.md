@@ -22,8 +22,9 @@ those tools out of date.
    the Primarch may consult the Emperor; the responsibility does not move.
    (I-01, I-02)
 2. **The Primarch supervises.** It reads the map, steps in with context or a
-   hold, and owns timelines, repository-wide issues and merge and promotion
-   order. It does not run features. (I-03)
+   hold, and owns timelines, repository-wide issues and merge order. Promotion
+   stays human-owned by default (T-08); the Primarch sequences it only where a
+   project assigns it. It does not run features. (I-03)
 3. **User-created Chapter Masters register themselves** with their Primarch's
    map, and the Primarch is notified. (I-04)
 4. **Every feature starts with a grill.** It records goals, HITL testing,
