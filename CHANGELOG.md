@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.0](https://github.com/Levezze/chatbotchat/compare/v0.18.0...v0.19.0) (2026-11-11)
+
+
+### Features
+
+* **candidate:** work items and outbox events ([#113](https://github.com/Levezze/chatbotchat/issues/113) R2) ([#133](https://github.com/Levezze/chatbotchat/issues/133)) ([05e3ccc](https://github.com/Levezze/chatbotchat/commit/05e3ccc0ce842bfe272ad699751e7d564e79d886))
+
 ## [0.18.0](https://github.com/Levezze/chatbotchat/compare/v0.17.0...v0.18.0) (2026-11-11)
 
 
