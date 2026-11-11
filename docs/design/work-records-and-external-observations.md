@@ -63,7 +63,7 @@ builds it. Only the missing part is built.
 | Outbox | Nothing beyond the inbox. | Outbox events are delivered through the existing inbox as a new item class, so the #113 PR-A delivery facts and waits cover them. No second delivery path. | R2 |
 | Work-item routes | Nothing. | Connector member routes for register, patch, HITL on and read; the owner route for HITL on and off and read; waking watchers when a work event commits. HITL scoped to the owner's own repo lead. | R2b |
 | Work-item follow-ups | R2 and R2b. | A no-op binds its idempotency key; a replayed registration is labelled; an item registered before its report room exists is delivered as a snapshot when the room connects. | R2c |
-| Inactive rooms | R1. | To check: a room set aside by the 0008 upgrade can still be written to. If so, it becomes drain-only: read and receipt, no send. | R1b |
+| Inactive rooms | R1. | A room set aside by the 0008 upgrade could still be written to, so a pair could keep several writable rooms. It is now drain-only: read and receipt, no send. | R1b |
 | T-10, T-12 requests | Nothing. | One canonical request with an owner (who answers) and a callback (who is woken). The answer records its channel. An answer an agent relays from chat is stored as relayed, with the relaying member, and never counts as owner-authenticated (proposed default, for the user's review). The answer wakes the asker through the outbox. | R3 |
 | T-27 waits | First-occurrence commit, offer and receipt facts (#113 PR-A). | A mapping from each wait cause in the trial protocol §6 to the facts it is derived from. CI waits (CM-A's observer), holds (#114) and acted-on (#113 PR-B) can't be observed yet and report `unknown`. The interval calculator itself belongs to the report in #113 C. | R3 |
 
@@ -105,7 +105,9 @@ Migration 0008 (schema 8). Tests are in `tests/peer_rooms.rs`.
 - **Upgrade.** Before 0008 a pair could hold one open room per scope. The
   newest usable one becomes the active room: open, under an active grant, with
   both members still active in it. A revoked room never takes the slot. The
-  others stay open and readable, but an open no longer returns them. Each row
+  others are drain-only (R1b): their history and unread items are still read
+  and receipted, and a member can close them, but a send is refused, so the
+  pair has exactly one writable room. An open no longer returns them. Each row
   records whether it ever held the pair's active slot (`held_slot`), and a
   replacement supersedes the last room that held it, never an older room the
   upgrade set aside.

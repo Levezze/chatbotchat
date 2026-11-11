@@ -323,6 +323,16 @@ impl Store {
         .fetch_one(&mut *tx)
         .await?;
         ensure!(closed == 0, "room is closed");
+        // T-26: a pair has one writable room. A connection room that no longer holds the pair's
+        // active slot (one the 0008 upgrade set aside) is drain-only: read and receipted, never
+        // written. Rooms with no connection row are not pair rooms and are unaffected.
+        let set_aside: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM candidate_connections WHERE context_id=? AND room_id=?) AND NOT EXISTS(SELECT 1 FROM candidate_connections WHERE context_id=? AND room_id=? AND active=1)")
+            .bind(&binding.context_id).bind(room).bind(&binding.context_id).bind(room)
+            .fetch_one(&mut *tx).await?;
+        ensure!(
+            !set_aside,
+            "room is drain-only: the pair's active room is elsewhere"
+        );
         let sequence = sqlx::query("INSERT INTO candidate_items(context_id,room_id,sender,kind,body,request_key) VALUES (?,?,?,'message',?,?) RETURNING sequence")
             .bind(&binding.context_id).bind(room).bind(&binding.member_id).bind(body).bind(key)
             .fetch_one(&mut *tx).await?.try_get("sequence")?;
