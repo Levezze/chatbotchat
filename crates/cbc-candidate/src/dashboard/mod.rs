@@ -100,7 +100,10 @@ pub async fn serve(
                         stream
                     }
                     Err(error) if crate::connector::transient_accept(&error) => {
-                        eprintln!("dashboard accept temporarily unavailable: {}", error.kind());
+                        tracing::warn!(
+                            event = "dashboard_accept_unavailable",
+                            kind = ?error.kind()
+                        );
                         tokio::time::sleep(backoff).await;
                         backoff = (backoff * 2).min(Duration::from_secs(1));
                         continue;

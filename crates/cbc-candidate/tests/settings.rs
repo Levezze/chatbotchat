@@ -1,4 +1,5 @@
 use cbc_candidate::{
+    sampler::Mode,
     settings::{DispatchPolicy, PolicyPatch, RuntimeSettings, RuntimeSettingsService},
     Sandbox,
 };
@@ -566,4 +567,39 @@ fn invalid_notice_cadence_and_hidden_invalid_overrides_keep_last_good() {
         },
     );
     assert!(changed.validate().is_err());
+}
+
+#[test]
+fn a_settings_file_without_a_log_level_keeps_its_revision_and_logs_normally() {
+    let (_temp, sandbox) = fixture();
+    let legacy = br#"{"schema":1,"defaults":{"retry_initial_ms":1000,"retry_max_ms":30000},"contexts":{},"roles":{},"members":{}}"#;
+    write_private(&sandbox.root().join("runtime-settings.json"), legacy);
+    let snapshot = RuntimeSettingsService::open(&sandbox).unwrap().snapshot();
+    // Pinned before B2 added the field: an old file must not change revision.
+    assert_eq!(
+        snapshot.revision,
+        "cfg1_80eee8c74373a6adfe358311f5543f44e0af121095c5586bc556693a0e1a870e"
+    );
+    assert_eq!(snapshot.settings.log_level, Mode::Normal);
+}
+
+#[test]
+fn the_log_level_changes_live_and_an_unknown_level_keeps_the_last_good_one() {
+    let (_temp, sandbox) = fixture();
+    let mut service = RuntimeSettingsService::open(&sandbox).unwrap();
+    let first = service.snapshot();
+    let mut debug = first.settings.clone();
+    debug.log_level = Mode::Debug;
+    publish_external(sandbox.root(), &debug);
+    let changed = service.refresh();
+    assert_eq!(changed.settings.log_level, Mode::Debug);
+    assert_ne!(changed.revision, first.revision);
+    let path = sandbox.root().join("runtime-settings.json");
+    let mut text = String::from_utf8(fs::read(&path).unwrap()).unwrap();
+    assert!(text.contains(r#""log_level": "debug""#), "{text}");
+    text = text.replace(r#""log_level": "debug""#, r#""log_level": "verbose""#);
+    write_private(&path, text.as_bytes());
+    let retained = service.refresh();
+    assert_eq!(retained.settings.log_level, Mode::Debug);
+    assert!(retained.last_error.is_some());
 }

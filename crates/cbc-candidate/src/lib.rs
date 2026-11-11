@@ -6,6 +6,7 @@ pub mod enrollment;
 pub mod evidence;
 pub mod facts;
 pub mod inbox;
+pub mod log;
 pub mod native_target;
 pub mod owner;
 pub mod report;

@@ -24,10 +24,12 @@ use std::{
 pub const SAMPLE_VERSION: u64 = 1;
 const SAMPLE_DIR: &str = "samples";
 
-/// The label a trial run gives its ticks, so the report keeps normal and debug runs apart.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+/// The logging mode: the runtime settings' live log level, and the label a trial run gives its
+/// ticks so the report keeps normal and debug runs apart.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
+    #[default]
     Normal,
     Debug,
 }

@@ -113,6 +113,7 @@ impl LocalConnector {
                     let outcome = serve.await;
                     if let Err(error) = &outcome {
                         eprintln!("dashboard stopped: {error:#}");
+                        tracing::error!(event = "dashboard_stopped");
                     }
                     outcome
                 });
@@ -133,7 +134,7 @@ impl LocalConnector {
                     let (mut stream,_) = match accepted {
                         Ok(v)=>{accept_backoff=Duration::from_millis(25);v},
                         Err(e) if transient_accept(&e) => {
-                            eprintln!("candidate accept temporarily unavailable: {}",e.kind());
+                            tracing::warn!(event = "accept_unavailable", kind = ?e.kind());
                             tokio::select! {
                                 _ = &mut shutdown => break Ok(()),
                                 _ = tokio::time::sleep(accept_backoff) => {},
@@ -385,6 +386,8 @@ pub struct BindingStatus {
     pub first_unread_sequence: Option<i64>,
     pub native_target: Option<crate::native_target::NativeTarget>,
     pub recovery_due: bool,
+    /// The live log level, so the driver follows the core's settings (B2).
+    pub log_level: crate::sampler::Mode,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -396,6 +399,8 @@ enum Reply {
         #[serde(deserialize_with = "crate::native_target::required_target")]
         native_target: Option<crate::native_target::NativeTarget>,
         recovery_due: bool,
+        #[serde(default)]
+        log_level: crate::sampler::Mode,
     },
     Woken {
         covered: u64,
@@ -592,6 +597,10 @@ async fn route(
 ) -> Result<Reply> {
     ensure!(request.v == 1, "unsupported candidate protocol");
     let Request { v, auth, request } = request;
+    // A request is logged when debug holds at its start and at its end, so normal mode pays
+    // nothing per request and a request that switches the level is never logged.
+    let asker = tracing::enabled!(tracing::Level::DEBUG)
+        .then(|| (auth.context.clone(), auth.member.clone()));
     if matches!(
         request,
         Operation::Watch { .. } | Operation::WatchMembers { .. }
@@ -641,6 +650,9 @@ async fn route(
     {
         notices.send_modify(|revision| *revision = revision.wrapping_add(1));
     }
+    if let Some((context, member)) = asker {
+        crate::log::reply(&context, &member, &serde_json::to_value(&reply)?);
+    }
     Ok(reply)
 }
 async fn dispatch(
@@ -677,11 +689,16 @@ async fn dispatch(
                 }
                 .await
                 .unwrap_or(false);
+                let log_level = settings
+                    .lock()
+                    .map(|service| service.snapshot().settings.log_level)
+                    .unwrap_or_default();
                 Reply::BindingStatus {
                     last_receipted_sequence: activity.last_receipted_sequence,
                     first_unread_sequence: activity.first_unread_sequence,
                     native_target: activity.native_target,
                     recovery_due,
+                    log_level,
                 }
             }
             None => Reply::Error {
@@ -914,11 +931,13 @@ impl<'a> LocalClient<'a> {
                 first_unread_sequence,
                 native_target,
                 recovery_due,
+                log_level,
             } => Ok(BindingStatus {
                 last_receipted_sequence,
                 first_unread_sequence,
                 native_target,
                 recovery_due,
+                log_level,
             }),
             _ => anyhow::bail!("unexpected candidate response"),
         }

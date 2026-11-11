@@ -460,6 +460,14 @@ async fn a_core_recovers_from_its_own_file_descriptor_exhaustion() {
     .unwrap()
     .unwrap();
     assert!(recovered.is_none());
+    // The log was open before the pressure, so the refused accepts are on record.
+    let log = std::fs::read_to_string(sandbox.root().join("logs/core.jsonl")).unwrap();
+    assert!(
+        log.lines()
+            .any(|l| l.contains(r#""event":"accept_unavailable""#)
+                && l.contains(r#""level":"warn""#)),
+        "{log}"
+    );
     // SAFETY: this is the still-running, unreaped child owned by this test, never a native chat.
     assert_eq!(unsafe { libc::kill(child.0.id() as i32, libc::SIGTERM) }, 0);
     assert!(child.0.wait().unwrap().success());
