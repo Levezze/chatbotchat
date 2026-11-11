@@ -20,6 +20,10 @@ use sqlx::{Row, SqliteConnection};
 
 const MAX_TEXT_CHARS: usize = 4000;
 const MAX_REASON_CHARS: usize = 200;
+/// The most requests, or answers, in one page. A question or answer is at most 4000 characters
+/// of up to four bytes, about 16 KB on the wire, so seven of them stay well inside the
+/// connector's reply limit; `request_routes.rs` sends a full page of the largest to prove it.
+pub const MAX_REQUEST_PAGE: u32 = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -396,6 +400,90 @@ impl Store {
         rows.iter().map(answer_from).collect()
     }
 
+    /// A member reads a request it asked, a request it owns, or, as a repo lead, any request.
+    /// Anyone else gets the same refusal as for a missing request.
+    pub async fn read_request(&self, binding: &SessionBinding, request: &str) -> Result<Request> {
+        valid_id("request id", request)?;
+        let mut tx = self.pool.begin().await?;
+        let current = visible_request(&mut tx, binding, request).await?;
+        tx.commit().await?;
+        Ok(current)
+    }
+
+    /// Answers to a request the member may read, after answer `after`, oldest first, at most
+    /// [`MAX_REQUEST_PAGE`] of them.
+    pub async fn read_request_answers(
+        &self,
+        binding: &SessionBinding,
+        request: &str,
+        after: i64,
+        limit: u32,
+    ) -> Result<Vec<Answer>> {
+        valid_id("request id", request)?;
+        let mut tx = self.pool.begin().await?;
+        visible_request(&mut tx, binding, request).await?;
+        let answers = answer_page(&mut tx, &binding.context_id, request, after, limit).await?;
+        tx.commit().await?;
+        Ok(answers)
+    }
+
+    /// The member's own requests still waiting: those it asked and those it owns, open or
+    /// relayed, by ID after `after` ("" for the first page), at most [`MAX_REQUEST_PAGE`]. A
+    /// repo lead's list is its own too; it reads others' requests one at a time.
+    pub async fn pending_requests(
+        &self,
+        binding: &SessionBinding,
+        after: &str,
+        limit: u32,
+    ) -> Result<Vec<Request>> {
+        let mut tx = self.pool.begin().await?;
+        validate_on(&mut tx, binding).await?;
+        let requests = request_page(
+            &mut tx,
+            &binding.context_id,
+            Some(&binding.member_id),
+            after,
+            limit,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(requests)
+    }
+
+    /// Trusted read: every request still waiting in the context, paged as
+    /// [`Store::pending_requests`].
+    pub async fn owner_pending_requests(
+        &self,
+        context: &str,
+        after: &str,
+        limit: u32,
+    ) -> Result<Vec<Request>> {
+        valid_id("context", context)?;
+        let mut tx = self.pool.begin().await?;
+        let requests = request_page(&mut tx, context, None, after, limit).await?;
+        tx.commit().await?;
+        Ok(requests)
+    }
+
+    /// Trusted read: a request's answers, paged as [`Store::read_request_answers`].
+    pub async fn owner_request_answers(
+        &self,
+        context: &str,
+        request: &str,
+        after: i64,
+        limit: u32,
+    ) -> Result<Vec<Answer>> {
+        valid_id("context", context)?;
+        valid_id("request id", request)?;
+        let mut tx = self.pool.begin().await?;
+        load_request(&mut tx, context, request)
+            .await?
+            .ok_or_else(|| anyhow!("unknown request"))?;
+        let answers = answer_page(&mut tx, context, request, after, limit).await?;
+        tx.commit().await?;
+        Ok(answers)
+    }
+
     /// Trusted read: every request not yet answered or withdrawn, whoever owns it, by ID. A
     /// relayed request is included, since the user has not answered it; `waits_now` leaves it
     /// out, since the asker has an answer to act on.
@@ -590,6 +678,64 @@ async fn callback_room(
     }
     Ok(sqlx::query_scalar("SELECT c.room_id FROM candidate_connections c JOIN candidate_rooms r ON r.context_id=c.context_id AND r.room_id=c.room_id AND r.closed=0 JOIN candidate_room_members m ON m.context_id=c.context_id AND m.room_id=c.room_id AND m.member_id=? AND m.active=1 WHERE c.context_id=? AND c.active=1 AND (c.first_member=? OR c.second_member=?) ORDER BY CASE c.kind WHEN 'report' THEN 0 ELSE 1 END, c.room_id LIMIT 1")
         .bind(callback).bind(context).bind(callback).bind(callback).fetch_optional(conn).await?)
+}
+
+/// The read rule: the asker, the member owner, or a repo lead. Anyone else can't tell the
+/// request from a missing one.
+async fn visible_request(
+    conn: &mut SqliteConnection,
+    binding: &SessionBinding,
+    request: &str,
+) -> Result<Request> {
+    let status = validate_on(conn, binding).await?;
+    let me = &binding.member_id;
+    load_request(conn, &binding.context_id, request)
+        .await?
+        .filter(|current| {
+            current.callback == *me
+                || current.owner == RequestOwner::Member(me.clone())
+                || status.role == Role::RepoLead
+        })
+        .ok_or_else(|| anyhow!("unknown request"))
+}
+
+/// Open and relayed requests by ID after `after`; only `member`'s own when one is given.
+async fn request_page(
+    conn: &mut SqliteConnection,
+    context: &str,
+    member: Option<&str>,
+    after: &str,
+    limit: u32,
+) -> Result<Vec<Request>> {
+    if !after.is_empty() {
+        valid_id("request id", after)?;
+    }
+    let limit = i64::from(limit.clamp(1, MAX_REQUEST_PAGE));
+    let ids: Vec<String> = sqlx::query_scalar("SELECT request_id FROM candidate_requests WHERE context_id=? AND state IN ('open','relayed') AND request_id>? AND (? IS NULL OR callback_member=? OR owner_member=?) ORDER BY request_id LIMIT ?")
+        .bind(context).bind(after).bind(member).bind(member).bind(member).bind(limit)
+        .fetch_all(&mut *conn).await?;
+    let mut requests = Vec::with_capacity(ids.len());
+    for id in ids {
+        requests.push(
+            load_request(conn, context, &id)
+                .await?
+                .ok_or_else(|| anyhow!("unknown request"))?,
+        );
+    }
+    Ok(requests)
+}
+
+async fn answer_page(
+    conn: &mut SqliteConnection,
+    context: &str,
+    request: &str,
+    after: i64,
+    limit: u32,
+) -> Result<Vec<Answer>> {
+    let limit = i64::from(limit.clamp(1, MAX_REQUEST_PAGE));
+    let rows = sqlx::query("SELECT answer_id,channel,actor_member,body,at_wall_ms,applied_wall_ms FROM candidate_request_answers WHERE context_id=? AND request_id=? AND answer_id>? ORDER BY answer_id LIMIT ?")
+        .bind(context).bind(request).bind(after).bind(limit).fetch_all(conn).await?;
+    rows.iter().map(answer_from).collect()
 }
 
 fn owner_columns(owner: &RequestOwner) -> (&'static str, Option<&str>) {
