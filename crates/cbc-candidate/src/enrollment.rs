@@ -525,7 +525,7 @@ impl Store {
             );
             room
         } else {
-            let latest = sqlx::query("SELECT room_id,generation FROM candidate_connections WHERE context_id=? AND min(first_member,second_member)=min(?,?) AND max(first_member,second_member)=max(?,?) ORDER BY generation DESC,introduction_sequence DESC LIMIT 1")
+            let latest = sqlx::query("SELECT room_id,generation FROM candidate_connections WHERE context_id=? AND min(first_member,second_member)=min(?,?) AND max(first_member,second_member)=max(?,?) ORDER BY held_slot DESC,generation DESC,introduction_sequence DESC LIMIT 1")
                 .bind(&binding.context_id).bind(first).bind(second).bind(first).bind(second).fetch_optional(&mut *tx).await?;
             let (generation, supersedes) = match latest {
                 Some(row) => (
@@ -582,7 +582,7 @@ impl Store {
                 crate::facts::ItemClass::Introduction,
             )
             .await?;
-            sqlx::query("INSERT INTO candidate_connections(context_id,first_member,second_member,kind,scope_ref,room_id,introduction_sequence,generation,supersedes_room,active) VALUES (?,?,?,?,?,?,?,?,?,1)")
+            sqlx::query("INSERT INTO candidate_connections(context_id,first_member,second_member,kind,scope_ref,room_id,introduction_sequence,generation,supersedes_room,active,held_slot) VALUES (?,?,?,?,?,?,?,?,?,1,1)")
                 .bind(&binding.context_id).bind(first).bind(second).bind(kind.as_str()).bind(scope_ref).bind(&room).bind(sequence)
                 .bind(generation).bind(supersedes).execute(&mut *tx).await?;
             room

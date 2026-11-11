@@ -334,17 +334,15 @@ async fn a_handoff_rebinds_the_same_identity_and_keeps_its_rooms() {
     store.close().await;
 }
 
-/// A database written before T-26 could hold one open room per scope for a pair. The newest
-/// open one becomes the pair's active room; the others stay open and usable; a closed one is
-/// superseded by the next open.
-#[tokio::test]
-async fn a_v7_database_keeps_its_rooms_and_gets_one_active_room_per_pair() {
+/// A store opened over a database written by migrations 0001-0007 and seeded with `rows`,
+/// so the 0008 upgrade runs on real pre-T-26 data.
+async fn v7_store(port: u16, rows: &[&str]) -> (TempDir, Sandbox, Store) {
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use std::os::unix::fs::PermissionsExt;
     let temp = tempdir().unwrap();
     let sandbox = Sandbox::initialize(
         &temp.path().join("candidate"),
-        8986,
+        port,
         &[temp.path().join("daily/state.db")],
     )
     .unwrap();
@@ -374,15 +372,7 @@ async fn a_v7_database_keeps_its_rooms_and_gets_one_active_room_per_pair() {
         .run(&pool)
         .await
         .unwrap();
-    for statement in [
-        "INSERT INTO candidate_contexts VALUES ('project')",
-        "INSERT INTO candidate_members(context_id,member_id,role) VALUES ('project','worker','feature_lead'),('project','peer','feature_lead'),('project','third','feature_lead')",
-        "INSERT INTO candidate_route_grants(context_id,first_member,second_member,kind,scope_ref) VALUES ('project','peer','worker','peer','contract-a'),('project','peer','worker','peer','contract-b'),('project','third','worker','peer','contract-c')",
-        "INSERT INTO candidate_rooms(context_id,room_id,closed) VALUES ('project','old-a',0),('project','old-b',0),('project','old-c',1)",
-        "INSERT INTO candidate_room_members(context_id,room_id,member_id) VALUES ('project','old-a','peer'),('project','old-a','worker'),('project','old-b','peer'),('project','old-b','worker'),('project','old-c','third'),('project','old-c','worker')",
-        "INSERT INTO candidate_items(context_id,room_id,sender,kind,body) VALUES ('project','old-a','worker','message','a'),('project','old-b','worker','message','b'),('project','old-c','worker','message','c')",
-        "INSERT INTO candidate_connections VALUES ('project','peer','worker','peer','contract-a','old-a',1),('project','peer','worker','peer','contract-b','old-b',2),('project','third','worker','peer','contract-c','old-c',3)",
-    ] {
+    for statement in rows {
         sqlx::query(statement).execute(&pool).await.unwrap();
     }
     pool.close().await;
@@ -391,8 +381,28 @@ async fn a_v7_database_keeps_its_rooms_and_gets_one_active_room_per_pair() {
         std::fs::Permissions::from_mode(0o600),
     )
     .unwrap();
-
     let store = Store::open(&sandbox).await.unwrap();
+    (temp, sandbox, store)
+}
+
+/// A database written before T-26 could hold one open room per scope for a pair. The newest
+/// open one becomes the pair's active room; the others stay open and usable; a closed one is
+/// superseded by the next open.
+#[tokio::test]
+async fn a_v7_database_keeps_its_rooms_and_gets_one_active_room_per_pair() {
+    let (_temp, _sandbox, store) = v7_store(
+        8986,
+        &[
+            "INSERT INTO candidate_contexts VALUES ('project')",
+            "INSERT INTO candidate_members(context_id,member_id,role) VALUES ('project','worker','feature_lead'),('project','peer','feature_lead'),('project','third','feature_lead')",
+            "INSERT INTO candidate_route_grants(context_id,first_member,second_member,kind,scope_ref) VALUES ('project','peer','worker','peer','contract-a'),('project','peer','worker','peer','contract-b'),('project','third','worker','peer','contract-c')",
+            "INSERT INTO candidate_rooms(context_id,room_id,closed) VALUES ('project','old-a',0),('project','old-b',0),('project','old-c',1)",
+            "INSERT INTO candidate_room_members(context_id,room_id,member_id) VALUES ('project','old-a','peer'),('project','old-a','worker'),('project','old-b','peer'),('project','old-b','worker'),('project','old-c','third'),('project','old-c','worker')",
+            "INSERT INTO candidate_items(context_id,room_id,sender,kind,body) VALUES ('project','old-a','worker','message','a'),('project','old-b','worker','message','b'),('project','old-c','worker','message','c')",
+            "INSERT INTO candidate_connections VALUES ('project','peer','worker','peer','contract-a','old-a',1),('project','peer','worker','peer','contract-b','old-b',2),('project','third','worker','peer','contract-c','old-c',3)",
+        ],
+    )
+    .await;
     let worker = bound(&store, "worker").await;
     let joined = store
         .connect_members(
@@ -442,6 +452,78 @@ async fn a_v7_database_keeps_its_rooms_and_gets_one_active_room_per_pair() {
         .unwrap();
     assert_eq!(replaced.supersedes.as_deref(), Some("old-c"));
     assert!(!replaced.closed);
+    store.close().await;
+}
+
+/// A v7 room whose grant or membership was revoked stays open in the rooms table, but it is not
+/// usable, so the upgrade never makes it the pair's active room.
+#[tokio::test]
+async fn a_v7_revoked_room_never_becomes_the_active_room() {
+    let (_temp, _sandbox, store) = v7_store(
+        8987,
+        &[
+            "INSERT INTO candidate_contexts VALUES ('project')",
+            "INSERT INTO candidate_members(context_id,member_id,role) VALUES ('project','worker','feature_lead'),('project','peer','feature_lead')",
+            "INSERT INTO candidate_route_grants(context_id,first_member,second_member,kind,scope_ref,active) VALUES ('project','peer','worker','peer','contract-a',1),('project','peer','worker','peer','contract-b',0),('project','peer','worker','peer','contract-c',1)",
+            "INSERT INTO candidate_rooms(context_id,room_id,closed) VALUES ('project','old-a',0),('project','old-b',0),('project','old-c',0)",
+            "INSERT INTO candidate_room_members(context_id,room_id,member_id,active) VALUES ('project','old-a','peer',1),('project','old-a','worker',1),('project','old-b','peer',1),('project','old-b','worker',1),('project','old-c','peer',1),('project','old-c','worker',0)",
+            "INSERT INTO candidate_items(context_id,room_id,sender,kind,body) VALUES ('project','old-a','worker','message','a'),('project','old-b','worker','message','b'),('project','old-c','worker','message','c')",
+            "INSERT INTO candidate_connections VALUES ('project','peer','worker','peer','contract-a','old-a',1),('project','peer','worker','peer','contract-b','old-b',2),('project','peer','worker','peer','contract-c','old-c',3)",
+        ],
+    )
+    .await;
+    let worker = bound(&store, "worker").await;
+    let joined = store
+        .connect_members(
+            &worker,
+            "peer",
+            ConnectionKind::Peer,
+            "contract-a",
+            "k1",
+            "",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        joined.room, "old-a",
+        "the newest usable room is the active one"
+    );
+    assert!(joined.reused);
+    store.close().await;
+}
+
+/// After the upgrade, the room that replaces the pair's active room supersedes that room, not a
+/// newer one that was already closed before the upgrade.
+#[tokio::test]
+async fn a_replacement_after_the_upgrade_supersedes_the_room_it_replaces() {
+    let (_temp, _sandbox, store) = v7_store(
+        8988,
+        &[
+            "INSERT INTO candidate_contexts VALUES ('project')",
+            "INSERT INTO candidate_members(context_id,member_id,role) VALUES ('project','worker','feature_lead'),('project','peer','feature_lead')",
+            "INSERT INTO candidate_route_grants(context_id,first_member,second_member,kind,scope_ref) VALUES ('project','peer','worker','peer','contract-a'),('project','peer','worker','peer','contract-b')",
+            "INSERT INTO candidate_rooms(context_id,room_id,closed) VALUES ('project','old-a',0),('project','old-b',1)",
+            "INSERT INTO candidate_room_members(context_id,room_id,member_id) VALUES ('project','old-a','peer'),('project','old-a','worker'),('project','old-b','peer'),('project','old-b','worker')",
+            "INSERT INTO candidate_items(context_id,room_id,sender,kind,body) VALUES ('project','old-a','worker','message','a'),('project','old-b','worker','message','b')",
+            "INSERT INTO candidate_connections VALUES ('project','peer','worker','peer','contract-a','old-a',1),('project','peer','worker','peer','contract-b','old-b',2)",
+        ],
+    )
+    .await;
+    let worker = bound(&store, "worker").await;
+    store.close_room(&worker, "old-a", "done").await.unwrap();
+    let next = store
+        .connect_members(
+            &worker,
+            "peer",
+            ConnectionKind::Peer,
+            "contract-a",
+            "k1",
+            "",
+        )
+        .await
+        .unwrap();
+    assert_eq!(next.generation, 2);
+    assert_eq!(next.supersedes.as_deref(), Some("old-a"));
     store.close().await;
 }
 

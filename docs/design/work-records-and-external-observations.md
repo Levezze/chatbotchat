@@ -100,8 +100,12 @@ Migration 0008 (schema 8). Tests are in `tests/peer_rooms.rs`.
   records nothing. A member enrolled before migration 0008 has no earlier
   event, so its first handoff after the upgrade is recorded as `enrolled`.
 - **Upgrade.** Before 0008 a pair could hold one open room per scope. The
-  newest open one becomes the active room. The others stay open and usable, but
-  an open no longer returns them.
+  newest usable one becomes the active room: open, under an active grant, with
+  both members still active in it. A revoked room never takes the slot. The
+  others stay open and readable, but an open no longer returns them. Each row
+  records whether it ever held the pair's active slot (`held_slot`), and a
+  replacement supersedes the last room that held it, never an older room the
+  upgrade set aside.
 
 Two existing tests changed contract under T-26, and the PR names both. A
 reopen after a close used to fail; it now creates a replacement. An open after

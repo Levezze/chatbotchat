@@ -16,6 +16,9 @@ CREATE TABLE candidate_connections (
     generation INTEGER NOT NULL CHECK(typeof(generation) = 'integer' AND generation >= 1),
     supersedes_room TEXT,
     active INTEGER NOT NULL CHECK(active IN (0,1)),
+    -- 1 once this room has held the pair's active slot. A replacement supersedes the last
+    -- room that held it, never an older room that was set aside by this upgrade.
+    held_slot INTEGER NOT NULL CHECK(held_slot IN (0,1)),
     closed_by TEXT,
     close_reason TEXT,
     closed_wall_ms INTEGER,
@@ -26,24 +29,40 @@ CREATE TABLE candidate_connections (
     FOREIGN KEY(context_id,supersedes_room) REFERENCES candidate_connections(context_id,room_id),
     CHECK((closed_by IS NULL) = (close_reason IS NULL) AND (closed_by IS NULL) = (closed_wall_ms IS NULL)),
     CHECK(active = 0 OR closed_by IS NULL),
+    CHECK(active = 0 OR held_slot = 1),
     CHECK((generation = 1) = (supersedes_room IS NULL))
 );
 
 -- Existing rows become generation 1 of their own chain. Before this migration a pair could
--- hold one open room per scope; only the newest open one stays the pair's active room. The
--- others stay open and readable, but a new open no longer returns them.
-INSERT INTO candidate_connections(context_id,first_member,second_member,kind,scope_ref,room_id,introduction_sequence,generation,supersedes_room,active)
-SELECT c.context_id, c.first_member, c.second_member, c.kind, c.scope_ref, c.room_id, c.introduction_sequence, 1, NULL,
-       CASE WHEN r.closed = 0 AND c.introduction_sequence = (
-           SELECT max(o.introduction_sequence) FROM candidate_connections_v7 o
-           JOIN candidate_rooms orr ON orr.context_id = o.context_id AND orr.room_id = o.room_id
-           WHERE o.context_id = c.context_id AND orr.closed = 0
-             AND min(o.first_member, o.second_member) = min(c.first_member, c.second_member)
-             AND max(o.first_member, o.second_member) = max(c.first_member, c.second_member))
-       THEN 1 ELSE 0 END
+-- hold one open room per scope; only the newest usable one becomes the pair's active room.
+-- Usable means open, with an active grant and both members still active in the room: a
+-- revoked room stays open in candidate_rooms but must never take the slot. The others stay
+-- readable, but a new open no longer returns them.
+CREATE TEMP TABLE usable_v7 AS
+SELECT c.context_id, c.room_id, c.introduction_sequence,
+       min(c.first_member, c.second_member) AS low, max(c.first_member, c.second_member) AS high
 FROM candidate_connections_v7 c
-JOIN candidate_rooms r ON r.context_id = c.context_id AND r.room_id = c.room_id;
+JOIN candidate_rooms r ON r.context_id = c.context_id AND r.room_id = c.room_id AND r.closed = 0
+JOIN candidate_route_grants g ON g.context_id = c.context_id AND g.first_member = c.first_member
+  AND g.second_member = c.second_member AND g.kind = c.kind AND g.scope_ref = c.scope_ref AND g.active = 1
+WHERE (SELECT count(*) FROM candidate_room_members m
+       WHERE m.context_id = c.context_id AND m.room_id = c.room_id AND m.active = 1
+         AND m.member_id IN (c.first_member, c.second_member)) = 2;
 
+INSERT INTO candidate_connections(context_id,first_member,second_member,kind,scope_ref,room_id,introduction_sequence,generation,supersedes_room,active,held_slot)
+SELECT c.context_id, c.first_member, c.second_member, c.kind, c.scope_ref, c.room_id, c.introduction_sequence, 1, NULL,
+       a.flag, a.flag
+FROM candidate_connections_v7 c
+JOIN (SELECT v.context_id, v.room_id,
+             CASE WHEN EXISTS (
+                 SELECT 1 FROM usable_v7 u WHERE u.context_id = v.context_id AND u.room_id = v.room_id
+                   AND u.introduction_sequence = (
+                       SELECT max(o.introduction_sequence) FROM usable_v7 o
+                       WHERE o.context_id = u.context_id AND o.low = u.low AND o.high = u.high))
+             THEN 1 ELSE 0 END AS flag
+      FROM candidate_connections_v7 v) a ON a.context_id = c.context_id AND a.room_id = c.room_id;
+
+DROP TABLE usable_v7;
 DROP TABLE candidate_connections_v7;
 
 -- T-26: one active room per unordered pair, whatever the kind or scope. Concurrent opens are
