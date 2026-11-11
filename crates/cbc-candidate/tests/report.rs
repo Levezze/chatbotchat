@@ -8,6 +8,7 @@ use cbc_candidate::{
     evidence::{sha256_file, take_snapshot, Snapshot},
     report::{report, ReportArgs},
     requests::RequestOwner,
+    sampler::{Disk, Mode, Process, Tick, SAMPLE_VERSION},
 };
 use std::time::Duration;
 use work_fixture::{drain, fixture, Case};
@@ -50,6 +51,7 @@ async fn run(
             manifest,
             end: &end.file,
             tally: tally.map(|bytes| ("tally.json", bytes)),
+            samples: &[],
             from_ms: None,
             until_ms: until,
         },
@@ -419,4 +421,178 @@ async fn the_command_takes_bare_file_names_from_inside_the_snapshot_directory() 
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.starts_with("Trial 1 — build test-build"), "{text}");
     assert!(line(&text, "End snapshot: ").contains(end.file.file_name().unwrap().to_str().unwrap()));
+}
+
+#[tokio::test]
+async fn the_cost_section_reads_the_sampler_file_cut_on_the_window() {
+    let case = fixture().await;
+    let base = snap(&case).await;
+    let manifest = manifest(&base, &sha256_file(&base.file).unwrap());
+    let end = snap(&case).await;
+    let tick = |wall_ms: i64, cpu_ms: u64| Tick {
+        v: SAMPLE_VERSION,
+        wall_ms,
+        mode: Mode::Normal,
+        interval_ms: 10_000,
+        processes: vec![Process {
+            label: "cbc-candidate serve".into(),
+            pid: 41,
+            rss_kb: 2048,
+            cpu_ms,
+        }],
+        disk: Disk {
+            database_bytes: 4096,
+            snapshots_bytes: 0,
+            other_bytes: 512,
+        },
+    };
+    // One tick before the window, two inside it, one after the end snapshot.
+    let mut samples = Vec::new();
+    for t in [
+        tick(base.taken_wall_ms - 1, 0),
+        tick(base.taken_wall_ms, 100),
+        tick(end.taken_wall_ms, 150),
+        tick(end.taken_wall_ms + 1, 900),
+    ] {
+        samples.extend(serde_json::to_vec(&t).unwrap());
+        samples.push(b'\n');
+    }
+    let text = report(
+        &case._sandbox,
+        ReportArgs {
+            manifest_name: "trial-1.json",
+            manifest: &manifest,
+            end: &end.file,
+            tally: None,
+            samples: &[("samples-1-normal.jsonl", &samples)],
+            from_ms: None,
+            until_ms: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(line(&text, "Samples: ").starts_with("Samples: samples-1-normal.jsonl, sha256 "));
+    line(&text, "Cost (sampler ticks in the window)");
+    let span = end.taken_wall_ms - base.taken_wall_ms;
+    assert!(
+        line(&text, "  normal: ").contains(&format!("ticks=2 every 10000 ms over {span} ms")),
+        "{text}"
+    );
+    let core = line(&text, "  normal — cbc-candidate serve: ");
+    assert!(core.contains("processes max=1 expected=1"), "{core}");
+    assert!(
+        core.contains("(50 ms CPU)"),
+        "only growth inside the window: {core}"
+    );
+    line(&text, "  debug: missing (no debug-mode ticks in the window");
+    assert!(
+        line(&text, "  normal — disk bytes: ").contains("database start=4096 end=4096 max=4096")
+    );
+
+    // A file that is not sampler output is refused, naming the line, not echoing it.
+    let refused = report(
+        &case._sandbox,
+        ReportArgs {
+            manifest_name: "trial-1.json",
+            manifest: &manifest,
+            end: &end.file,
+            tally: None,
+            samples: &[("bad.jsonl", &b"secret command line\n"[..])],
+            from_ms: None,
+            until_ms: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refused.to_string(), "samples line 1: not a sample tick");
+}
+
+#[tokio::test]
+async fn normal_and_debug_runs_are_read_from_their_own_files_into_one_cost_section() {
+    let case = fixture().await;
+    let base = snap(&case).await;
+    let manifest = manifest(&base, &sha256_file(&base.file).unwrap());
+    let end = snap(&case).await;
+    let (from, until) = (base.taken_wall_ms, end.taken_wall_ms);
+    let file = |mode: Mode, walls: [i64; 2]| {
+        let mut bytes = Vec::new();
+        for (i, wall_ms) in walls.into_iter().enumerate() {
+            let tick = Tick {
+                v: SAMPLE_VERSION,
+                wall_ms,
+                mode,
+                interval_ms: 1,
+                processes: vec![Process {
+                    label: "cbc-candidate serve".into(),
+                    pid: 41,
+                    rss_kb: 2048,
+                    cpu_ms: 10 * i as u64,
+                }],
+                disk: Disk::default(),
+            };
+            bytes.extend(serde_json::to_vec(&tick).unwrap());
+            bytes.push(b'\n');
+        }
+        bytes
+    };
+    let split = from + (until - from) / 2;
+    let normal = file(Mode::Normal, [from, split]);
+    let debug = file(Mode::Debug, [split + 1, until]);
+    let run = |samples: Vec<(&'static str, Vec<u8>)>| {
+        let (manifest, end) = (&manifest, &end.file);
+        let sandbox = &case._sandbox;
+        async move {
+            let samples: Vec<(&str, &[u8])> =
+                samples.iter().map(|(n, b)| (*n, b.as_slice())).collect();
+            report(
+                sandbox,
+                ReportArgs {
+                    manifest_name: "trial-1.json",
+                    manifest,
+                    end,
+                    tally: None,
+                    samples: &samples,
+                    from_ms: None,
+                    until_ms: None,
+                },
+            )
+            .await
+        }
+    };
+    // Given in either order, both files are named and both modes measured.
+    let text = run(vec![
+        ("debug.jsonl", debug.clone()),
+        ("normal.jsonl", normal.clone()),
+    ])
+    .await
+    .unwrap();
+    let names: Vec<&str> = text
+        .lines()
+        .filter(|l| l.starts_with("Samples: "))
+        .collect();
+    assert_eq!(names.len(), 2, "{text}");
+    assert!(
+        names[0].starts_with("Samples: normal.jsonl, sha256 "),
+        "{text}"
+    );
+    assert!(
+        names[1].starts_with("Samples: debug.jsonl, sha256 "),
+        "{text}"
+    );
+    assert!(line(&text, "  normal: ").contains("ticks=2"), "{text}");
+    assert!(line(&text, "  debug: ").contains("ticks=2"), "{text}");
+    assert!(
+        line(&text, "  debug — cbc-candidate serve: ").contains("(10 ms CPU)"),
+        "{text}"
+    );
+
+    // Two samplers running at once would count every process twice: refused.
+    let overlapping = file(Mode::Debug, [from, until]);
+    let error = run(vec![("normal.jsonl", normal), ("debug.jsonl", overlapping)])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "samples normal.jsonl and debug.jsonl overlap in time: one sampler at a time"
+    );
 }

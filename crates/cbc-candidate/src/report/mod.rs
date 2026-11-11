@@ -20,11 +20,13 @@ use std::{
     path::Path,
 };
 
+mod cost;
 mod facts;
 mod render;
 #[cfg(test)]
 mod tests;
 
+pub use cost::Samples;
 pub(crate) use facts::*;
 use render::*;
 
@@ -305,6 +307,8 @@ pub struct ReportArgs<'a> {
     pub manifest: &'a [u8],
     pub end: &'a Path,
     pub tally: Option<(&'a str, &'a [u8])>,
+    /// The sampler's JSONL file (C3), for the Cost section.
+    pub samples: &'a [(&'a str, &'a [u8])],
     pub from_ms: Option<i64>,
     pub until_ms: Option<i64>,
 }
@@ -359,6 +363,12 @@ pub async fn report(sandbox: &Sandbox, args: ReportArgs<'_>) -> Result<String> {
         .tally
         .map(|(name, bytes)| Tally::parse(name, bytes, &facts.seats))
         .transpose()?;
+    let samples = Samples::in_order(
+        args.samples
+            .iter()
+            .map(|(name, bytes)| Samples::parse(name, bytes))
+            .collect::<Result<_>>()?,
+    )?;
     use sha2::Digest;
     let header = Header {
         trial: u64::try_from(number("/trial")?)?,
@@ -373,5 +383,5 @@ pub async fn report(sandbox: &Sandbox, args: ReportArgs<'_>) -> Result<String> {
         end_name: file_name(args.end),
         end_sha256: sha256_file(args.end)?,
     };
-    Ok(render(&header, &facts, tally.as_ref(), window))
+    Ok(render(&header, &facts, tally.as_ref(), &samples, window))
 }
