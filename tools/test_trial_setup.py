@@ -462,6 +462,26 @@ class PathSafetyTest(unittest.TestCase):
                     case.prepare(project, seat, "claude")
             self.assertFalse((project / ".mcp.json").exists())
 
+    def test_trial_skills_installed_before_the_first_prepare_are_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            case = Case(base)
+            project = fake_project(base)
+            trial.install(project)
+            with self.assertRaisesRegex(ValueError, "existing trial skills"):
+                case.prepare(project, "cm-a", "claude")
+            self.assertFalse((project / ".mcp.json").exists())
+
+    def test_a_worktree_prepared_for_another_seat_is_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            case = Case(base)
+            project = fake_project(base)
+            case.prepare(project, "cm-a", "claude")
+            with self.assertRaisesRegex(ValueError, "already prepared for seat cm-a"):
+                case.prepare(project, "cm-b", "claude")
+            self.assertFalse((case.dir / "seats/cm-b.json").exists())
+
     def test_cases_sharing_a_basename_keep_separate_exclude_blocks(self):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp).resolve()
@@ -549,17 +569,16 @@ class PathSafetyTest(unittest.TestCase):
             setup.teardown(case.dir, "cm-a")
             self.assertTrue((elsewhere / "skills").is_dir())
 
-    def test_tracked_trial_skills_are_refused(self):
+    def test_trial_skills_committed_after_prepare_are_refused_on_a_rerun(self):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
             case = Case(base)
             project = fake_project(base)
-            trial.install(project)
+            case.prepare(project, "cm-a", "claude")
             git(project, "add", "-f", ".agents")
             git(project, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "skills")
             with self.assertRaisesRegex(ValueError, "tracked"):
                 case.prepare(project, "cm-a", "claude")
-            self.assertFalse((project / ".mcp.json").exists())
 
     def test_sheets_remove_the_marketplace_from_local_settings_only(self):
         for phase, seats in LaunchSheetTest.SEATS.items():

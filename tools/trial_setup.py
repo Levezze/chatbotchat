@@ -274,6 +274,14 @@ def prepare(case, project, seat, host, python, claude_skills_dir=Path.home() / "
         previous = json.loads(record_path.read_text())
         if previous["project"] != str(project) or previous["host"] != host:
             raise ValueError(f"seat {seat} is already prepared for {previous['project']} ({previous['host']})")
+    for other in sorted((case / "seats").glob("*.json")):
+        if other != record_path and json.loads(other.read_text())["project"] == str(project):
+            raise ValueError(f"{project} is already prepared for seat {other.stem}; one worktree per seat")
+    skills = [f"{host}/{trial.trial_name(name)}" for host in SKILL_HOSTS for name in trial.hierarchy.NAMES]
+    existing = [skill for skill in skills if (project / skill).exists() or (project / skill).is_symlink()]
+    if not record_path.exists() and existing:
+        raise ValueError(f"existing trial skills in {project} ({', '.join(existing)}); teardown would remove "
+                         "them, so use a fresh worktree")
     hierarchy = project / ".cbc/hierarchy"
     if not record_path.exists() and (hierarchy.exists() or hierarchy.is_symlink()):
         raise ValueError(f"existing hierarchy records in {hierarchy}; teardown would archive them, so use a "
@@ -286,7 +294,6 @@ def prepare(case, project, seat, host, python, claude_skills_dir=Path.home() / "
 
     files = claude_files(case, python, claude_skills_dir) if host == "claude" else codex_files(case, python)
     refuse_symlinks(project, [*files, *CREATED_DIRS])
-    skills = [f"{host}/{trial.trial_name(name)}" for host in SKILL_HOSTS for name in trial.hierarchy.NAMES]
     tracked = git(project, "ls-files", "--", *files, *skills).split()
     if tracked:
         raise ValueError(f"tracked by git, refusing to write: {', '.join(tracked)}")
