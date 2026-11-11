@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.28.1](https://github.com/Levezze/chatbotchat/compare/v0.28.0...v0.28.1) (2026-11-11)
+
+
+### Bug Fixes
+
+* **build:** optimize sha2 in the dev profile so candidate startup stays fast ([#155](https://github.com/Levezze/chatbotchat/issues/155)) ([03c9174](https://github.com/Levezze/chatbotchat/commit/03c9174468ff0aa20c55431105623f8ee8a5c664))
+
 ## [0.28.0](https://github.com/Levezze/chatbotchat/compare/v0.27.0...v0.28.0) (2026-11-11)
 
 
