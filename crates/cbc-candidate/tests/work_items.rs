@@ -691,3 +691,34 @@ async fn the_upgrade_keeps_every_delivery_fact_recorded_before_it() {
         1004
     );
 }
+
+/// Leaving a field alone and clearing it are different requests, so one key can't carry both.
+#[tokio::test]
+async fn leaving_a_field_and_clearing_it_are_different_requests() {
+    let case = fixture().await;
+    case.store
+        .register_work_item(&case.worker, "feat-login", "Login flow", "reg-1")
+        .await
+        .unwrap();
+    let leave = WorkPatch {
+        stage: Some(Stage::Implementing),
+        ..patch()
+    };
+    case.store
+        .update_work_item(&case.worker, "feat-login", 1, "u-1", &leave)
+        .await
+        .unwrap();
+    let clear = WorkPatch {
+        branch: Some(None),
+        ..leave
+    };
+    let error = case
+        .store
+        .update_work_item(&case.worker, "feat-login", 1, "u-1", &clear)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("idempotency key conflicts"),
+        "{error}"
+    );
+}

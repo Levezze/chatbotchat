@@ -116,7 +116,8 @@ impl Store {
         valid_item(item)?;
         valid_key(key)?;
         let summary = valid_summary(summary)?;
-        let fingerprint = fingerprint(&format!("register\0{item}\0{summary}"));
+        let fingerprint =
+            fingerprint(&serde_json::json!({"op": "register", "item": item, "summary": summary}));
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let status = validate_on(&mut tx, binding).await?;
         ensure!(
@@ -187,7 +188,16 @@ impl Store {
         valid_item(item)?;
         valid_key(key)?;
         let patch = normalize(patch)?;
-        let fingerprint = fingerprint(&format!("update\0{item}\0{expected_revision}\0{patch:?}"));
+        let fingerprint = fingerprint(&serde_json::json!({
+            "op": "update",
+            "item": item,
+            "expected_revision": expected_revision,
+            "stage": patch.stage.map(Stage::as_str),
+            "summary": patch.summary,
+            "next_action": patch.next_action,
+            "blocked_operation": clearable(&patch.blocked_operation),
+            "branch": clearable(&patch.branch),
+        }));
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         validate_on(&mut tx, binding).await?;
         let current = load_item(&mut tx, &binding.context_id, item)
@@ -353,7 +363,7 @@ impl Store {
         actor: &Actor,
         key: &str,
     ) -> Result<WorkOutcome> {
-        let fingerprint = fingerprint(&format!("hitl\0{item}\0{on}"));
+        let fingerprint = fingerprint(&serde_json::json!({"op": "hitl", "item": item, "on": on}));
         let current = load_item(conn, context, item)
             .await?
             .ok_or_else(|| anyhow::anyhow!("unknown work item"))?;
@@ -526,8 +536,22 @@ async fn load_item(
     .transpose()
 }
 
-fn fingerprint(request: &str) -> [u8; 32] {
-    Sha256::digest(format!("cbc-work-request-v1\0{request}").as_bytes()).into()
+/// A stable digest of a request, so a retry still matches after a toolchain or library
+/// upgrade. Keys keep the fixed order of the literals above (serde_json preserve_order).
+fn fingerprint(request: &serde_json::Value) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"cbc-work-request-v1\0");
+    hasher.update(request.to_string().as_bytes());
+    hasher.finalize().into()
+}
+
+/// Leave, clear and set are three different requests.
+fn clearable(value: &Option<Option<String>>) -> serde_json::Value {
+    match value {
+        None => serde_json::Value::Null,
+        Some(None) => serde_json::json!({"clear": true}),
+        Some(Some(text)) => serde_json::json!({"set": text}),
+    }
 }
 
 fn valid_item(item: &str) -> Result<()> {
