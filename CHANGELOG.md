@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.31.0](https://github.com/Levezze/chatbotchat/compare/v0.30.0...v0.31.0) (2026-11-11)
+
+
+### Features
+
+* **candidate:** structured v1 logs with a live level (B2) ([#160](https://github.com/Levezze/chatbotchat/issues/160)) ([23d6285](https://github.com/Levezze/chatbotchat/commit/23d6285b708067901078ed9ec97d0a677a99c299))
+
 ## [0.30.0](https://github.com/Levezze/chatbotchat/compare/v0.29.0...v0.30.0) (2026-11-11)
 
 
