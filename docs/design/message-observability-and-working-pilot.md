@@ -547,6 +547,11 @@ converts that log rather than adding a second one.
   - The core's list is `FIELDS` in `src/log.rs`; the driver's is `FIELDS` in
     `adapters/shared/log.py`. A Python test parses the Rust list and requires
     the two to be equal.
+  - A receipt reference is a capability, so no log holds one. `reference` is
+    always the batch tag B1's facts already use (`facts::batch_tag`, the
+    first 16 hex characters of a sha256), which the driver computes the same
+    way. A log line, a fact and the other side's log line about one batch
+    join on it. Both sides pin one input and its tag in a test.
 - **Files.** The core writes `<root>/logs/core.jsonl`; the driver writes
   `<log-dir>/router-events.jsonl`. Each is mode 0600, opened with
   `O_NOFOLLOW` in a 0700 directory, and a directory open to others is refused
@@ -575,7 +580,8 @@ converts that log rather than adding a second one.
     only; the trial runs the device router.
 - **What is logged.** In the core, at debug: one `request` line per answered
   request, with the reply's kind, seq, reference, count of items, member,
-  context and outcome. A request is logged only when debug held at both its
+  context and outcome, with the batch's tag as `reference`. A request is
+  logged only when debug held at both its
   start and its end, so the request that reads a level change is never
   logged. At any level: `accept_unavailable` and
   `dashboard_accept_unavailable` (warn, with the error kind) and
@@ -586,7 +592,7 @@ converts that log rather than adding a second one.
     `retry_ms`, and `listening` now gives a `count` of bindings rather than a
     PID and member list. At debug, one `core_call` line per core round trip:
     the operation as `kind`, the reply type as `outcome`, member, context, and
-    the reply's seq, reference and item count where present.
+    the reply's seq, batch tag and item count where present.
 - **Not converted.** The Claude adapter's per-chat `adapter-*.jsonl` files and
   the Codex adapter keep their own formats. They are diagnostics for one
   chat, not the run.
@@ -624,9 +630,11 @@ converts that log rather than adding a second one.
   - `tests/sampler.rs`: a sampler switched to debug after its first tick and
     given an invalid file after its second labels its ticks normal, debug,
     debug.
-- **Changed tests.** Three assertions changed with the contract they check, not
+- **Changed tests.** Four assertions changed with the contract they check, not
   to make a test pass: the router's `hello` event names its reply `outcome`
-  rather than `reply`; the sampler file name no longer carries a mode, and its
+  rather than `reply`; `tests/logs.rs` requires the request line's
+  `reference` to be the batch tag, and the raw reference to be absent, where it
+  had required any string; the sampler file name no longer carries a mode, and its
   ticks without a settings change read normal; the report's debug-missing
   reason no longer says debug waits for B2. The router's "an unwritable log
   never raises" unit test now builds the new log, removes its directory and

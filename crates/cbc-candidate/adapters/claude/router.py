@@ -247,7 +247,8 @@ class Router:
         log.write("debug", "core_call", {
             "kind": request.get("op"), "outcome": reply.get("type"),
             "context": binding.get("context"), "member": binding.get("member"),
-            "seq": reply.get("sequence"), "reference": reply.get("reference"),
+            "seq": reply.get("sequence"),
+            "reference": event_log.batch_tag(ref) if isinstance(ref := reply.get("reference"), str) else None,
             "count": len(items) if isinstance(items, list) else None})
         return reply
 

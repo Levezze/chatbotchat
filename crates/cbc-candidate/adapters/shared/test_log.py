@@ -115,6 +115,10 @@ class EventLogTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             log.EventLog(shared, "router-events.jsonl", "driver")
 
+    def test_a_reference_is_logged_as_the_cores_batch_tag(self):
+        # src/log.rs pins the same value; a receipt reference is a capability, never logged raw.
+        self.assertEqual(log.batch_tag("ref-secret-1"), "6292735d22f1737a")
+
     def test_a_run_id_is_short_and_plain(self):
         self.assertEqual(log.run_id("trial-1.a_b"), "trial-1.a_b")
         for bad in ("", "x" * 65, "a b", "a/b", "é"):

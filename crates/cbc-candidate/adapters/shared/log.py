@@ -11,6 +11,7 @@ The file is private (0600, never through a link, in a 0700 directory), bounded i
 rotated, keeping `keep` older files. A line that cannot be written is counted, and the count is
 written as a log_dropped line once writing works again. Writing never raises.
 """
+import hashlib
 import json
 import os
 import re
@@ -28,6 +29,12 @@ FIELDS = frozenset([
     "outcome", "count", "seq", "attempt", "targets", "pending", "session", "retry_ms",
 ])
 _RUN = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
+def batch_tag(reference):
+    """A receipt reference is a capability, so a log carries this tag instead: the core's
+    facts::batch_tag, so driver lines join the core's lines and facts on one batch."""
+    return hashlib.sha256(("cbc-batch-tag-v1:" + reference).encode()).hexdigest()[:16]
 
 
 def run_id(text):

@@ -68,7 +68,7 @@ class DeviceTests(unittest.TestCase):
     def test_the_recovery_status_read_sets_the_live_level_and_logs_no_token(self):
         # B2: the core puts log_level on binding_status; the device router reads that status on
         # its recovery cadence, so the level follows the core's settings without a restart.
-        replies = [{"type": "binding_status", "log_level": "debug"},
+        replies = [{"type": "binding_status", "log_level": "debug", "reference": "ref-secret-1"},
                    {"type": "binding_status", "log_level": "normal"}]
         server = socket.socket(socket.AF_UNIX)
         server.bind(self.profile["core_socket"])
@@ -97,11 +97,13 @@ class DeviceTests(unittest.TestCase):
         calls = [line for line in lines if line["event"] == "core_call"]
         self.assertEqual([(c["kind"], c["outcome"], c["member"]) for c in calls],
                          [("binding_status", "binding_status", "claude")])  # only while debug
+        self.assertEqual(calls[0]["reference"], "6292735d22f1737a")  # a digest, never the capability
         self.assertEqual([line["event"] for line in lines if line["event"] != "core_call"],
                          ["still_info"])
         self.assertTrue(all(line["run"] == "trial-2" and line["component"] == "driver"
                             for line in lines), lines)
         self.assertNotIn(grant["token"], path.read_text())
+        self.assertNotIn("ref-secret-1", path.read_text())
 
     def test_private_profile_maps_every_native_session_to_one_host(self):
         core, bindings, targets = device.load_targets(str(self.path))

@@ -129,7 +129,7 @@ rtk proxy "$CBC113_BIN" provision --root "$CBC113_ROOT" --protected-db "$CBC113_
 rtk proxy python3 -B -I "$CBC113_REPO/crates/cbc-candidate/adapters/device/router.py" --profile "$CBC113_ROOT/device-profile.json" --listen "$CBC113_ROOT/device.sock" --sessions-dir /ACTUAL/CLAUDE/SESSIONS --codex-executable /ACTUAL/INSTALLED/CODEX --log-dir "$CBC113_ROOT/device-log" --run "$CBC113_RUN"
 ```
 
-Set `CBC113_RUN` to one id per run (1 to 64 of letters, digits, `.`, `_`, `-`). The core logs to `$CBC113_ROOT/logs/core.jsonl` and the driver to `device-log/router-events.jsonl`, both v1 lines that carry the id. Switch to debug by setting `"log_level":"debug"` in `$CBC113_ROOT/runtime-settings.json` through the settings mechanism, and back by removing it; neither needs a restart. The core applies it at its next request; the driver within its 60-second recovery pass. Neither log holds a token or a message body.
+Set `CBC113_RUN` to one id per run (1 to 64 of letters, digits, `.`, `_`, `-`). The core logs to `$CBC113_ROOT/logs/core.jsonl` and the driver to `device-log/router-events.jsonl`, both v1 lines that carry the id. Switch to debug by setting `"log_level":"debug"` in `$CBC113_ROOT/runtime-settings.json` through the settings mechanism, and back by removing it; neither needs a restart. The core applies it at its next request; the driver within its 60-second recovery pass, so before measuring debug cost wait for the first driver `core_call` line after the switch. Neither log holds a token, a receipt reference or a message body.
 
 Use `profile:"cli"` for an observed Claude CLI entrypoint. Provisioning rejects unsupported
 Codex execution-profile claims or configured saved selectors before changing state. Its output

@@ -302,7 +302,7 @@ impl<S: Subscriber> Layer<S> for JsonLayer {
 }
 
 /// One debug line per answered core request: its reply type and identifiers. Only called when
-/// debug is on; the reply's items and bodies are never read.
+/// debug is on; the reply's items and bodies are never read, and its reference only as its batch tag.
 pub fn reply(context: &str, member: &str, reply: &serde_json::Value) {
     let field = |name: &str| reply.get(name);
     tracing::debug!(
@@ -311,7 +311,9 @@ pub fn reply(context: &str, member: &str, reply: &serde_json::Value) {
         member,
         kind = field("type").and_then(|v| v.as_str()),
         seq = field("sequence").and_then(|v| v.as_i64()),
-        reference = field("reference").and_then(|v| v.as_str()),
+        reference = field("reference")
+            .and_then(|v| v.as_str())
+            .map(crate::facts::batch_tag),
         count = field("items")
             .and_then(|v| v.as_array())
             .map(|a| a.len() as u64),
@@ -467,6 +469,12 @@ mod tests {
     }
 
     #[test]
+    fn a_reference_is_logged_as_the_facts_batch_tag_the_driver_computes_too() {
+        // adapters/shared/test_log.py pins the same value.
+        assert_eq!(crate::facts::batch_tag("ref-secret-1"), "6292735d22f1737a");
+    }
+
+    #[test]
     fn a_core_reply_is_logged_by_its_identifiers_and_never_its_items() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("logs");
@@ -498,7 +506,11 @@ mod tests {
             .iter()
             .all(|l| l["context"] == "api" && l["member"] == "lead"));
         assert_eq!(got[0]["kind"], "batch");
-        assert_eq!(got[0]["reference"], "r1");
+        assert_eq!(got[0]["reference"], crate::facts::batch_tag("r1"));
+        assert!(
+            !text.contains(r#""r1""#),
+            "a receipt reference is a capability: {text}"
+        );
         assert_eq!(got[0]["count"], 2);
         assert_eq!(got[1]["kind"], "sent");
         assert_eq!(got[1]["seq"], 9);

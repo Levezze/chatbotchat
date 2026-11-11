@@ -125,7 +125,12 @@ async fn a_served_core_logs_requests_only_while_debug_and_never_a_token_or_a_bod
     assert_eq!(logged[0]["member"], "alice");
     assert_eq!(logged[1]["member"], "bob");
     assert_eq!(logged[1]["count"], 2);
-    assert!(logged[1]["reference"].is_string());
+    // A receipt reference is a capability: the log carries a digest that correlates core and
+    // driver lines, never the reference itself.
+    assert_eq!(
+        logged[1]["reference"],
+        cbc_candidate::facts::batch_tag(batch.reference_for_adapter())
+    );
     for line in &logged {
         assert_eq!(line["v"], 1);
         assert_eq!(line["level"], "debug");
@@ -145,6 +150,7 @@ async fn a_served_core_logs_requests_only_while_debug_and_never_a_token_or_a_bod
     for secret in [
         alice.expose_token_for_adapter(),
         bob.expose_token_for_adapter(),
+        batch.reference_for_adapter(),
         "private body",
     ] {
         assert!(!text.contains(secret), "the log holds a secret or a body");
