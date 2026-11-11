@@ -34,6 +34,7 @@ Two problems came out of daily use.
 | I-06 | The grill is user intake. It is not a startup GO from the Primarch, and "fully AFK" is a possible outcome of the grill, not a way to skip it. | The PRD's no-GO rule stays: the Primarch does not approve starts. | Treating the grill as a Primarch gate. |
 | I-07 | The Chapter Master proposes either a full PRD with slice issues or a single issue. The user decides. | Some tasks are small. The user knows which. | A size rule decided by the agent. |
 | I-08 | What "complete" means is a grill answer, recorded on the work item: for example merged, merged and deployed, or signed off by the user after review. It can differ per issue, per PRD or per feature. | Completion depends on the work. A fixed rule would be wrong for half of it. | PR merged as the universal definition. |
+| I-14 | The grill ends with a work breakdown: one issue, or a PRD split into slice issues, each marked AFK or HITL with its completion definition. The Chapter Master shows it and asks whether the user accepts. The user accepts or asks for changes, and the breakdown is revised until accepted. Nothing is created before that: no issues, no tracker entries, no work items. | The user sees and owns the plan before any work exists. Whether an item needs a human is the user's call, not the agent's. | The Chapter Master setting AFK or HITL itself. Creating issues before the user has seen the breakdown. |
 | I-09 | Task-tracker integration is an optional profile, configured once per CBC installation, during setup with the Emperor or later. | Every engineer and team tracks work differently. Many will use none. | Building one tracker into CBC. |
 | I-10 | The task board holds one task per PRD, written for people, not engineers. A single issue with no PRD also gets one task. The task shows progress as closed slice issues over total slice issues, counted by number, not effort: 3 of 5 closed shows 60%. | The board is for humans to follow. GitHub issues are the technical record. A count is a stated basis; PRD #112 forbids invented percentages. | One task per GitHub issue. Effort-weighted progress. |
 | I-11 | The Chapter Master creates and updates the tracker entries with its own tools (the `gh` CLI, the Notion MCP connector). CBC stores the links and the last state pushed, and holds no tracker credentials. | The agents already have authorised access. Credentials in the core would widen what a compromised core can reach. | A CBC-side Notion or GitHub client. |
@@ -83,18 +84,23 @@ the dashboard as tracker drift for that work item.
 
 ## 4. Open questions
 
-1. **Grill answers and the HITL flag.** I-05 lets the grill decide HITL. T-07,
-   already built in R2, says the Chapter Master cannot change the HITL flag,
-   and R3 stores an answer an agent relays from chat as relayed, not
-   owner-authenticated. Recommendation: the Chapter Master may turn the flag on
-   from a recorded grill answer, the safe direction, and never off. Turning it
-   off stays with the user's authenticated route. This needs the user's
-   decision before intake is implemented.
-2. **How issue closure is observed.** The #115 GitHub observer covers pull
+**Resolved 2026-11-11: grill answers and the HITL flag.** This looked like a
+conflict with T-07, under which a Chapter Master can't change an item's HITL
+flag. I-14 removes it. Each work item is created with the flag the user
+accepted in the breakdown, so the initial value is the user's decision and the
+Chapter Master only records it. T-07 is unchanged for every later change: the
+user or the Primarch can turn the flag on, and only the user can turn it off.
+The accepted breakdown is stored with the channel the acceptance came through
+(dashboard, or chat stored as relayed under R3), so it can be audited.
+
+Still open:
+
+
+1. **How issue closure is observed.** The #115 GitHub observer covers pull
    requests only. Either add issue state to that observer, or derive closure
    from a merged PR that closes the issue. The first is simpler to reason
    about; the second needs no new observation. Undecided.
-3. **A Chapter Master retired before its tracker work is done.** The open
+2. **A Chapter Master retired before its tracker work is done.** The open
    obligations need an owner. Proposal: they pass to the Primarch as
    repository-wide work, shown on the dashboard. Undecided.
 
@@ -113,7 +119,7 @@ recorded as a goal, not a promise.
 
 | Piece | Stage |
 |---|---|
-| Role skill changes: Chapter Master intake, grill-first, Primarch as supervisor, user-created registration (I-01 to I-08) | Skill source update, after the #113 trial. Not installed into live chats as part of this record. |
+| Role skill changes: Chapter Master intake, grill-first, Primarch as supervisor, user-created registration, breakdown acceptance (I-01 to I-08, I-14) | Skill source update, after the #113 trial. Not installed into live chats as part of this record. |
 | Work-item fields: completion criteria, intake answers, tracker references | #115 work records |
 | Emperor setup conversation that writes the profile | #116 |
 | Tracker profiles and sync obligations (I-09 to I-13) | New deferred stage, blocked by #115 and #116 |
