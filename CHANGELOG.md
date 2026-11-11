@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.0](https://github.com/Levezze/chatbotchat/compare/v0.17.0...v0.18.0) (2026-11-11)
+
+
+### Features
+
+* **candidate:** core-bound identity and one active room per pair (T-25, T-26) ([#130](https://github.com/Levezze/chatbotchat/issues/130)) ([0adce7d](https://github.com/Levezze/chatbotchat/commit/0adce7d178e14ffef916a7ddb9f3fc0f1cbc3874))
+
 ## [0.17.0](https://github.com/Levezze/chatbotchat/compare/v0.16.0...v0.17.0) (2026-11-10)
 
 
