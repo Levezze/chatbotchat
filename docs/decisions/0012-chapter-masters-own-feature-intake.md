@@ -3,7 +3,7 @@
 - **Status:** Accepted (design only; nothing built)
 - **Date:** 2026-11-11
 - **Related:** [feature intake and tracker profiles](../design/feature-intake-and-tracker-profiles.md)
-  (decisions I-01 to I-13), [ADR-0011](0011-trial-1-decisions.md), PRD #112,
+  (decisions I-01 to I-14), [ADR-0011](0011-trial-1-decisions.md), PRD #112,
   stages #115 and #116
 
 ## Context
@@ -29,8 +29,11 @@ those tools out of date.
    map, and the Primarch is notified. (I-04)
 4. **Every feature starts with a grill.** It records goals, HITL testing,
    human review of the result, or fully AFK, and what counts as complete, per
-   issue, PRD or feature. The grill is user intake, not a Primarch GO, so the
-   no-startup-GO rule in #112 stands. (I-05 to I-08)
+   issue, PRD or feature. It ends with a work breakdown (one issue, or a PRD
+   with slice issues), each item marked AFK or HITL. The user accepts it or asks
+   for changes, and nothing is created before acceptance. The grill is user
+   intake, not a Primarch GO, so the no-startup-GO rule in #112 stands.
+   (I-05 to I-08, I-14)
 5. **Tracker integration is an optional, local profile.** One human-readable
    board task per PRD, progress counted as closed slice issues over total.
    Agents write to the trackers with their own tools; CBC stores links and
@@ -44,9 +47,7 @@ those tools out of date.
 - #115 work items gain completion criteria, intake answers and tracker
   references. #116's Emperor setup conversation writes the profile.
 - Tracker profiles become a new deferred stage, blocked by #115 and #116.
-- One conflict is open: T-07 says a Chapter Master cannot change the HITL flag,
-  but the grill decides HITL. The recommendation (Chapter Master may turn it
-  on from a recorded grill answer, never off) needs the user's decision before
-  intake is implemented.
+- No conflict with T-07: each work item starts with the HITL flag the user
+  accepted in the breakdown, and T-07 governs every later change.
 - CBC still does not replace GitHub, Jira or Notion, or own the product plan.
   It records links and drives a status mirror for the work it manages.
