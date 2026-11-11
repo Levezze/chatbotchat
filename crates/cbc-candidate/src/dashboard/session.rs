@@ -83,6 +83,11 @@ fn insert(map: &mut Digests, key: [u8; 32], ttl: Duration, cap: usize) {
     map.insert(key, now + ttl);
 }
 
+/// A fresh key for one rendered answer form, so a resubmit of that form is a retry.
+pub fn form_key() -> String {
+    secret::<16>()
+}
+
 fn secret<const N: usize>() -> String {
     let mut bytes = [0_u8; N];
     OsRng.fill_bytes(&mut bytes);

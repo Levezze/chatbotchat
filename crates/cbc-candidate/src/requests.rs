@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqliteConnection};
 
-const MAX_TEXT_CHARS: usize = 4000;
+pub const MAX_TEXT_CHARS: usize = 4000;
 const MAX_REASON_CHARS: usize = 200;
 /// The most requests, or answers, in one page. A question or answer is at most 4000 characters
 /// of up to four bytes, about 16 KB on the wire, so seven of them stay well inside the
@@ -92,6 +92,27 @@ impl AnswerChannel {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnswerSurface {
+    Dashboard,
+}
+
+impl AnswerSurface {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Dashboard => "dashboard",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "dashboard" => Ok(Self::Dashboard),
+            other => bail!("unknown answer surface {other}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Request {
     pub request: String,
@@ -110,6 +131,10 @@ pub struct Answer {
     pub channel: AnswerChannel,
     /// None for the owner route.
     pub actor: Option<String>,
+    /// Where an owner answer came from: None for the owner route, or the dashboard. The channel
+    /// is the trust class; the surface only says which owner-authenticated door was used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<AnswerSurface>,
     pub body: String,
     pub at_wall_ms: i64,
     /// Set once, by the callback, when it acts on the answer.
@@ -270,6 +295,7 @@ impl Store {
                 &current,
                 channel,
                 Some(&binding.member_id),
+                None,
                 &body,
                 key,
             )
@@ -287,6 +313,30 @@ impl Store {
         body: &str,
         key: &str,
     ) -> Result<Answer> {
+        self.user_answer(context, request, body, key, None).await
+    }
+
+    /// The same answer from the dashboard, whose session only the owner route can start. It is
+    /// an owner answer under every rule; only its recorded surface differs.
+    pub async fn dashboard_answer_request(
+        &self,
+        context: &str,
+        request: &str,
+        body: &str,
+        key: &str,
+    ) -> Result<Answer> {
+        self.user_answer(context, request, body, key, Some(AnswerSurface::Dashboard))
+            .await
+    }
+
+    async fn user_answer(
+        &self,
+        context: &str,
+        request: &str,
+        body: &str,
+        key: &str,
+        surface: Option<AnswerSurface>,
+    ) -> Result<Answer> {
         valid_id("context", context)?;
         valid_id("request id", request)?;
         valid_id("request key", key)?;
@@ -302,6 +352,7 @@ impl Store {
                 &current,
                 AnswerChannel::Owner,
                 None,
+                surface,
                 &body,
                 key,
             )
@@ -395,7 +446,7 @@ impl Store {
 
     /// Trusted read: every answer, in the order recorded.
     pub async fn request_answers(&self, context: &str, request: &str) -> Result<Vec<Answer>> {
-        let rows = sqlx::query("SELECT answer_id,channel,actor_member,body,at_wall_ms,applied_wall_ms FROM candidate_request_answers WHERE context_id=? AND request_id=? ORDER BY answer_id")
+        let rows = sqlx::query("SELECT answer_id,channel,actor_member,surface,body,at_wall_ms,applied_wall_ms FROM candidate_request_answers WHERE context_id=? AND request_id=? ORDER BY answer_id")
             .bind(context).bind(request).fetch_all(&self.pool).await?;
         rows.iter().map(answer_from).collect()
     }
@@ -512,6 +563,7 @@ impl Store {
         request: &Request,
         channel: AnswerChannel,
         actor: Option<&str>,
+        surface: Option<AnswerSurface>,
         body: &str,
         key: &str,
     ) -> Result<Answer> {
@@ -562,8 +614,8 @@ impl Store {
             }
         };
         let now = facts::wall_ms();
-        let id: i64 = sqlx::query_scalar("INSERT INTO candidate_request_answers(context_id,request_id,channel,actor_member,body,request_key,fingerprint,at_wall_ms) VALUES (?,?,?,?,?,?,?,?) RETURNING answer_id")
-            .bind(context).bind(&request.request).bind(channel.as_str()).bind(actor)
+        let id: i64 = sqlx::query_scalar("INSERT INTO candidate_request_answers(context_id,request_id,channel,actor_member,surface,body,request_key,fingerprint,at_wall_ms) VALUES (?,?,?,?,?,?,?,?,?) RETURNING answer_id")
+            .bind(context).bind(&request.request).bind(channel.as_str()).bind(actor).bind(surface.map(AnswerSurface::as_str))
             .bind(body).bind(key).bind(&fingerprint[..]).bind(now)
             .fetch_one(&mut *conn).await?;
         sqlx::query("UPDATE candidate_requests SET state=? WHERE context_id=? AND request_id=?")
@@ -733,7 +785,7 @@ async fn answer_page(
     limit: u32,
 ) -> Result<Vec<Answer>> {
     let limit = i64::from(limit.clamp(1, MAX_REQUEST_PAGE));
-    let rows = sqlx::query("SELECT answer_id,channel,actor_member,body,at_wall_ms,applied_wall_ms FROM candidate_request_answers WHERE context_id=? AND request_id=? AND answer_id>? ORDER BY answer_id LIMIT ?")
+    let rows = sqlx::query("SELECT answer_id,channel,actor_member,surface,body,at_wall_ms,applied_wall_ms FROM candidate_request_answers WHERE context_id=? AND request_id=? AND answer_id>? ORDER BY answer_id LIMIT ?")
         .bind(context).bind(request).bind(after).bind(limit).fetch_all(conn).await?;
     rows.iter().map(answer_from).collect()
 }
@@ -778,7 +830,7 @@ async fn load_answer(
     request: &str,
     answer: i64,
 ) -> Result<Option<Answer>> {
-    let row = sqlx::query("SELECT answer_id,channel,actor_member,body,at_wall_ms,applied_wall_ms FROM candidate_request_answers WHERE context_id=? AND request_id=? AND answer_id=?")
+    let row = sqlx::query("SELECT answer_id,channel,actor_member,surface,body,at_wall_ms,applied_wall_ms FROM candidate_request_answers WHERE context_id=? AND request_id=? AND answer_id=?")
         .bind(context).bind(request).bind(answer).fetch_optional(conn).await?;
     row.as_ref().map(answer_from).transpose()
 }
@@ -788,6 +840,10 @@ fn answer_from(row: &sqlx::sqlite::SqliteRow) -> Result<Answer> {
         id: row.try_get("answer_id")?,
         channel: AnswerChannel::parse(row.try_get("channel")?)?,
         actor: row.try_get("actor_member")?,
+        surface: row
+            .try_get::<Option<String>, _>("surface")?
+            .map(|s| AnswerSurface::parse(&s))
+            .transpose()?,
         body: row.try_get("body")?,
         at_wall_ms: row.try_get("at_wall_ms")?,
         applied_wall_ms: row.try_get("applied_wall_ms")?,

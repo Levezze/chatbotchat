@@ -161,6 +161,27 @@ fn text(value: &str) -> String {
     format!("<span class=\"text\">{}</span>", esc(value))
 }
 
+/// A question for the user gets a form; a question for a member is that member's to answer.
+/// Each render carries a fresh key, so submitting the same form twice is one answer.
+fn answer_form(context: &str, request: &Request) -> String {
+    if let RequestOwner::Member(member) = &request.owner {
+        return format!("<span class=\"quiet\">{}'s to answer</span>", esc(member));
+    }
+    let hidden = |name: &str, value: &str| {
+        format!(
+            "<input type=\"hidden\" name=\"{name}\" value=\"{}\">",
+            esc(value)
+        )
+    };
+    format!(
+        "<form method=\"post\" action=\"/answer\">{}{}{}<textarea name=\"body\" rows=\"3\" maxlength=\"{}\" required></textarea><button>Answer</button></form>",
+        hidden("context", context),
+        hidden("request", &request.request),
+        hidden("key", &super::session::form_key()),
+        crate::requests::MAX_TEXT_CHARS,
+    )
+}
+
 fn requests_table(body: &mut String, context: &str, requests: &[Request]) {
     body.push_str("<h3>Pending requests</h3>");
     if requests.is_empty() {
@@ -177,6 +198,7 @@ fn requests_table(body: &mut String, context: &str, requests: &[Request]) {
             "Question",
             "State",
             "Opened (UTC)",
+            "Answer",
         ],
     );
     for r in requests {
@@ -194,6 +216,7 @@ fn requests_table(body: &mut String, context: &str, requests: &[Request]) {
                 text(&r.question),
                 esc(&format!("{:?}", r.state).to_lowercase()),
                 utc(r.created_wall_ms),
+                answer_form(context, r),
             ],
         );
     }
@@ -431,6 +454,7 @@ main{max-width:1100px;margin:0 auto;padding:16px}\
 table{border-collapse:collapse;width:100%;background:#fff}\
 th,td{border-bottom:1px solid #e3e3e3;padding:6px 8px;text-align:left;vertical-align:top}\
 .text{white-space:pre-wrap;overflow-wrap:anywhere}\
+textarea{width:100%;box-sizing:border-box;font:inherit}\
 .quiet{color:#6e6e73}\
 @media (prefers-color-scheme:dark){body{color:#f2f2f2;background:#161617}table{background:#1f1f21}\
 th,td{border-color:#333}.quiet{color:#a1a1a6}}";
