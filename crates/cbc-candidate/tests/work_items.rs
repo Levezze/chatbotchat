@@ -722,3 +722,44 @@ async fn leaving_a_field_and_clearing_it_are_different_requests() {
         "{error}"
     );
 }
+
+/// A member who may not read an item gets exactly the store's answer for a missing one, so the
+/// error can't be used to discover items. The connector flattens member errors anyway; this is
+/// the check that holds without it.
+#[tokio::test]
+async fn a_hidden_work_item_reads_like_a_missing_one() {
+    let case = fixture().await;
+    case.store
+        .register_work_item(&case.worker, "feat-login", "Login flow", "reg-1")
+        .await
+        .unwrap();
+    assert_eq!(
+        case.store
+            .read_work_item(&case.worker, "feat-login")
+            .await
+            .unwrap()
+            .owner,
+        "worker"
+    );
+    assert_eq!(
+        case.store
+            .read_work_item(&case.lead, "feat-login")
+            .await
+            .unwrap()
+            .owner,
+        "worker"
+    );
+    let hidden = case
+        .store
+        .read_work_item(&case.other, "feat-login")
+        .await
+        .unwrap_err()
+        .to_string();
+    let missing = case
+        .store
+        .read_work_item(&case.other, "missing")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert_eq!(hidden, missing);
+}
