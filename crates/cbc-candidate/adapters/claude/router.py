@@ -379,7 +379,7 @@ class Router:
         finally:
             s.close()
 
-    def notify(self, session, force=False):
+    def notify(self, session, force=False, recovery=False):
         """Ring a chat only if the core has a batch pending for it, once per batch.
 
         force (hello) rings even for a batch already rung, because the chat's process
@@ -405,12 +405,18 @@ class Router:
                 reply["_notified"] = True
                 return reply
             self.rung[session] = reference
+        attempted_us = time.time_ns() // 1000
         reply["_notified"] = self.ring(session, path)
+        self.rang(session, reply, reply["_notified"], recovery, attempted_us)
         if not reply["_notified"]:
             with self.lock:
                 if self.rung.get(session) == reference:
                     del self.rung[session]
         return reply
+
+    def rang(self, session, batch, written, recovery, attempted_us):
+        """Called once per bell actually attempted for a batch, with the wall clock in
+        microseconds taken just before the bell. The device driver reports it."""
 
     def handle(self, conn):
         pid, uid = peer_credentials(conn)

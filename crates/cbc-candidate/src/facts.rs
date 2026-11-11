@@ -1,15 +1,18 @@
 //! Durable first-occurrence delivery facts and a versioned, content-free event projection (#113 PR-A).
 //!
 //! Facts are written inside the send, check and receipt transactions, so they are durable
-//! whatever the log level and a failed receipt can never leave a false "receipted". Only the
-//! stages the core observes itself have a write path here; dispatch, native wake and result
-//! stages are declared for the schema and are written by the authenticated connector route.
+//! whatever the log level and a failed receipt can never leave a false "receipted". Dispatch and
+//! native wake come from the device driver's authenticated wake reports (#113 B1); the first
+//! activity after a receipt is the member's first non-transport core operation. Result writing
+//! has no record of its own: both adapters write the result before they receipt it.
+use crate::bindings::{validate_on, SessionBinding};
 use crate::store::Store;
 use anyhow::{ensure, Result};
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqliteConnection};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub const EVENT_SCHEMA: u32 = 1;
@@ -23,6 +26,9 @@ pub enum Stage {
     InboxOffered,
     ResultWritten,
     Receipted,
+    /// The member's first non-transport CBC operation after the receipt. Not proof the item was
+    /// read or used.
+    PostReceiptActivity,
     ActedOn,
 }
 
@@ -107,6 +113,60 @@ impl Interval {
     }
 }
 
+/// How the device driver tried to wake a native session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeKind {
+    ClaudeChannel,
+    CodexQueue,
+    ClaudeMod,
+}
+
+impl WakeKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ClaudeChannel => "claude_channel",
+            Self::CodexQueue => "codex_queue",
+            Self::ClaudeMod => "claude_mod",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WakeOutcome {
+    /// The host took the hint: the channel write or queue command succeeded.
+    Accepted,
+    Failed,
+}
+
+/// One wake attempt, reported by the device driver with the member's own binding. A hint covers
+/// the member's unread items up to `through`, so one attempt can stand for many items.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WakeReport {
+    pub through: i64,
+    pub kind: WakeKind,
+    pub outcome: WakeOutcome,
+    /// A short class such as `channel_closed`; required exactly when the outcome is `failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+    /// Sent by the recovery path rather than by a new item.
+    pub recovery: bool,
+    /// The driver's wall clock in microseconds, taken just before it notified the host. The
+    /// driver and the core run on one host and read one realtime clock, so the core compares it
+    /// with its receipt stamps to tell which items were still unread at the attempt.
+    pub attempt_wall_us: i64,
+}
+
+/// A failure class or an operation name: 1 to 64 of `[a-z0-9_]`.
+fn valid_label(label: &str) -> bool {
+    (1..=64).contains(&label.len())
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecipientTimeline {
     pub member: String,
@@ -115,9 +175,19 @@ pub struct RecipientTimeline {
     pub offer_count: i64,
     pub offered: Option<Stamp>,
     pub receipted: Option<Stamp>,
-    /// None when either end is unknown.
+    /// The first wake attempt that covered this item, whatever its outcome.
+    pub dispatched: Option<Stamp>,
+    /// The first accepted wake that covered this item.
+    pub woken: Option<Stamp>,
+    /// The first non-transport operation after the receipt, and which one.
+    pub active: Option<Stamp>,
+    pub active_operation: Option<String>,
+    /// None when either end is unknown. Each is measured from the commit.
     pub to_offer: Option<Interval>,
     pub to_receipt: Option<Interval>,
+    /// Includes the report's own hop over the local socket.
+    pub to_wake: Option<Interval>,
+    pub to_activity: Option<Interval>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,10 +216,28 @@ pub struct DeliveryEvent {
     pub batch_tag: Option<String>,
 }
 
+/// How far before the core's receipt of a wake report its attempt may lie. The driver's queue
+/// holds at most 256 reports sent with a 2 second timeout each.
+const MAX_REPORT_DELAY_US: i64 = 600_000_000;
+
+/// When a member request started, on this core instance's clock. Opaque outside the crate.
+#[derive(Debug, Clone, Copy)]
+pub struct RequestStart {
+    mono_us: i64,
+    wall_ms: i64,
+    /// The newest receipt of this instance whose transaction had committed when the request
+    /// started, as its monotonic stamp. A receipt still in flight is not before the request.
+    receipts_through: i64,
+}
+
 /// One per Store::open: a random instance ID and a monotonic origin.
 pub(crate) struct CoreClock {
     instance: String,
     origin: Instant,
+    /// The largest `receipted_mono_us` of this instance whose transaction has committed, or -1.
+    /// Raised only after the commit returns, so a request that starts while a receipt is still
+    /// being written never sees it.
+    receipts_committed: AtomicI64,
 }
 
 impl CoreClock {
@@ -159,6 +247,7 @@ impl CoreClock {
         let clock = Self {
             instance: hex(&random),
             origin: Instant::now(),
+            receipts_committed: AtomicI64::new(-1),
         };
         sqlx::query(
             "INSERT INTO candidate_core_instances(instance_id,started_wall_ms) VALUES (?,?)",
@@ -171,9 +260,27 @@ impl CoreClock {
     }
 
     fn now(&self) -> (i64, i64) {
-        let mono = i64::try_from(self.origin.elapsed().as_micros()).unwrap_or(i64::MAX);
-        (mono, wall_ms())
+        let (mono, wall_us) = self.now_us();
+        (mono, wall_us.div_euclid(1000))
     }
+
+    /// Called after a receipt's transaction commits, with the stamp `record_receipt` returned.
+    pub(crate) fn receipt_committed(&self, mono_us: i64) {
+        self.receipts_committed.fetch_max(mono_us, Ordering::SeqCst);
+    }
+
+    /// One reading, with the wall clock in microseconds.
+    fn now_us(&self) -> (i64, i64) {
+        let mono = i64::try_from(self.origin.elapsed().as_micros()).unwrap_or(i64::MAX);
+        (mono, wall_us())
+    }
+}
+
+pub(crate) fn wall_us() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_micros()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }
 
 pub(crate) fn wall_ms() -> i64 {
@@ -232,18 +339,20 @@ pub(crate) async fn record_offer(
 
 /// Record the first receipt of a batch's items. Only called once the receipt is authorized.
 /// A batch offered before these facts existed has no rows yet, so the receipt creates one
-/// (expected=0, offer unknown) rather than being lost.
+/// (expected=0, offer unknown) rather than being lost. Returns the monotonic stamp, which the
+/// caller passes to `CoreClock::receipt_committed` once its transaction commits.
 pub(crate) async fn record_receipt(
     conn: &mut SqliteConnection,
     clock: &CoreClock,
     member: &str,
     reference: &str,
-) -> Result<()> {
-    let (mono, wall) = clock.now();
-    sqlx::query("INSERT INTO candidate_recipient_facts(sequence,member_id,expected,receipted_instance,receipted_mono_us,receipted_wall_ms) SELECT sequence,?,0,?,?,? FROM candidate_batch_items WHERE reference=? ON CONFLICT(sequence,member_id) DO UPDATE SET receipted_instance=COALESCE(receipted_instance,excluded.receipted_instance), receipted_mono_us=COALESCE(receipted_mono_us,excluded.receipted_mono_us), receipted_wall_ms=COALESCE(receipted_wall_ms,excluded.receipted_wall_ms)")
-        .bind(member).bind(&clock.instance).bind(mono).bind(wall).bind(reference)
+) -> Result<i64> {
+    let (mono, wall_us) = clock.now_us();
+    let wall = wall_us.div_euclid(1000);
+    sqlx::query("INSERT INTO candidate_recipient_facts(sequence,member_id,expected,receipted_instance,receipted_mono_us,receipted_wall_ms,receipted_wall_us) SELECT sequence,?,0,?,?,?,? FROM candidate_batch_items WHERE reference=? ON CONFLICT(sequence,member_id) DO UPDATE SET receipted_instance=COALESCE(receipted_instance,excluded.receipted_instance), receipted_mono_us=COALESCE(receipted_mono_us,excluded.receipted_mono_us), receipted_wall_ms=COALESCE(receipted_wall_ms,excluded.receipted_wall_ms), receipted_wall_us=CASE WHEN receipted_instance IS NULL THEN excluded.receipted_wall_us ELSE receipted_wall_us END")
+        .bind(member).bind(&clock.instance).bind(mono).bind(wall).bind(wall_us).bind(reference)
         .execute(conn).await?;
-    Ok(())
+    Ok(mono)
 }
 
 fn stamp(row: &sqlx::sqlite::SqliteRow, prefix: &str) -> Result<Option<Stamp>> {
@@ -267,6 +376,140 @@ impl Store {
     /// This open's core instance ID.
     pub fn instance_id(&self) -> &str {
         &self.clock.instance
+    }
+
+    /// Record one wake attempt reported with the member's own binding, and mark the first
+    /// dispatch (and, if accepted, the first wake) of each of its unread items up to `through`.
+    /// Returns how many unread items the attempt covered, already marked or not.
+    pub async fn record_wake(&self, binding: &SessionBinding, report: &WakeReport) -> Result<u64> {
+        ensure!(report.through > 0, "invalid wake: through must be positive");
+        match (report.outcome, report.failure.as_deref()) {
+            (WakeOutcome::Accepted, None) => {}
+            (WakeOutcome::Failed, Some(failure)) if valid_label(failure) => {}
+            (WakeOutcome::Failed, Some(_)) => {
+                anyhow::bail!("invalid wake: failure must be 1 to 64 of [a-z0-9_]")
+            }
+            _ => anyhow::bail!("invalid wake: a failure class goes with a failed outcome only"),
+        }
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        validate_on(&mut tx, binding).await?;
+        let (mono, wall) = self.clock.now();
+        sqlx::query("INSERT INTO candidate_wake_attempts(context_id,member_id,through_sequence,kind,outcome,failure,recovery,reported_instance,reported_mono_us,reported_wall_ms,attempt_wall_us) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+            .bind(&binding.context_id).bind(&binding.member_id).bind(report.through)
+            .bind(report.kind.as_str())
+            .bind(match report.outcome { WakeOutcome::Accepted => "accepted", WakeOutcome::Failed => "failed" })
+            .bind(report.failure.as_deref()).bind(report.recovery)
+            .bind(&self.clock.instance).bind(mono).bind(wall).bind(report.attempt_wall_us)
+            .execute(&mut *tx).await?;
+        let woken = report.outcome == WakeOutcome::Accepted;
+        // Reports reach the core through the driver's queue, so the member may have receipted
+        // items since the attempt. Cover what was unread when the driver made it: items still
+        // unread, and items receipted strictly after the attempt. The driver takes the attempt
+        // time before it notifies the host, and a receipt the notification causes needs the host
+        // to react and call the core first, which takes far longer than a microsecond. So a
+        // receipt in the same microsecond as the attempt, or earlier, came before it. Receipts
+        // stamped before migration 0014 have milliseconds only. The attempt time is clamped to
+        // MAX_REPORT_DELAY_US ago, so a wrong or stepped clock cannot reach far into the past;
+        // a backward clock step can still drop a wake fact, never a delivery.
+        let attempted = report.attempt_wall_us.max(wall_us() - MAX_REPORT_DELAY_US);
+        let covered = sqlx::query("INSERT INTO candidate_recipient_facts(sequence,member_id,expected,dispatched_instance,dispatched_mono_us,dispatched_wall_ms,woken_instance,woken_mono_us,woken_wall_ms) SELECT sequence,?,0,?,?,?,?,?,? FROM (SELECT sequence FROM candidate_unread_items WHERE context_id=? AND recipient=? AND sequence<=? UNION SELECT f.sequence FROM candidate_recipient_facts f JOIN candidate_items i ON i.sequence=f.sequence WHERE i.context_id=? AND f.member_id=? AND f.sequence<=? AND COALESCE(f.receipted_wall_us,f.receipted_wall_ms*1000)>?) WHERE true ON CONFLICT(sequence,member_id) DO UPDATE SET dispatched_instance=COALESCE(dispatched_instance,excluded.dispatched_instance), dispatched_mono_us=COALESCE(dispatched_mono_us,excluded.dispatched_mono_us), dispatched_wall_ms=COALESCE(dispatched_wall_ms,excluded.dispatched_wall_ms), woken_instance=COALESCE(woken_instance,excluded.woken_instance), woken_mono_us=COALESCE(woken_mono_us,excluded.woken_mono_us), woken_wall_ms=COALESCE(woken_wall_ms,excluded.woken_wall_ms)")
+            .bind(&binding.member_id).bind(&self.clock.instance).bind(mono).bind(wall)
+            .bind(woken.then_some(self.clock.instance.as_str())).bind(woken.then_some(mono)).bind(woken.then_some(wall))
+            .bind(&binding.context_id).bind(&binding.member_id).bind(report.through)
+            .bind(&binding.context_id).bind(&binding.member_id).bind(report.through).bind(attempted)
+            .execute(&mut *tx).await?.rows_affected();
+        tx.commit().await?;
+        Ok(covered)
+    }
+
+    /// The core clock at the moment a request starts, before it waits for the store.
+    pub fn request_start(&self) -> RequestStart {
+        let receipts_through = self.clock.receipts_committed.load(Ordering::SeqCst);
+        let (mono_us, wall_ms) = self.clock.now();
+        RequestStart {
+            mono_us,
+            wall_ms,
+            receipts_through,
+        }
+    }
+
+    /// Mark each of the member's receipted items that has no activity yet with this operation.
+    pub async fn record_activity(&self, binding: &SessionBinding, operation: &str) -> Result<()> {
+        self.record_activity_since(binding, operation, &self.request_start())
+            .await
+    }
+
+    /// As `record_activity`, for a request that started at `started`. Called by the connector
+    /// before a non-transport operation runs, so an attempt counts.
+    pub async fn record_activity_since(
+        &self,
+        binding: &SessionBinding,
+        operation: &str,
+        started: &RequestStart,
+    ) -> Result<()> {
+        ensure!(valid_label(operation), "invalid operation name");
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        validate_on(&mut tx, binding).await?;
+        // Stamped with the request's start, and only receipts whose transaction had committed
+        // when it started count: a request that started while a receipt was waiting for the
+        // store or still being written did not follow it. A receipt committed just before the
+        // watermark is raised is missed by that one request, never counted early. A receipt
+        // from an earlier core instance always came first.
+        sqlx::query("UPDATE candidate_recipient_facts SET active_instance=?, active_mono_us=?, active_wall_ms=?, active_operation=? WHERE member_id=? AND receipted_instance IS NOT NULL AND (receipted_instance<>? OR receipted_mono_us<=?) AND active_instance IS NULL AND EXISTS (SELECT 1 FROM candidate_items i WHERE i.sequence=candidate_recipient_facts.sequence AND i.context_id=?)")
+            .bind(&self.clock.instance).bind(started.mono_us).bind(started.wall_ms).bind(operation)
+            .bind(&binding.member_id).bind(&self.clock.instance).bind(started.receipts_through)
+            .bind(&binding.context_id)
+            .execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Whether the driver should re-hint the member: an unread item has waited longer than
+    /// `interval_ms` since its commit, no wake attempt came within `interval_ms`, and fewer than
+    /// `attempts` recovery attempts have covered the oldest unread item. Zero attempts is off.
+    /// Read on the core's own wall clock.
+    pub async fn recovery_due(
+        &self,
+        binding: &SessionBinding,
+        interval_ms: i64,
+        attempts: u32,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        validate_on(&mut tx, binding).await?;
+        if attempts == 0 {
+            return Ok(false);
+        }
+        let Some(oldest): Option<i64> = sqlx::query_scalar(
+            "SELECT MIN(sequence) FROM candidate_unread_items WHERE context_id=? AND recipient=?",
+        )
+        .bind(&binding.context_id)
+        .bind(&binding.member_id)
+        .fetch_one(&mut *tx)
+        .await?
+        else {
+            return Ok(false);
+        };
+        let now = wall_ms();
+        // An item committed before the facts existed has no commit time: treat it as old.
+        let committed: Option<i64> = sqlx::query_scalar(
+            "SELECT committed_wall_ms FROM candidate_item_facts WHERE sequence=?",
+        )
+        .bind(oldest)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if now - committed.unwrap_or(0) < interval_ms {
+            return Ok(false);
+        }
+        let row = sqlx::query("SELECT MAX(reported_wall_ms) AS last, COALESCE(SUM(recovery=1 AND through_sequence>=?),0) AS recoveries FROM candidate_wake_attempts WHERE context_id=? AND member_id=?")
+            .bind(oldest).bind(&binding.context_id).bind(&binding.member_id)
+            .fetch_one(&mut *tx).await?;
+        let last: Option<i64> = row.try_get("last")?;
+        let recoveries: i64 = row.try_get("recoveries")?;
+        tx.commit().await?;
+        if last.is_some_and(|last| now - last < interval_ms) {
+            return Ok(false);
+        }
+        Ok(recoveries < i64::from(attempts))
     }
 
     /// Trusted administration (owner and dashboard). None only when the item does not exist.
@@ -328,6 +571,9 @@ impl Store {
         for row in rows {
             let offered = stamp(&row, "offered")?;
             let receipted = stamp(&row, "receipted")?;
+            let dispatched = stamp(&row, "dispatched")?;
+            let woken = stamp(&row, "woken")?;
+            let active = stamp(&row, "active")?;
             let span = |end: &Option<Stamp>| match (&committed, end) {
                 (Some(from), Some(to)) => Some(Interval::between(from, to)),
                 _ => None,
@@ -338,8 +584,14 @@ impl Store {
                 offer_count: row.try_get("offer_count")?,
                 to_offer: span(&offered),
                 to_receipt: span(&receipted),
+                to_wake: span(&woken),
+                to_activity: span(&active),
                 offered,
                 receipted,
+                dispatched,
+                woken,
+                active,
+                active_operation: row.try_get("active_operation")?,
             });
             tags.push(row.try_get("first_batch_tag")?);
         }
@@ -390,6 +642,15 @@ impl Store {
             }
             if let Some(at) = &recipient.receipted {
                 events.push(event(Stage::Receipted, Some(&recipient.member), at, None));
+            }
+            for (stage, at) in [
+                (Stage::DispatchStarted, &recipient.dispatched),
+                (Stage::NativeWakeAccepted, &recipient.woken),
+                (Stage::PostReceiptActivity, &recipient.active),
+            ] {
+                if let Some(at) = at {
+                    events.push(event(stage, Some(&recipient.member), at, None));
+                }
             }
         }
         // Oldest first. Instances are ordered by when they opened (one owner at a time), and

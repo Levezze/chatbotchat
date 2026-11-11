@@ -67,6 +67,7 @@ fn inheritance_and_explicit_override_removal_preserve_scope() {
             retry_initial_ms: Some(100),
             retry_max_ms: None,
             room_notice_every_messages: None,
+            ..PolicyPatch::default()
         },
     );
     settings.roles.insert(
@@ -75,6 +76,7 @@ fn inheritance_and_explicit_override_removal_preserve_scope() {
             retry_initial_ms: Some(200),
             retry_max_ms: None,
             room_notice_every_messages: None,
+            ..PolicyPatch::default()
         },
     );
     settings.members.entry("api".into()).or_default().insert(
@@ -83,6 +85,7 @@ fn inheritance_and_explicit_override_removal_preserve_scope() {
             retry_initial_ms: Some(300),
             retry_max_ms: None,
             room_notice_every_messages: None,
+            ..PolicyPatch::default()
         },
     );
     let initial = service.snapshot();
@@ -254,6 +257,7 @@ fn unknown_fields_invalid_schema_and_composed_policy_do_not_replace_accepted_val
         retry_initial_ms: 100,
         retry_max_ms: 1000,
         room_notice_every_messages: 100,
+        ..DispatchPolicy::default()
     };
     bad.contexts.insert(
         "api".into(),
@@ -261,6 +265,7 @@ fn unknown_fields_invalid_schema_and_composed_policy_do_not_replace_accepted_val
             retry_initial_ms: Some(500),
             retry_max_ms: None,
             room_notice_every_messages: None,
+            ..PolicyPatch::default()
         },
     );
     bad.roles.insert(
@@ -269,6 +274,7 @@ fn unknown_fields_invalid_schema_and_composed_policy_do_not_replace_accepted_val
             retry_initial_ms: None,
             retry_max_ms: Some(200),
             room_notice_every_messages: None,
+            ..PolicyPatch::default()
         },
     );
     assert!(bad.validate().is_err()); // Both individual patches fit defaults; their combination does not.

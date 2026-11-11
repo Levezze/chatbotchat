@@ -286,6 +286,145 @@ class DeviceTests(unittest.TestCase):
         self.assertTrue(router.feed.deliver_ready())
         self.assertEqual(deliveries[-1], ("claude", CLAUDE))
 
+    def test_codex_recovery_re_queues_the_oldest_unread_and_reports_it(self):
+        recoveries, reports = [], []
+        class FakeQueue:
+            def __init__(self, executable, session, event=None):
+                self.session = session
+            def __call__(self, hint):
+                return True
+            def recover(self, hint):
+                recoveries.append(hint)
+                self.reporter(hint["sequence"], "accepted", None, True, 1)
+                return True
+        with patch.object(device.codex, "QueueDelivery", FakeQueue):
+            router = device.DeviceRouter(self.args())
+        self.addCleanup(self.cleanup_router, router)
+        router.wake_sender = lambda grant, request: reports.append(
+            (grant["member"], request["through"], request["kind"], request["recovery"])) or {
+            "type": "woken", "covered": 1}
+        router.read_wake_status = lambda grant, _timeout: {
+            "type": "binding_status", "first_unread_sequence": 3,
+            "recovery_due": grant["member"] == "codex"}
+        self.assertEqual(router.recover_once(), 1)
+        self.assertEqual(recoveries, [{"context": "project", "member": "codex", "sequence": 3}])
+        self.assertTrue(router.flush_wake_reports(2))
+        self.assertEqual(reports, [("codex", 3, "codex_queue", True)])
+
+    def test_a_recovery_is_not_repeated_until_the_core_acknowledges_its_report(self):
+        # Codex review 3: the core counts recovery attempts from wake reports. A lost report
+        # must not let the driver re-wake the same item every loop.
+        recoveries, replies = [], []
+        class FakeQueue:
+            def __init__(self, executable, session, event=None):
+                self.session = session
+            def __call__(self, hint):
+                return True
+            def recover(self, hint):
+                recoveries.append(hint["sequence"])
+                self.reporter(hint["sequence"], "accepted", None, True, 1)
+                return True
+        with patch.object(device.codex, "QueueDelivery", FakeQueue):
+            router = device.DeviceRouter(self.args())
+        self.addCleanup(self.cleanup_router, router)
+        status = {"first": 3}
+        router.read_wake_status = lambda grant, _timeout: {
+            "type": "binding_status", "first_unread_sequence": status["first"],
+            "recovery_due": grant["member"] == "codex"}
+        router.wake_sender = lambda grant, request: replies.pop(0)
+        replies.append({"type": "error", "code": "busy"})
+        self.assertEqual(router.recover_once(), 1)
+        self.assertTrue(router.flush_wake_reports(2))
+        self.assertEqual(router.recover_once(), 0, "the lost report was not acknowledged")
+        self.assertEqual(recoveries, [3])
+        status["first"] = 4
+        replies.append({"type": "woken", "covered": 1})
+        self.assertEqual(router.recover_once(), 1, "the member moved on")
+        self.assertTrue(router.flush_wake_reports(2))
+        replies.append({"type": "woken", "covered": 1})
+        self.assertEqual(router.recover_once(), 1, "acknowledged: the core's budget decides")
+        self.assertEqual(recoveries, [3, 4, 4])
+
+    def recovery_router(self, recover):
+        class FakeQueue:
+            def __init__(self, executable, session, event=None):
+                self.session = session
+            def __call__(self, hint):
+                return True
+            def recover(self, hint):
+                return recover(self, hint)
+        with patch.object(device.codex, "QueueDelivery", FakeQueue):
+            router = device.DeviceRouter(self.args())
+        self.addCleanup(self.cleanup_router, router)
+        router.read_wake_status = lambda grant, _timeout: {
+            "type": "binding_status", "first_unread_sequence": 3,
+            "recovery_due": grant["member"] == "codex"}
+        return router
+
+    def test_a_recovery_acknowledged_before_the_wake_returns_leaves_no_hold(self):
+        # Codex review 4: the hold is registered before the wake, so an early ack clears it.
+        recoveries = []
+        def recover(queue_, hint):
+            recoveries.append(hint["sequence"])
+            queue_.reporter(hint["sequence"], "accepted", None, True, 1)
+            self.assertTrue(router.flush_wake_reports(2))
+            return True
+        router = self.recovery_router(recover)
+        router.wake_sender = lambda grant, request: {"type": "woken", "covered": 1}
+        self.assertEqual(router.recover_once(), 1)
+        self.assertEqual(router.recover_once(), 1, "attempts remain; the core decides")
+        self.assertEqual(recoveries, [3, 3])
+
+    def test_a_failed_recovery_whose_report_is_lost_is_not_repeated(self):
+        # Codex review 4: a failed attempt is still an attempt the core must count.
+        recoveries = []
+        def recover(queue_, hint):
+            recoveries.append(hint["sequence"])
+            queue_.reporter(hint["sequence"], "failed", "queue_exit", True, 1)
+            return False
+        router = self.recovery_router(recover)
+        router.wake_sender = lambda grant, request: {"type": "error", "code": "busy"}
+        self.assertEqual(router.recover_once(), 0)
+        self.assertTrue(router.flush_wake_reports(2))
+        self.assertEqual(router.recover_once(), 0)
+        self.assertEqual(recoveries, [3])
+
+    def test_a_late_ack_for_an_older_item_leaves_the_newer_hold(self):
+        # Codex review 5: an ack clears only the hold its own report marked.
+        recoveries, status, gate = [], {"first": 3}, threading.Event()
+        def recover(queue_, hint):
+            recoveries.append(hint["sequence"])
+            queue_.reporter(hint["sequence"], "accepted", None, True, 1)
+            return True
+        def sender(grant, request):
+            if request["through"] == 3:
+                gate.wait(2)
+                return {"type": "woken", "covered": 1}
+            return {"type": "error", "code": "busy"}  # the newer report is lost
+        router = self.recovery_router(recover)
+        router.read_wake_status = lambda grant, _timeout: {
+            "type": "binding_status", "first_unread_sequence": status["first"],
+            "recovery_due": grant["member"] == "codex"}
+        router.wake_sender = sender
+        self.assertEqual(router.recover_once(), 1)
+        status["first"] = 4
+        self.assertEqual(router.recover_once(), 1, "the member moved on")
+        gate.set()
+        self.assertTrue(router.flush_wake_reports(2))
+        self.assertEqual(router.recover_once(), 0, "item 4's attempt is still unacknowledged")
+        self.assertEqual(recoveries, [3, 4])
+
+    def test_a_recovery_that_attempted_nothing_holds_nothing(self):
+        recoveries = []
+        def recover(queue_, hint):
+            recoveries.append(hint["sequence"])
+            return False  # e.g. the binding status was unavailable: nothing ran, nothing reported
+        router = self.recovery_router(recover)
+        router.wake_sender = lambda grant, request: self.fail("no attempt, no report")
+        self.assertEqual(router.recover_once(), 0)
+        self.assertEqual(router.recover_once(), 0)
+        self.assertEqual(recoveries, [3, 3])
+
     def test_claude_is_channel_only_before_subscribe_after_refresh_and_restart(self):
         def assert_no_fallback(router, session):
             self.assertIn(session, router.channel_sessions)
@@ -449,6 +588,9 @@ class NativeHttpTests(DeviceTests):
             return dict(self.state)
         self.router.wake_status = status
         self.router.core_call = lambda *_args: self.fail("wake called consuming/MCP core path")
+        self.reports = []
+        self.router.wake_sender = lambda grant, request: self.reports.append(
+            (grant["member"], request)) or {"type": "woken", "covered": 1}
 
     def save_record(self):
         (self.sessions / f"{self.pid}.json").write_text(json.dumps(self.record))
@@ -870,6 +1012,185 @@ class NativeHttpTests(DeviceTests):
             worker.join(2)
             self.assertEqual(json.loads(raw), {"items": []})
 
+    # #113 B1: a wake is reported only after an actual write, and recovery bypasses every latch.
+    def wake_reports(self):
+        self.assertTrue(self.router.flush_wake_reports(2))
+        reports = []
+        for member, request in self.reports:
+            self.assertEqual(request["op"], "wake")
+            self.assertIs(type(request["attempt_wall_us"]), int)
+            reports.append((member, {k: v for k, v in request.items()
+                                     if k not in ("op", "attempt_wall_us")}))
+        self.reports.clear()
+        return reports
+
+    def connect_channel(self):
+        client, channel = socket.socketpair(socket.AF_UNIX)
+        self.addCleanup(client.close)
+        self.addCleanup(channel.close)
+        self.router.channels[CLAUDE] = (channel, threading.Lock())
+        return client, channel
+
+    # Codex review 2: the attempt time is taken before the host is notified, so a receipt the
+    # notification causes is always later than it. The fakes stamp the write and then stall.
+    def test_a_channel_wake_reports_the_time_before_the_bell_was_written(self):
+        written = []
+        def ring(_session, _path=None):
+            written.append(time.time_ns() // 1000)
+            time.sleep(0.02)
+            return True
+        self.connect_channel()
+        self.router.ring = ring
+        self.router.core_call = lambda *_args: {"type": "batch", "reference": "r1", "items": [
+            {"sequence": 5, "room": "r", "sender": "a", "kind": "message", "body": "x"}]}
+        self.assertTrue(self.router.notify(CLAUDE)["_notified"])
+        self.assertTrue(self.router.flush_wake_reports(2))
+        (_member, request), = self.reports
+        self.assertLessEqual(request["attempt_wall_us"], written[0])
+
+    def test_a_codex_wake_reports_the_time_before_the_queue_command_ran(self):
+        ran = []
+        def runner(*_args, **_kwargs):
+            ran.append(time.time_ns() // 1000)
+            time.sleep(0.02)
+            return SimpleNamespace(returncode=0)
+        binding = next(b for b in self.profile["bindings"] if b["member"] == "codex")
+        callback = device.codex.QueueDelivery("/usr/local/bin/codex", SESSION, runner=runner,
+            reporter=self.router.codex_reporter(binding))
+        self.assertTrue(callback(HINT))
+        self.assertTrue(self.router.flush_wake_reports(2))
+        (_member, request), = self.reports
+        self.assertLessEqual(request["attempt_wall_us"], ran[0])
+
+    def test_a_channel_write_reports_one_wake_through_the_batch(self):
+        client, channel = self.connect_channel()
+        batch = {"type": "batch", "reference": "r1", "items": [
+            {"sequence": 5, "room": "r", "sender": "a", "kind": "message", "body": "x"},
+            {"sequence": 9, "room": "r", "sender": "a", "kind": "message", "body": "y"}]}
+        self.router.core_call = lambda *_args: dict(batch)
+        self.assertTrue(self.router.notify(CLAUDE)["_notified"])
+        self.assertEqual(client.recv(4096), b'{"type":"changed"}\n')
+        self.assertEqual(self.wake_reports(), [("claude", {"through": 9, "kind": "claude_channel",
+            "outcome": "accepted", "recovery": False})])
+        self.assertTrue(self.router.notify(CLAUDE)["_notified"])
+        self.assertEqual(self.wake_reports(), [], "a batch already rung is not a new wake")
+        channel.close()
+        self.router.core_call = lambda *_args: dict(batch, reference="r2")
+        self.assertFalse(self.router.notify(CLAUDE)["_notified"])
+        self.assertEqual(self.wake_reports(), [("claude", {"through": 9, "kind": "claude_channel",
+            "outcome": "failed", "failure": "channel_write_failed", "recovery": False})])
+
+    def test_a_lost_report_never_changes_delivery(self):
+        client, _channel = self.connect_channel()
+        self.router.core_call = lambda *_args: {"type": "batch", "reference": "r1", "items": [
+            {"sequence": 3, "room": "r", "sender": "a", "kind": "message", "body": "x"}]}
+        events = []
+        capture = patch.object(self.router, "event", side_effect=lambda kind, **fields:
+                               events.append((kind, fields)))
+        capture.start()
+        self.addCleanup(capture.stop)
+        for sender in (lambda *_args: {"type": "error", "message": "core unavailable"},
+                       lambda *_args: (_ for _ in ()).throw(OSError("down"))):
+            self.router.wake_sender = sender
+            self.router.rung.clear()
+            self.assertTrue(self.router.notify(CLAUDE)["_notified"])
+            self.assertEqual(client.recv(4096), b'{"type":"changed"}\n')
+            self.assertTrue(self.router.flush_wake_reports(2))
+        self.assertEqual([kind for kind, _ in events].count("wake_report_failed"), 2)
+        self.assertNotIn("down", repr(events))
+
+    def test_a_mod_pending_reports_a_wake_through_the_latest_hint(self):
+        self.router.feed.dispatch({"type": "members_changed", "sequence": 12, "members": [
+            {"context": "project", "member": "claude", "sequence": 12}]}, 0)
+        self.assertTrue(self.router.feed.deliver_ready())
+        self.state["first_unread_sequence"] = 4
+        status, body = self.exchange()
+        self.assertEqual(status, 200)
+        self.assertEqual(self.wake_reports(), [("claude", {"through": 12, "kind": "claude_mod",
+            "outcome": "accepted", "recovery": False})])
+        request = f"GET /cbc/v1/wake?after={body['cursor']} HTTP/1.1\r\n\r\n".encode()
+        self.assertEqual(self.exchange(request), (204, None))
+        self.assertEqual(self.wake_reports(), [], "an unchanged cursor is not a new wake")
+
+    def test_a_mod_woken_before_the_hint_is_delivered_still_reports_the_hint(self):
+        # feed_changed wakes a parked waiter before the delivery worker runs the handler.
+        self.router.feed.dispatch({"type": "members_changed", "sequence": 12, "members": [
+            {"context": "project", "member": "claude", "sequence": 12}]}, 0)
+        self.state["first_unread_sequence"] = 4
+        status, _body = self.exchange()
+        self.assertEqual(status, 200)
+        self.assertEqual(self.wake_reports(), [("claude", {"through": 12, "kind": "claude_mod",
+            "outcome": "accepted", "recovery": False})])
+
+    def test_a_mod_that_hangs_up_before_its_pending_is_written_reports_a_failed_wake(self):
+        # Codex review 6: acceptance is the 200 reaching the mod, not the decision to send it.
+        self.state["first_unread_sequence"] = 4
+        statuses, peer, ready = [], [], threading.Event()
+        def status(grant, timeout):
+            statuses.append(1)
+            if len(statuses) == 2:  # the revalidation just before the 200
+                ready.wait(2)
+                peer[0].shutdown(socket.SHUT_RDWR)
+                peer[0].close()
+            return dict(self.state)
+        self.router.wake_status = status
+        client, worker = self.begin()
+        peer.append(client)
+        ready.set()
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(self.wake_reports(), [("claude", {"through": 4, "kind": "claude_mod",
+            "outcome": "failed", "failure": "mod_write_failed", "recovery": False})])
+
+    def test_recovery_re_hints_a_parked_mod_once_even_with_an_unchanged_cursor(self):
+        self.state["first_unread_sequence"] = 4
+        status, body = self.exchange()
+        self.assertEqual(status, 200)
+        self.wake_reports()
+        request = f"GET /cbc/v1/wake?after={body['cursor']} HTTP/1.1\r\n\r\n".encode()
+        # Only the Claude member is due: the fixture's Codex target must never run a command.
+        self.router.read_wake_status = lambda grant, _timeout: dict(
+            self.state, recovery_due=grant["member"] == "claude")
+        self.assertEqual(self.router.recover_once(), 1)
+        # Codex review 7: the mod drops a repeated pending cursor, so a recovery says so.
+        self.assertEqual(self.exchange(request), (200, dict(body, type="recovery")))
+        self.assertEqual(self.wake_reports(), [("claude", {"through": 4, "kind": "claude_mod",
+            "outcome": "accepted", "recovery": True})])
+        self.assertEqual(self.exchange(request), (204, None), "one recovery, one re-hint")
+
+    def test_recovery_force_rings_a_channel_and_skips_what_is_not_due(self):
+        client, _channel = self.connect_channel()
+        self.router.core_call = lambda *_args: {"type": "batch", "reference": "r1", "items": [
+            {"sequence": 6, "room": "r", "sender": "a", "kind": "message", "body": "x"}]}
+        self.assertTrue(self.router.notify(CLAUDE)["_notified"])
+        client.recv(4096)
+        self.wake_reports()
+        statuses = {"claude": {"type": "binding_status", "first_unread_sequence": 6}}
+        self.router.read_wake_status = lambda grant, _timeout: dict(
+            statuses.get(grant["member"], {"type": "error"}))
+        self.assertEqual(self.router.recover_once(), 0, "an old core sends no flag: nothing is due")
+        statuses["claude"]["recovery_due"] = False
+        self.assertEqual(self.router.recover_once(), 0)
+        statuses["claude"]["recovery_due"] = True
+        self.assertEqual(self.router.recover_once(), 1)
+        self.assertEqual(client.recv(4096), b'{"type":"changed"}\n', "rung although already rung")
+        self.assertEqual(self.wake_reports(), [("claude", {"through": 6, "kind": "claude_channel",
+            "outcome": "accepted", "recovery": True})])
+
+    def test_recovery_loop_runs_until_the_feed_stops(self):
+        passes = []
+        self.router.recover_once = lambda: passes.append(1) or 0
+        self.router.recovery_interval = 0.01
+        loop = threading.Thread(target=self.router.recovery_loop)
+        loop.start()
+        deadline = time.monotonic() + 2
+        while len(passes) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.router.feed.stop()
+        loop.join(2)
+        self.assertFalse(loop.is_alive())
+        self.assertGreaterEqual(len(passes), 2)
+
 
 class CodexQueueTests(unittest.TestCase):
     def test_repeated_and_newer_hints_coalesce_until_actual_receipt_progress(self):
@@ -946,6 +1267,43 @@ class CodexQueueTests(unittest.TestCase):
         for hint in (HINT | {"body": "secret"}, HINT | {"sequence": True}, HINT | {"sequence": 0}):
             with self.assertRaises(ValueError):
                 callback(hint)
+
+    def test_a_queue_command_is_reported_only_when_it_runs(self):
+        calls, reports = [], []
+        state = {"type": "binding_status", "last_receipted_sequence": 0, "first_unread_sequence": 1}
+        outcome = {"value": 0}
+        ran = []
+        def runner(*args, **_kwargs):
+            calls.append(args)
+            ran.append(time.time_ns() // 1000)
+            if isinstance(outcome["value"], Exception):
+                raise outcome["value"]
+            return SimpleNamespace(returncode=outcome["value"])
+        def reporter(*args):
+            # The fifth argument is the attempt time, taken just before this run.
+            self.assertIs(type(args[4]), int)
+            self.assertLessEqual(args[4], ran[-1])
+            reports.append(args[:4])
+        callback = device.codex.QueueDelivery("/usr/local/bin/codex", SESSION, runner=runner,
+            status_provider=lambda: dict(state), reporter=reporter)
+        self.assertTrue(callback(HINT))
+        self.assertTrue(callback(HINT | {"sequence": 8}))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(reports, [(7, "accepted", None, False)], "a latched hint is not a wake")
+        self.assertTrue(callback.recover(HINT | {"sequence": 1}))
+        self.assertEqual(len(calls), 2, "recovery bypasses the latch")
+        self.assertEqual(reports[-1], (1, "accepted", None, True))
+        state.update(last_receipted_sequence=5, first_unread_sequence=6)
+        outcome["value"] = 1
+        self.assertFalse(callback(HINT))
+        self.assertEqual(reports[-1], (7, "failed", "queue_exit", False))
+        outcome["value"] = OSError("private path")
+        self.assertFalse(callback(HINT))
+        self.assertEqual(reports[-1], (7, "failed", "queue_unavailable", False))
+        callback.status_provider = lambda: {"type": "error"}
+        before = len(reports)
+        self.assertFalse(callback(HINT))
+        self.assertEqual(len(reports), before, "no command, no attempt")
 
 
 if __name__ == "__main__":

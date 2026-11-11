@@ -35,10 +35,25 @@ pub struct DispatchPolicy {
     /// Rooms resolve the report owner's policy, or defaults/context only for symmetric peers.
     #[serde(default = "default_room_notice_every_messages")]
     pub room_notice_every_messages: u64,
+    /// How long an unread item waits, with no wake attempt in between, before the driver
+    /// re-hints the member (#113 B1).
+    #[serde(default = "default_recovery_after_ms")]
+    pub recovery_after_ms: u64,
+    /// Recovery hints per oldest unread item; 0 turns recovery off.
+    #[serde(default = "default_recovery_attempts")]
+    pub recovery_attempts: u32,
 }
 
 fn default_room_notice_every_messages() -> u64 {
     100
+}
+
+fn default_recovery_after_ms() -> u64 {
+    600_000
+}
+
+fn default_recovery_attempts() -> u32 {
+    3
 }
 
 impl Default for DispatchPolicy {
@@ -47,6 +62,8 @@ impl Default for DispatchPolicy {
             retry_initial_ms: 1000,
             retry_max_ms: 30_000,
             room_notice_every_messages: default_room_notice_every_messages(),
+            recovery_after_ms: default_recovery_after_ms(),
+            recovery_attempts: default_recovery_attempts(),
         }
     }
 }
@@ -60,6 +77,10 @@ pub struct PolicyPatch {
     pub retry_max_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room_notice_every_messages: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_after_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_attempts: Option<u32>,
 }
 
 impl PolicyPatch {
@@ -72,6 +93,12 @@ impl PolicyPatch {
         }
         if let Some(value) = self.room_notice_every_messages {
             policy.room_notice_every_messages = value;
+        }
+        if let Some(value) = self.recovery_after_ms {
+            policy.recovery_after_ms = value;
+        }
+        if let Some(value) = self.recovery_attempts {
+            policy.recovery_attempts = value;
         }
     }
 }
@@ -126,10 +153,7 @@ impl RuntimeSettings {
         ] {
             if let Some(patch) = patch {
                 patch.apply(&mut policy);
-                if patch.retry_initial_ms.is_some()
-                    || patch.retry_max_ms.is_some()
-                    || patch.room_notice_every_messages.is_some()
-                {
+                if *patch != PolicyPatch::default() {
                     sources.push(source.into());
                 }
             }
@@ -348,6 +372,10 @@ fn validate_policy(policy: &DispatchPolicy) -> Result<()> {
     ensure!(
         (1..=1_000_000).contains(&policy.room_notice_every_messages),
         "invalid room notice cadence"
+    );
+    ensure!(
+        (1000..=86_400_000).contains(&policy.recovery_after_ms) && policy.recovery_attempts <= 20,
+        "invalid recovery policy"
     );
     Ok(())
 }

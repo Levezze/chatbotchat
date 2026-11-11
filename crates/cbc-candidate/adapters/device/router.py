@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import queue
 import re
 import select
 import signal
@@ -119,15 +120,30 @@ class DeviceRouter(claude.Router):
         self.native_sessions = set()
         self.native_pending = set()
         self.native_slots = threading.BoundedSemaphore(native.MAX_WAITERS)
+        # #113 B1. Reports leave the delivery path through one bounded queue and one worker,
+        # so a slow or absent core can never delay or fail a delivery.
+        self.wake_reports = queue.Queue(maxsize=256)
+        # The core counts recovery attempts from wake reports, which can be lost. A hold is
+        # registered before each recovery and keeps that binding's oldest unread item from being
+        # recovered again until the core acknowledges the attempt's report. It is dropped at
+        # once if no attempt was reported. An ack lifts only the hold its report marked.
+        # (Codex reviews 3, 4 and 5.)
+        self.recovery_lock = threading.Lock()
+        self.recovery_holds = {}
+        self.wake_sender = lambda grant, request: self.bounded_call(grant, request, 2.0)
+        self.latest_hint = {}
+        self.native_recover = set()
+        self.recovery_interval = 60.0
         handlers = {}
         for session, binding in bindings.items():
             key = (binding["context"], binding["member"])
             if targets[session] == "claude":
-                handlers[key] = lambda _hint, session=session: self.deliver_hint(session)
+                handlers[key] = self.claude_handler(session)
             else:
                 queued[session].event = self.event
                 queued[session].status_provider = lambda binding=binding: self.core_call(
                     binding, {"op": "binding_status"})
+                queued[session].reporter = self.codex_reporter(binding)
                 handlers[key] = queued[session]
         self.handlers = handlers
 
@@ -149,6 +165,154 @@ class DeviceRouter(claude.Router):
         if self.quarantined:
             with self.registry_lock:
                 self.install_registry()
+        threading.Thread(target=self.report_worker, name="cbc-wake-reports", daemon=True).start()
+
+    def claude_handler(self, session):
+        def handler(hint):
+            sequence = hint.get("sequence") if isinstance(hint, dict) else None
+            if type(sequence) is int and sequence > 0:
+                with self.native_ready:
+                    self.latest_hint[session] = max(sequence, self.latest_hint.get(session, 0))
+            return self.deliver_hint(session)
+        return handler
+
+    def codex_reporter(self, binding):
+        return lambda through, outcome, failure, recovery, attempted_us: self.report_wake(
+            binding, through, "codex_queue", outcome, failure, recovery, attempted_us)
+
+    def report_wake(self, binding, through, kind, outcome, failure, recovery, attempted_us):
+        """Enqueue one wake attempt for the core. Never blocks and never raises.
+
+        attempted_us is the wall clock in microseconds taken before the host was notified, so
+        the core can tell which items were still unread at the attempt."""
+        if type(through) is not int or through < 1:
+            return
+        request = {"op": "wake", "through": through, "kind": kind, "outcome": outcome,
+                   "recovery": bool(recovery), "attempt_wall_us": attempted_us}
+        if failure is not None:
+            request["failure"] = failure
+        hold = None
+        if recovery:
+            with self.recovery_lock:
+                hold = self.recovery_holds.get((binding["context"], binding["member"]))
+                if hold is not None:
+                    hold["reported"] = True
+        try:
+            self.wake_reports.put_nowait((dict(binding), request, hold))
+        except queue.Full:
+            self.event("wake_report_dropped", member=binding["member"])
+
+    def report_worker(self):
+        while True:
+            try:
+                grant, request, hold = self.wake_reports.get(timeout=0.2)
+            except queue.Empty:
+                if self.feed.stopped.is_set():
+                    return
+                continue
+            try:
+                reply = self.wake_sender(grant, request)
+                if not isinstance(reply, dict) or reply.get("type") != "woken":
+                    self.event("wake_report_failed", member=grant["member"], reason="rejected")
+                elif hold is not None:
+                    # Only the hold this report marked: a late ack for an older item must not
+                    # lift a newer item's hold. (Codex review 5.)
+                    key = (grant["context"], grant["member"])
+                    with self.recovery_lock:
+                        if self.recovery_holds.get(key) is hold:
+                            del self.recovery_holds[key]
+            except Exception as error:  # a lost report must never reach a delivery path
+                self.event("wake_report_failed", member=grant["member"],
+                           reason=type(error).__name__)
+            finally:
+                self.wake_reports.task_done()
+
+    def flush_wake_reports(self, timeout):
+        deadline = time.monotonic() + timeout
+        while self.wake_reports.unfinished_tasks:
+            if time.monotonic() > deadline:
+                return False
+            time.sleep(0.005)
+        return True
+
+    def rang(self, session, batch, written, recovery, attempted_us):
+        binding = self.bindings.get(session)
+        sequences = [item.get("sequence") for item in batch.get("items") or []
+                     if isinstance(item, dict)]
+        sequences = [value for value in sequences if type(value) is int and value > 0]
+        if binding and sequences:
+            self.report_wake(binding, max(sequences), "claude_channel",
+                             "accepted" if written else "failed",
+                             None if written else "channel_write_failed", recovery, attempted_us)
+
+    def recover_native(self, session):
+        """The next wait answers pending once even if the cursor has not moved."""
+        with self.native_ready:
+            self.native_recover.add(session)
+        self.wake_native()
+
+    def recover_once(self):
+        """Re-hint each binding the core flags as overdue. Returns how many were re-hinted.
+
+        Codex recovery shares QueueDelivery's lock with the feed worker; a forced channel ring
+        is the same call a hello makes; a native mod gets a one-shot flag. None of them adds a
+        second delivery path."""
+        with self.registry_lock:
+            candidates = [(session, binding, self.targets.get(session))
+                          for session, binding in self.all_bindings.items()
+                          if session not in self.quarantined]
+        count = 0
+        for session, binding, host in candidates:
+            if self.feed.stopped.is_set():
+                break
+            status = self.read_wake_status(binding, 2.0)
+            first = status.get("first_unread_sequence")
+            if (status.get("type") != "binding_status" or status.get("recovery_due") is not True
+                    or type(first) is not int or first < 1):
+                continue
+            key = (binding["context"], binding["member"])
+            hold = {"first": first, "reported": False}
+            with self.recovery_lock:
+                held = self.recovery_holds.get(key, {}).get("first") == first
+                if not held:
+                    self.recovery_holds[key] = hold  # before the wake, so an early ack finds it
+            if held:
+                self.event("recovery_unacknowledged", member=binding["member"])
+                continue
+            hint = {"context": binding["context"], "member": binding["member"], "sequence": first}
+            done = False
+            try:
+                if host == "codex":
+                    with self.registry_lock:
+                        callback = self.queued.get(session)
+                    done = callback is not None and callback.recover(hint) is True
+                elif host == "claude":
+                    is_native, channel_missing = self.native_notification_mode(session)
+                    if is_native:
+                        # The report comes when the mod's next wait answers; the hold waits.
+                        with self.recovery_lock:
+                            hold["reported"] = True
+                        self.recover_native(session)
+                        done = True
+                    elif not channel_missing:
+                        done = self.notify(session, force=True,
+                                           recovery=True).get("_notified") is True
+            finally:
+                with self.recovery_lock:
+                    if self.recovery_holds.get(key) is hold and not hold["reported"]:
+                        del self.recovery_holds[key]  # nothing was attempted, nothing to count
+            if done:
+                count += 1
+            else:
+                self.event("recovery_skipped", member=binding["member"])
+        return count
+
+    def recovery_loop(self):
+        while not self.feed.stopped.wait(self.recovery_interval):
+            try:
+                self.recover_once()
+            except Exception as error:
+                self.event("recovery_failed", reason=type(error).__name__)
 
     def event(self, kind, **fields):
         # The one watch already emits this after durable changes. Waking HTTP
@@ -179,11 +343,11 @@ class DeviceRouter(claude.Router):
             channel_missing = session in self.channel_sessions and session not in self.channels
         return is_native, channel_missing
 
-    def notify(self, session, force=False):
+    def notify(self, session, force=False, recovery=False):
         """Native wake and unconnected channels must never prefetch an inbox batch."""
         is_native, channel_missing = self.native_notification_mode(session)
         if not is_native and not channel_missing:
-            return super().notify(session, force=force)
+            return super().notify(session, force=force, recovery=recovery)
         if not is_native and not force:
             return {"type": "skipped"}
         binding = self.native_binding(session)
@@ -264,6 +428,9 @@ class DeviceRouter(claude.Router):
 
     def read_wake_status(self, binding, timeout):
         """A bounded non-consuming core call, independent of MCP's long timeout."""
+        return self.bounded_call(binding, {"op": "binding_status"}, timeout)
+
+    def bounded_call(self, binding, request, timeout):
         deadline = time.monotonic() + timeout
         with socket.socket(socket.AF_UNIX) as connection:
             connection.settimeout(timeout)
@@ -271,7 +438,7 @@ class DeviceRouter(claude.Router):
                 connection.connect(self.core)
                 connection.settimeout(max(0.001, deadline - time.monotonic()))
                 connection.sendall((claude.dumps({"v": 1, "auth": binding,
-                    "request": {"op": "binding_status"}}) + "\n").encode())
+                    "request": request}) + "\n").encode())
                 raw = b""
                 while not raw.endswith(b"\n"):
                     remaining = deadline - time.monotonic()
@@ -287,7 +454,7 @@ class DeviceRouter(claude.Router):
             except (OSError, ValueError):
                 return {"type": "error"}
 
-    def handle_native(self, conn, pid, uid, initial):
+    def handle_native(self, conn, pid, uid, initial, wake=None):
         try:
             after = native.read_request(conn, initial)
         except (OSError, ValueError):
@@ -307,13 +474,13 @@ class DeviceRouter(claude.Router):
         if attached:
             self.event("native_mod_attached", member=binding["member"])
         try:
-            return self.wait_native(session, binding, pid, uid, after)
+            return self.wait_native(session, binding, pid, uid, after, wake)
         finally:
             with self.native_ready:
                 self.native_pending.discard(session)
             self.native_slots.release()
 
-    def wait_native(self, session, binding, pid, uid, after):
+    def wait_native(self, session, binding, pid, uid, after, wake=None):
         deadline = time.monotonic() + native.WAIT_SECONDS
         while True:
             with self.native_ready:
@@ -335,7 +502,11 @@ class DeviceRouter(claude.Router):
             if first is not None and (type(first) is not int or first < 1):
                 return native.response(503)
             token = native.cursor(binding, first) if first is not None else None
-            if token is not None and token != after:
+            with self.native_ready:
+                recovering = session in self.native_recover
+                if token is None:
+                    self.native_recover.discard(session)
+            if token is not None and (token != after or recovering):
                 # Revalidate both native process identity and binding authority
                 # after I/O. Never deliver an event for a replaced/revoked chat.
                 if (self.native_identity(pid, uid) != session
@@ -357,8 +528,22 @@ class DeviceRouter(claude.Router):
                 if (self.native_identity(pid, uid) != session
                         or self.native_binding(session) != binding):
                     return native.response(401)
+                # Read outside native_ready: dispatch emits feed_changed (which takes
+                # native_ready) while holding the feed's lock.
+                hinted = self.feed.hinted((binding["context"], binding["member"]))
+                with self.native_ready:
+                    recovery = session in self.native_recover
+                    self.native_recover.discard(session)
+                    through = max(fresh_first, self.latest_hint.get(session, 0), hinted)
                 self.event("native_mod_pending", member=binding["member"])
-                return native.response(200, {"v": 1, "type": "pending", "cursor": token})
+                # The attempt time is taken before the 200 is written, so it precedes the mod
+                # hearing of it; serve reports the outcome once the write has succeeded or failed.
+                if wake is not None:
+                    wake.append((binding, through, recovery, time.time_ns() // 1000))
+                # A recovery is marked as such: the mod drops a repeated pending cursor, and a
+                # recovery often has one. (Codex review 7.)
+                return native.response(200, {"v": 1, "type": "recovery" if recovery else "pending",
+                                             "cursor": token})
             with self.native_ready:
                 if generation != self.native_generation:
                     continue
@@ -386,9 +571,19 @@ class DeviceRouter(claude.Router):
                 return
             pid, uid = claude.peer_credentials(conn)
             if initial not in b"{[ \t\r\n":
-                reply = self.handle_native(conn, pid, uid, initial)
-                conn.settimeout(1)
-                conn.sendall(reply)
+                wake = []
+                reply = self.handle_native(conn, pid, uid, initial, wake)
+                failure = "mod_write_failed"
+                try:
+                    conn.settimeout(1)
+                    conn.sendall(reply)
+                    failure = None
+                finally:
+                    # Acceptance is the pending reaching the mod. (Codex review 6.)
+                    for binding, through, recovery, attempted_us in wake:
+                        self.report_wake(binding, through, "claude_mod",
+                                         "failed" if failure else "accepted", failure,
+                                         recovery, attempted_us)
                 return
             # Preserve the original raw newline JSON protocol and channel ownership.
             conn.settimeout(10)
@@ -458,7 +653,7 @@ class DeviceRouter(claude.Router):
             for session, binding in bindings.items():
                 key = (binding["context"], binding["member"])
                 if targets[session] == "claude":
-                    handlers[key] = lambda _hint, session=session: self.deliver_hint(session)
+                    handlers[key] = self.claude_handler(session)
                 else:
                     if not self.codex_executable:
                         raise ValueError("Codex executable missing")
@@ -466,6 +661,7 @@ class DeviceRouter(claude.Router):
                     callback = (prior if prior and self.all_bindings.get(session) == binding
                                 else codex.QueueDelivery(self.codex_executable, session, self.event))
                     callback.status_provider = lambda binding=binding: self.core_call(binding, {"op": "binding_status"})
+                    callback.reporter = self.codex_reporter(binding)
                     queued[session] = handlers[key] = callback
             self.all_bindings, self.targets, self.queued, self.handlers = bindings, targets, queued, handlers
             self.native_targets = native_targets
@@ -536,6 +732,7 @@ def run(router, listen_path, stopped=None):
     refresh = threading.Event()
     server, inode = claude.listen(listen_path)
     follower = threading.Thread(target=router.follow_feed, name="cbc-shared-device-feed")
+    recovery = threading.Thread(target=router.recovery_loop, name="cbc-wake-recovery")
 
     def stop(*_args):
         stopped.set()
@@ -557,6 +754,7 @@ def run(router, listen_path, stopped=None):
                 pass
         signal.signal(signal.SIGHUP, request_refresh)
     follower.start()
+    recovery.start()
     try:
         while not stopped.is_set():
             ready = select.select([server, router.wake_read, *router.channel_sockets()], [], [])[0]
@@ -588,6 +786,7 @@ def run(router, listen_path, stopped=None):
     finally:
         stop()
         follower.join()
+        recovery.join()
         for connection in router.channel_sockets():
             router.drop_channel(connection)
         router.wake_read.close()

@@ -5,6 +5,7 @@ import { register } from './hooks/register.js';
 const SOCKET = '/private/tmp/cbc113/core/device.sock';
 const A = 'a'.repeat(64), B = '0'.repeat(64);
 const pending = cursor => ({ status: 200, text: JSON.stringify({ v: 1, type: 'pending', cursor }) });
+const recovery = cursor => ({ status: 200, text: JSON.stringify({ v: 1, type: 'recovery', cursor }) });
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function deferred() {
   let resolve, reject;
@@ -71,6 +72,17 @@ test('opaque progress can move down; duplicate cursor never queues another hint'
   assert.match(h.prompts[0].text, /cbc_check with no arguments/);
   assert.match(h.prompts[0].text, /not human approval/);
   assert.equal(h.prompts[0].text.includes(A), false);
+});
+
+test('a recovery re-hints once even with an unchanged cursor', async () => {
+  // Codex review 7: the driver re-hints an overdue item whose cursor has not moved.
+  const h = host();
+  h.replies.push(pending(A), recovery(A), pending(A));
+  await h.fire('session.start');
+  await h.run(); await h.run(); await h.run();
+  assert.equal(h.prompts.length, 2, 'the recovery submits; the repeated pending does not');
+  assert.equal(h.requests[2].url, 'http://cbc113/cbc/v1/wake?after=' + A);
+  assert.equal(h.prompts[1].text, h.prompts[0].text);
 });
 
 test('no overlapping fetch or second prompt while native submission waits for idle', async () => {
