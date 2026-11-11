@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.32.0](https://github.com/Levezze/chatbotchat/compare/v0.31.0...v0.32.0) (2026-11-11)
+
+
+### Features
+
+* **candidate:** model tools for closing rooms, work items and requests (S1) ([#162](https://github.com/Levezze/chatbotchat/issues/162)) ([e918914](https://github.com/Levezze/chatbotchat/commit/e918914b8e17eab21ce45b3befde8bd229f0b45e))
+
 ## [0.31.0](https://github.com/Levezze/chatbotchat/compare/v0.30.0...v0.31.0) (2026-11-11)
 
 
