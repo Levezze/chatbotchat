@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.0](https://github.com/Levezze/chatbotchat/compare/v0.24.0...v0.25.0) (2026-11-11)
+
+
+### Features
+
+* **candidate:** dashboard work items and outbox timeline (D1b) ([#146](https://github.com/Levezze/chatbotchat/issues/146)) ([79ab6cb](https://github.com/Levezze/chatbotchat/commit/79ab6cb29642229c213488786ff5e4bb5ce04776))
+
 ## [0.24.0](https://github.com/Levezze/chatbotchat/compare/v0.23.0...v0.24.0) (2026-11-11)
 
 
