@@ -208,7 +208,7 @@ Three findings from the same review are left for R2c, which needs migration
 ### R2c as built: work-item follow-ups
 
 Migration 0010 (schema 10). The changes are in `src/work.rs` and one call in
-`src/enrollment.rs`; tests are in `tests/work_items.rs`.
+`src/enrollment.rs`; tests are in `tests/work_followups.rs`.
 
 - **Operation ledger.** Each keyed request is recorded with its first outcome,
   `applied` or `noop`, and the revision it saw. A retry with the same key
