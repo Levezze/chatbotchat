@@ -240,16 +240,16 @@ pub(super) fn render_cost(o: &mut String, samples: &[Samples], facts: &Facts, wi
             "  {name} — Claude mod: {}",
             missing("runs inside the host app")
         );
-    }
-    match (ticks.first(), ticks.last()) {
-        (Some(first), Some(last)) => {
+        // Disk per mode too: normal and debug runs are compared, not summed.
+        let own: Vec<&Tick> = ticks.iter().copied().filter(|t| t.mode == mode).collect();
+        if let (Some(first), Some(last)) = (own.first(), own.last()) {
             let max = |pick: fn(&crate::sampler::Disk) -> u64| {
-                ticks.iter().map(|t| pick(&t.disk)).max().unwrap_or(0)
+                own.iter().map(|t| pick(&t.disk)).max().unwrap_or(0)
             };
             let _ = writeln!(
                 o,
-                "  disk bytes: database start={} end={} max={}; snapshots start={} end={} max={}; \
-                 other start={} end={} max={}",
+                "  {name} — disk bytes: database start={} end={} max={}; snapshots start={} \
+                 end={} max={}; other start={} end={} max={}",
                 first.disk.database_bytes,
                 last.disk.database_bytes,
                 max(|d| d.database_bytes),
@@ -260,9 +260,6 @@ pub(super) fn render_cost(o: &mut String, samples: &[Samples], facts: &Facts, wi
                 last.disk.other_bytes,
                 max(|d| d.other_bytes),
             );
-        }
-        _ => {
-            let _ = writeln!(o, "  disk: {}", missing("no ticks in the window"));
         }
     }
 }
@@ -378,13 +375,14 @@ Cost (sampler ticks in the window)
   normal — adapters/device/router.py: missing (no process matched; expected=1)
   normal — cbc-candidate serve: processes max=1 expected=1 rss_kb n=4 median=100 p90=100 max=100 cpu=5.0% of one core (150 ms CPU)
   normal — Claude mod: missing (runs inside the host app)
+  normal — disk bytes: database start=10 end=20 max=30; snapshots start=0 end=0 max=0; other start=8 end=8 max=8
   debug: ticks=2 every 1000 ms over 1000 ms
   debug — adapters/claude/adapter.py: missing (no process matched; expected=1)
   debug — adapters/codex/adapter.py: missing (no process matched; expected=1)
   debug — adapters/device/router.py: missing (no process matched; expected=1)
   debug — cbc-candidate serve: processes max=1 expected=1 rss_kb n=2 median=100 p90=100 max=100 cpu=20.0% of one core (200 ms CPU)
   debug — Claude mod: missing (runs inside the host app)
-  disk bytes: database start=10 end=20 max=30; snapshots start=0 end=0 max=0; other start=8 end=8 max=8
+  debug — disk bytes: database start=20 end=20 max=20; snapshots start=0 end=0 max=0; other start=8 end=8 max=8
 ";
         assert_eq!(text, expected);
     }
@@ -486,6 +484,6 @@ Cost (sampler ticks in the window)
             window,
         );
         assert!(text.contains("  normal: missing (no normal-mode ticks in the window)"));
-        assert!(text.contains("  disk: missing (no ticks in the window)"));
+        assert!(!text.contains("disk"), "no disk line without ticks: {text}");
     }
 }

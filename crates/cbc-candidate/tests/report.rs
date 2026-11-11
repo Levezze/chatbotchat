@@ -485,7 +485,9 @@ async fn the_cost_section_reads_the_sampler_file_cut_on_the_window() {
         "only growth inside the window: {core}"
     );
     line(&text, "  debug: missing (no debug-mode ticks in the window");
-    assert!(line(&text, "  disk bytes: ").contains("database start=4096 end=4096 max=4096"));
+    assert!(
+        line(&text, "  normal — disk bytes: ").contains("database start=4096 end=4096 max=4096")
+    );
 
     // A file that is not sampler output is refused, naming the line, not echoing it.
     let refused = report(

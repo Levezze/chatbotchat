@@ -776,7 +776,8 @@ at once would count every process twice.
     expected is still listed.
   - The Claude mod runs inside the host app and prints missing. Debug-mode
     ticks print missing until B2 adds debug logging.
-  - Disk: start, end and maximum of each part.
+  - Disk: start, end and maximum of each part, per mode, so a normal run
+    and a debug run are compared rather than merged.
 - **Tests.**
   - Unit: `ps` time formats (macOS `M:SS.ss`, procps `[dd-]hh:mm:ss`), the
     classifier's accepted and refused command lines, `ps` parsing without
