@@ -76,6 +76,13 @@ later trials append new decisions rather than editing these.
 | T-26 | There is at most one active peer room per unordered pair of identities. Opening is idempotent: the second agent to open gets "a room already exists" with its ID and joins it. Either member can close the room alone with a short reason; no consensus vote is needed. Closing frees the pair, and the next open creates a replacement that records which room it supersedes. When a member's session ends, its peer rooms go inactive. | Duplicate rooms between the same two peers split the conversation. A creator-only close fails when the creator's session is gone. ADR-0003 introduced consensus close because unilateral closes carried no provenance; recording actor, reason and the supersede link fixes that root cause directly. | Consensus close (ADR-0003). Close by the creator only. One room per pair *and* topic. |
 | T-27 | Waits are derived from facts, not from what agents say, and they are the headline metric (section 6). The approval prompts the user had to click are the second headline metric, with a target of zero CBC-related prompts after setup. | The user's words: what matters is how often work stops and waits, measured as a distribution rather than a single threshold. | Agent-reported blockers. A single pass mark. |
 
+**Added during setup, 2026-11-11.** These record how the implementing agent applied the decisions above while building the setup tool. They narrow T-24 and fill a gap T-02 left open; they change no earlier decision.
+
+| ID | Decision | Why | Rejected alternatives |
+|---|---|---|---|
+| T-28 | T-24 is applied as: a Claude seat allows only `mcp__cbc-trial__*` and denies `mcp__chatbotchat__*`; a Codex seat pre-approves the `cbc-trial` server and disables `chatbotchat`. No CLI binary is allowed to any seat. | The candidate transport reaches agents only through the adapter's tools. The `cbc-candidate` CLI is the operator's (init, serve, provision, revoke, retire), so allowing it to an agent would hand it enrollment powers. | Allowing the `cbc-candidate` binary, as T-24's wording first suggested. |
+| T-29 | Phase 1 seats: `peer-a` in Claude Code and `peer-b` in Codex, with a `peer` grant scoped `smoke`. | Phase 2 exercises Codex's wake path only through the Primarch (T-13). One peer per app tests both native wake paths before the hierarchy runs. | Two Claude peers. |
+
 ## 3. What is built before the trial
 
 Each piece goes through the normal PR process (T-19).
@@ -88,7 +95,7 @@ Each piece goes through the normal PR process (T-19).
 | 4 | Dashboard skeleton | #113, moved from #116 | Work items, open requests and the outbox timeline, plus answering through a browser session (T-11, T-12). |
 | 5 | Instrumentation and report | #113 B and C | Connector instrumentation, bounded recovery, the run manifest, and the deterministic report, including the wait and prompt measurements. |
 | 6 | Model tools | #113, found 2026-11-11 | Tools that let a model close a room and use work items and requests. Pieces 3 to 5 built these operations in the core, but no adapter exposed them, so the agents could not reach them. See [model tools](#model-tools-piece-6). |
-| 7 | Trial setup | #113 | The pinned build (T-15), local skills and allowlists (T-17, T-24), the launch sheet (T-20). |
+| 7 | Trial setup | #113 | The pinned build (T-15), local skills and allowlists (T-17, T-24), the launch sheet (T-20). The local skills carry a [transport notice](#trial-transport-notice-piece-7) that settles every legacy-or-candidate fork in their text. `tools/trial_setup.py` pins the transport and writes each seat's wiring; the [launch sheets](#trial-setup-tool-and-launch-sheets-piece-7) are rendered from committed templates. |
 
 ### Model tools (piece 6)
 
@@ -123,6 +130,70 @@ Reachability, by trial step:
 - `tests/model_tools.rs` drives the real Codex adapter against a real core, with a provisioned Primarch and two Chapter Masters. It covers registration and revision, HITL on-only, a relayed user question, a request to the Primarch from opening through answer, read, applied and withdraw, a close and its replacement, and identity in arguments. It also pins delivery: a registration reaches the Primarch's `cbc_check` only through an open report room and is receipted once, and an answer reaches the asker as a pending item.
 - `adapters/claude/test_router.py` checks that each Claude tool reaches the core as one exact operation, that bad arguments never reach it, and that a full record page stays inline in Claude Code.
 - `adapters/shared/test_tools.py` checks that the declared schema is the enforced one and mirrors each core field rule.
+
+### Trial transport notice (piece 7)
+
+**Why it was added.** The trial skills are the canonical hierarchy package under `wip-` names. That package is written for two transports at once. Its legacy rules cover "today's transport": receivers and polls, read cursors, the `connections:` state section, numeric caps, and closing by consensus. Its candidate rules apply "once the candidate core is adopted". It also says to use the base CBC skill for transport. The package never names a legacy tool, so the risk is prose, not tool names. Left alone, a trial agent would follow the legacy rules, load the global `cbc` skill, and reach the live daemon through the `chatbotchat` server. Two candidate tools, `cbc_send` and `cbc_close`, share bare names with legacy tools, and the legacy `cbc_close` is a consensus vote, not a close.
+
+**What it adds.** `tools/install_trial_skills.py` inserts a transport notice into every installed Markdown file. References get it too, because an agent reads `references/rooms.md` only when it needs it. The notice:
+
+- names the candidate MCP server, `cbc-trial` (the installer's `SERVER` constant, which the trial wiring reuses);
+- applies every "once adopted" rule now and voids every legacy-transport rule;
+- forbids the base `cbc` skill, the `chatbotchat` server and the `cbc` command line;
+- maps each route to a candidate tool: connect, check, send, close, work items, requests;
+- tells a Chapter Master to connect its report room before registering;
+- puts handoffs out of scope.
+
+**Not covered by the notice.** The notice is text. The `chatbotchat` tools stay loaded unless the trial wiring hides them in each trial project, and a model can still call them. The hide, and a check at the start of each seat that no `chatbotchat` tool is listed, belong to the setup (section 5).
+
+**Tests.** `tools/test_trial_skills.py`:
+
+- every installed file that contains a legacy-transport rule carries the notice;
+- the notice addresses each category of legacy rule found in the package, and names the server;
+- every tool the notice names is listed by both candidate adapters.
+
+### Trial setup tool and launch sheets (piece 7)
+
+**Why it was added.** Section 5 asks for a pinned build, project-local wiring in every seat, git-ignored trial files and a verbatim launch sheet. Done by hand across three worktrees, any of those can drift, and two failures would be silent: an adapter path that points into a Chapter Master's own worktree (it could edit its own transport mid-run, against T-15), and a `.mcp.json` with local paths committed by a routine `git add -A` into this public repository.
+
+**What it does.** `tools/trial_setup.py` works on one case directory per run:
+
+- `pin` copies `crates/cbc-candidate/adapters` to `CASE/pin/cbc-candidate/adapters` and the built `cbc-candidate` binary to `CASE/pin/bin`, from a clean checkout. The adapters keep the `cbc-candidate/adapters/` path segment because the cost sampler recognises adapter processes by it. `pin` records the files in `CASE/pin`, with the commit and a SHA-256 of every file in `pin.json`, including the catalog in `CASE/market` that Claude loads the mod from. It refuses uncommitted adapter changes and a case path whose socket paths would reach the 104-byte Unix limit. It also stages the Claude wake mod as a private plugin catalog in `CASE/market`.
+- `prepare` writes one seat's files into its worktree and installs the `wip-` skills. Every path it writes points at `CASE/pin`, never at a worktree.
+  - Claude seat: `.mcp.json` registers `cbc-trial`. `.claude/settings.local.json` enables only that server, allows only `mcp__cbc-trial__*`, denies `mcp__chatbotchat__*`, and sets `skillOverrides` to `off` for every global `cbc*` and `emperor` skill it finds. `.cbc-candidate-wake.json` points the mod at the driver socket.
+  - Codex seat: `.codex/config.toml` registers `cbc-trial` with `default_tools_approval_mode = "approve"` and sets `[mcp_servers.chatbotchat] enabled = false`.
+  - One marked block in the repository's shared `info/exclude` covers every file `prepare` writes, the skill directories and `.cbc/hierarchy/`.
+  - After adding the block, it asks git whether every written path, every file of every `wip-` skill and `.cbc/hierarchy/` is really ignored. A `.gitignore` negation overrides `info/exclude`, so if any path stays visible it removes the block it added and refuses.
+  - Nothing is written unless every check passes. It refuses a case directory inside the seat's worktree or containing it, a symlink on any written path, a path git tracks (including any file of a `wip-` skill it would install), an existing file that differs, an edited exclude block, a pin or catalog whose files no longer match `pin.json`, a seat name already used for another project, a project with legacy `.cbc/worker-*.md` or `.cbc/orchestration-*.md` files, a project already prepared for another seat, and a project that already holds `wip-` skills or `.cbc/hierarchy/` records before its first `prepare`, since `teardown` would remove or archive them. Rerunning it changes nothing.
+- `sheet` renders `docs/design/trial-launch-sheet-phase1.md` or `-phase2.md` into the case directory, filling the case paths and each seat's worktree. It refuses a missing seat, an unfilled placeholder, and a case that holds seats of both phases. The committed templates hold no local paths, and every command names its run and its terminal literally.
+- One case per phase. `init` needs a new core root, so phase 1, phase 2 and any rerun under T-16 each get their own case directory, pin and seats.
+- `teardown` removes a seat's files only if they are unchanged since `prepare` and reached without a symlinked directory on the way, then the skills and the empty directories it created, with the same symlink check. It moves the hierarchy skill's local records from `.cbc/hierarchy/` into `CASE/archive/<seat>/`, and keeps them in place and ignored if it cannot or if `.cbc` has become a symlink. Once the last seat in that repository has gone, it removes the exclude block.
+- The case directory's name becomes the context `trial-<name>` and the run `trial-<name>-run1`, so it must be 1 to 40 lowercase letters and digits in hyphen-separated words, the hierarchy helper's ID rule. The exclude block's marker carries a digest of the case's real path, so two cases with the same name never share a block.
+- Every case and project path is resolved to its real path, because the core writes canonical socket paths and the driver compares them literally. A path that would need shell quoting is refused, so every command on the sheet can be pasted as written. The sheet runs the tool through the seat's Python. `settings.local.json` still counts as unchanged when the only additions are the two entries the local plugin install writes. A changed file is kept and listed, and the seat stays on record.
+
+**What it does not do.** The tool never reads the core's keys or the device profile, starts nothing and installs nothing. These stay user steps on the launch sheet:
+
+- Codex project trust. It is recorded in the global Codex configuration.
+- The Claude mod's local-scope `plugin marketplace add` and `plugin install`, for Desktop seats. They also create native plugin registry and cache records. A CLI seat uses `--plugin-dir` and needs no install.
+- `init`, `serve`, `provision`, the driver, the manifest and the dashboard command.
+
+**Launch in two stages.** Provisioning needs each seat's real native session ID and exact working directory, so the sessions exist before enrollment. Stage A opens every session with a message that loads no skill and calls no tool. It lists the seat's CBC tools and stops if any comes from a server other than `cbc-trial`. The operator then provisions and starts the driver. Stage B sends the role message, which carries the role, the assignment, the T-23 grant and the HITL default. A seat that got its role first would call CBC tools while unregistered and get an opaque refusal.
+
+**Phase 1 seats.** Phase 1 pairs a Claude peer with a Codex peer, so both native wake paths are tested before the hierarchy runs. Phase 2 uses the seats in section 4.
+
+**Known gaps.**
+
+- The commit in `pin.json` is the adapters' source commit. `cbc-candidate` does not report the commit it was built from, so the binary's hash is the only evidence of which build ran. Build it from the same checkout before pinning.
+- Codex has no per-project switch for user skills. The legacy `cbc*` skills in the Codex home stay visible to the Primarch, and the transport notice is the only guard there.
+- `skillOverrides` and the MCP deny are project-local settings that Claude Code documents. Neither has been observed in a trial session yet. The Stage A tool check is the observation for the MCP side. Loading a legacy skill is caught afterwards from the transcripts (section 6).
+- The global Claude hooks stay installed: `cbc hook session-start`, `cbc hook stop` and the compaction hook. The first two act only on `.cbc/worker-*.md` and `.cbc/orchestration-*.md` files, which `prepare` refuses and the hierarchy skill never writes. The compaction hook acts only for enrolled sessions, and trial copies refuse enrollment. All three are therefore inert in a trial project. The tool does not turn hooks off, because the wake mod is itself a hook module.
+
+**Tests.** `tools/test_trial_setup.py` runs on temporary git repositories:
+
+- `pin` copies and hashes the adapters and binary, stages the catalog, refuses a dirty tree, a different existing pin and a socket path that is too long;
+- `prepare` writes exactly the expected files per host, points every path at the pin, never copies key or profile contents, makes every written path git-ignored, is idempotent, and refuses each unsafe case above;
+- `teardown` removes only unchanged files, keeps a file reached through a symlinked directory, accepts the plugin install's two entries, keeps a changed file, and keeps the shared exclude block until the last seat in that repository leaves;
+- the sheets render both stages for every seat with no placeholder left, and refuse a missing seat.
 
 Explicitly not built before the trial:
 
@@ -179,14 +250,15 @@ Scenarios to exercise during phase 2, which the trial manager may arrange throug
 
 Each item is recorded in the run manifest before the go.
 
-- [ ] Core build pinned. Record the commit, the binary hash and the state directory. Record that no agent has write access to that binary or directory path through its allowlist.
+- [ ] Core build pinned with `tools/trial_setup.py pin`, which records the commit and every file hash in `CASE/pin/pin.json`. Record the state directory. Record that no agent has write access to that binary or directory path through its allowlist.
 - [ ] Candidate settings recorded: recovery interval, log level, and fallback **off** (T-05).
-- [ ] `wip-cbc-*` skills installed project-local in each trial worktree, for both Claude and Codex. Record the skill source commit.
-- [ ] The trial skill paths are git-ignored in every trial worktree, so a routine `git add -A` cannot put them into a Chapter Master's PR. The installer warns when they are not. Add `/.claude/skills/wip-*/` and `/.agents/skills/wip-*/` to the file named by `git rev-parse --git-path info/exclude`. In a linked worktree that file is shared by every worktree of the repository, so record the change and remove it after the run.
+- [ ] `wip-cbc-*` skills installed project-local in each trial worktree, for both Claude and Codex. Record the skill source commit. Each installed file carries the trial transport notice (piece 7).
+- [ ] The legacy `chatbotchat` server is hidden in every trial project, and the candidate adapter is registered as `cbc-trial`. Record the project-local files that do it. Each seat's first step lists its CBC tools. If any `chatbotchat` tool appears, the seat stops before doing anything else, and the run is not started.
+- [ ] The trial files are git-ignored in every trial worktree, so a routine `git add -A` cannot put them into a Chapter Master's PR. `tools/trial_setup.py prepare` writes one marked block to the file named by `git rev-parse --git-path info/exclude`, covering the skills, the wiring files and `.cbc/hierarchy/`. In a linked worktree that file is shared by every worktree of the repository; `teardown` removes the block when the last seat leaves.
 - [ ] Every seat is a brand-new session. No seat may already be enrolled in the global Primarch compaction hook, because refusing new enrollment cannot undo an old one. The trial installer's `primarch_compaction.py register` reports an existing enrollment.
-- [ ] Project-local allowlists written (T-24). Record their exact contents.
+- [ ] Project-local allowlists written by `prepare` (T-24, T-28). Record their exact contents; the seat records in `CASE/seats/` hold them.
 - [ ] Worktrees created from `origin/main`, one per Chapter Master, plus the Primarch's read-only checkout.
-- [ ] Launch sheet: each seat's first message, verbatim, including the grant.
+- [ ] Launch sheet rendered with `tools/trial_setup.py sheet`: each seat's Stage A and Stage B messages, verbatim, including the grant.
 - [ ] Versions recorded: Claude Code, Codex app or CLI, and the operating system.
 - [ ] Dashboard reachable. The browser session is created by the user, never by an agent.
 - [ ] Permission-prompt capture enabled where the host exposes prompt events; otherwise the user keeps a tally sheet.
