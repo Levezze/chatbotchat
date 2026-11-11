@@ -343,7 +343,7 @@ async fn close_orders_with_send_and_preserves_the_final_unread_items() {
         .unwrap();
     let (racing, closed) = tokio::join!(
         store.send(&alice, "peer-room", "racing", "racing close"),
-        store.close_room(&bob, "peer-room")
+        store.close_room(&bob, "peer-room", "done")
     );
     let closed = closed.unwrap();
     if let Ok(sequence) = racing {
@@ -360,7 +360,10 @@ async fn close_orders_with_send_and_preserves_the_final_unread_items() {
             .unwrap(),
         original
     );
-    assert_eq!(store.close_room(&alice, "peer-room").await.unwrap(), closed);
+    assert_eq!(
+        store.close_room(&alice, "peer-room", "done").await.unwrap(),
+        closed
+    );
     let batch = store.check(&alice, 32).await.unwrap().unwrap();
     assert_eq!(batch.items.len(), 1);
     assert_eq!(batch.items[0].kind, "closed");

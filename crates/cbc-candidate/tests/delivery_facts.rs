@@ -295,7 +295,7 @@ async fn system_items_are_classified_and_notices_snapshot_their_own_recipients()
         Some(ItemClass::Participant)
     );
 
-    let closed = store.close_room(&peer, &room).await.unwrap();
+    let closed = store.close_room(&peer, &room, "done").await.unwrap();
     let closure = timeline(&store, closed).await;
     assert_eq!(closure.class, Some(ItemClass::Closure));
     assert_eq!(members(&closure), ["child"]);

@@ -246,6 +246,18 @@ async fn live_owner_provisioning_discovery_and_settings_share_the_running_core()
         .revoke_binding("test", "feature", feature_binding.epoch())
         .await
         .is_err());
+    // T-25: only the owner retires an identity; the other member sees its room close.
+    owner
+        .retire_member("test", "feature", "trial ended")
+        .await
+        .unwrap();
+    let closed = lead.check().await.unwrap().unwrap();
+    assert_eq!(closed.items.len(), 1);
+    assert_eq!(closed.items[0].kind, "closed");
+    assert!(owner
+        .retire_member("test", "feature", "trial ended")
+        .await
+        .is_err());
     stop.send(()).unwrap();
     running.await.unwrap().unwrap();
 }

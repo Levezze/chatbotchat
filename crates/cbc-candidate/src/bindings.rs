@@ -138,7 +138,88 @@ pub struct BindingActivity {
     pub native_target: Option<crate::native_target::NativeTarget>,
 }
 
+/// What happened to an identity, in order (T-25).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityEventKind {
+    /// First binding to a native session.
+    Enrolled,
+    /// A deliberate handoff to a new native session; the identity is unchanged.
+    Rebound,
+    /// The identity ended and can never be bound again.
+    Retired,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityEvent {
+    pub kind: IdentityEventKind,
+    pub epoch: i64,
+    pub reason: Option<String>,
+    pub at_wall_ms: i64,
+}
+
 impl Store {
+    /// Trusted owner operation (T-25): the identity ends with its session and never returns.
+    /// Every active connection room of the member is closed in its name, so the other member
+    /// sees why, and the pair is free for a replacement room with a new identity.
+    pub async fn retire_member(&self, context: &str, member: &str, reason: &str) -> Result<()> {
+        valid_id(context)?;
+        valid_id(member)?;
+        let reason = crate::inbox::close_reason(reason)?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let retired: Option<i64> = sqlx::query_scalar(
+            "SELECT retired FROM candidate_members WHERE context_id=? AND member_id=?",
+        )
+        .bind(context)
+        .bind(member)
+        .fetch_optional(&mut *tx)
+        .await?;
+        ensure!(
+            retired.context("member is unavailable for retirement")? == 0,
+            "member is already retired"
+        );
+        let rooms: Vec<String> = sqlx::query_scalar("SELECT room_id FROM candidate_connections WHERE context_id=? AND (first_member=? OR second_member=?) AND active=1 ORDER BY room_id")
+            .bind(context).bind(member).bind(member).fetch_all(&mut *tx).await?;
+        let note = format!("retired: {reason}");
+        ensure!(
+            note.chars().count() <= crate::inbox::MAX_CLOSE_REASON_CHARS,
+            "retirement reason is too long"
+        );
+        for room in rooms {
+            crate::inbox::close_on(&mut tx, &self.clock, context, &room, member, &note).await?;
+        }
+        let epoch: i64 = sqlx::query_scalar("UPDATE candidate_members SET retired=1, epoch = CASE WHEN active=1 AND epoch < 9223372036854775807 THEN epoch+1 ELSE epoch END, active=0, device_id=NULL, native_session_id=NULL, credential_digest=NULL WHERE context_id=? AND member_id=? RETURNING epoch")
+            .bind(context).bind(member).fetch_one(&mut *tx).await?;
+        detach_on(&mut tx, context, member).await?;
+        sqlx::query("INSERT INTO candidate_identity_events(context_id,member_id,kind,epoch,reason,at_wall_ms) VALUES (?,?,'retired',?,?,?)")
+            .bind(context).bind(member).bind(epoch).bind(&reason).bind(crate::facts::wall_ms()).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+    /// Trusted administration: the member's enrollments, handoffs and retirement, in order.
+    /// Fixture binds (`bind_member`) are not identity events.
+    pub async fn identity_events(&self, context: &str, member: &str) -> Result<Vec<IdentityEvent>> {
+        valid_id(context)?;
+        valid_id(member)?;
+        let rows = sqlx::query("SELECT kind,epoch,reason,at_wall_ms FROM candidate_identity_events WHERE context_id=? AND member_id=? ORDER BY event_id")
+            .bind(context).bind(member).fetch_all(&self.pool).await?;
+        rows.iter()
+            .map(|row| {
+                let kind = match row.try_get::<String, _>("kind")?.as_str() {
+                    "enrolled" => IdentityEventKind::Enrolled,
+                    "rebound" => IdentityEventKind::Rebound,
+                    "retired" => IdentityEventKind::Retired,
+                    other => return Err(anyhow!("unknown identity event {other}")),
+                };
+                Ok(IdentityEvent {
+                    kind,
+                    epoch: row.try_get("epoch")?,
+                    reason: row.try_get("reason")?,
+                    at_wall_ms: row.try_get("at_wall_ms")?,
+                })
+            })
+            .collect()
+    }
     /// Trusted fixture administration. A removed member retains its epoch history.
     pub async fn remove_member(&self, context: &str, member: &str) -> Result<()> {
         valid_id(context)?;
@@ -147,17 +228,7 @@ impl Store {
         let changed = sqlx::query("UPDATE candidate_members SET active = 0, epoch = epoch + 1, device_id = NULL, native_session_id = NULL, credential_digest = NULL WHERE context_id = ? AND member_id = ? AND active = 1 AND epoch < 9223372036854775807 RETURNING epoch")
             .bind(context).bind(member).fetch_optional(&mut *tx).await?;
         ensure!(changed.is_some(), "member is unavailable for removal");
-        sqlx::query(
-            "UPDATE candidate_room_members SET active=0 WHERE context_id=? AND member_id=?",
-        )
-        .bind(context)
-        .bind(member)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query("UPDATE candidate_route_grants SET active=0 WHERE context_id=? AND (first_member=? OR second_member=?)")
-            .bind(context).bind(member).bind(member).execute(&mut *tx).await?;
-        sqlx::query("UPDATE candidate_batches SET state='cancelled' WHERE context_id=? AND member_id=? AND state='pending'")
-            .bind(context).bind(member).execute(&mut *tx).await?;
+        detach_on(&mut tx, context, member).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -204,11 +275,12 @@ impl Store {
     pub async fn register_member(&self, context: &str, member: &str, role: Role) -> Result<()> {
         valid_id(context)?;
         valid_id(member)?;
-        let registered = sqlx::query("INSERT INTO candidate_members(context_id, member_id, role) VALUES (?, ?, ?) ON CONFLICT(context_id, member_id) DO UPDATE SET active = 1 WHERE candidate_members.role = excluded.role RETURNING member_id")
+        // A retired identity is never reactivated (T-25); a successor needs a new member ID.
+        let registered = sqlx::query("INSERT INTO candidate_members(context_id, member_id, role) VALUES (?, ?, ?) ON CONFLICT(context_id, member_id) DO UPDATE SET active = 1 WHERE candidate_members.role = excluded.role AND candidate_members.retired = 0 RETURNING member_id")
             .bind(context).bind(member).bind(role.as_str()).fetch_optional(&self.pool).await?;
         ensure!(
             registered.is_some(),
-            "member registration conflicts with existing attributes"
+            "member registration conflicts with existing attributes or a retired identity"
         );
         Ok(())
     }
@@ -290,6 +362,24 @@ impl Store {
 }
 
 /// Validate inside the operation's transaction, never as a separate authorization snapshot.
+/// Drop a deactivated member's room access, routes and pending batches.
+/// Its connection rooms stop being active for their pairs, so a later authorized open gets a
+/// replacement instead of a room the member can no longer use (T-26).
+async fn detach_on(conn: &mut SqliteConnection, context: &str, member: &str) -> Result<()> {
+    sqlx::query("UPDATE candidate_room_members SET active=0 WHERE context_id=? AND member_id=?")
+        .bind(context)
+        .bind(member)
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("UPDATE candidate_connections SET active=0 WHERE context_id=? AND (first_member=? OR second_member=?)")
+        .bind(context).bind(member).bind(member).execute(&mut *conn).await?;
+    sqlx::query("UPDATE candidate_route_grants SET active=0 WHERE context_id=? AND (first_member=? OR second_member=?)")
+        .bind(context).bind(member).bind(member).execute(&mut *conn).await?;
+    sqlx::query("UPDATE candidate_batches SET state='cancelled' WHERE context_id=? AND member_id=? AND state='pending'")
+        .bind(context).bind(member).execute(&mut *conn).await?;
+    Ok(())
+}
+
 pub(crate) async fn validate_on(
     conn: &mut SqliteConnection,
     binding: &SessionBinding,

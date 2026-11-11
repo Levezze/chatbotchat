@@ -84,7 +84,7 @@ Each piece goes through the normal PR process (T-19).
 |---|---|---|---|
 | 1 | Skills PR | #112 skills | Question routing (T-10), the Emperor's scope (dashboard plus project conversation, outside execution), the `wip-cbc-` names (T-17), the CBC authorisation wording (T-23). |
 | 2 | Event and timing facts | #113 A | A durable event schema and first-occurrence message and recipient facts in the core, per the pilot document ("As built in #113 PR-A"). |
-| 3 | Record layer | #113, moved from #115 | Identity binding (T-25), unique peer rooms (T-26), work items with the HITL flag (T-07), atomic revisions, requests with callbacks (T-10), the outbox, and waits derived from those facts (T-27). |
+| 3 | Record layer | #113, moved from #115 | Identity binding (T-25), unique peer rooms (T-26), work items with the HITL flag (T-07), atomic revisions, requests with callbacks (T-10), the outbox, and waits derived from those facts (T-27). Planned as three PRs (R1 to R3), listed in the [record layer plan](work-records-and-external-observations.md#record-layer-plan-for-the-trial-113-2026-11-10). |
 | 4 | Dashboard skeleton | #113, moved from #116 | Work items, open requests and the outbox timeline, plus answering through a browser session (T-11, T-12). |
 | 5 | Instrumentation and report | #113 B and C | Connector instrumentation, bounded recovery, the run manifest, and the deterministic report, including the wait and prompt measurements. |
 | 6 | Trial setup | #113 | The pinned build (T-15), local skills and allowlists (T-17, T-24), the launch sheet (T-20). |

@@ -71,6 +71,19 @@ enum Command {
         #[arg(long)]
         expected_epoch: i64,
     },
+    /// Retire an identity when its session ends (T-25). Its rooms close and it never returns.
+    Retire {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        protected_db: PathBuf,
+        #[arg(long)]
+        context: String,
+        #[arg(long)]
+        member: String,
+        #[arg(long)]
+        reason: String,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -111,6 +124,27 @@ async fn main() -> anyhow::Result<()> {
             println!(
                 "{}",
                 serde_json::json!({"status":"binding-revoked","member":member,"epoch":epoch})
+            );
+            Ok(())
+        }
+        Command::Retire {
+            root,
+            protected_db,
+            context,
+            member,
+            reason,
+        } => {
+            protected_dbs.push(protected_db);
+            let sandbox = cbc_candidate::Sandbox::inspect(&root, &protected_dbs)?;
+            protect_port(sandbox.port())?;
+            let owner = owner_token(&sandbox)?;
+            let socket = sandbox.root().join("connector.sock");
+            cbc_candidate::connector::LocalOwnerClient::new(&socket, &owner)
+                .retire_member(&context, &member, &reason)
+                .await?;
+            println!(
+                "{}",
+                serde_json::json!({"status":"retired","member":member})
             );
             Ok(())
         }
