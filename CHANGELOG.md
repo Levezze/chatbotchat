@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.30.0](https://github.com/Levezze/chatbotchat/compare/v0.29.0...v0.30.0) (2026-11-11)
+
+
+### Features
+
+* **candidate:** the cost sampler and the report's Cost section (C3) ([#158](https://github.com/Levezze/chatbotchat/issues/158)) ([a0cb260](https://github.com/Levezze/chatbotchat/commit/a0cb260a0726f77f2dd608e383123faf38c432f8))
+
 ## [0.29.0](https://github.com/Levezze/chatbotchat/compare/v0.28.1...v0.29.0) (2026-11-11)
 
 
