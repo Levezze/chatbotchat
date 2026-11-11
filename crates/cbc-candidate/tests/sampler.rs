@@ -32,16 +32,28 @@ async fn a_tick_lists_candidate_processes_by_label_and_the_disk_under_the_root()
     )
     .unwrap();
     let store = Store::open(&sandbox).await.unwrap();
-    // A stand-in core: an executable named cbc-candidate, with a subcommand unique to this run.
-    // Both stand-ins live under a directory with a space, as a checkout under "Application
-    // Support" would: the rendered `ps` line cannot say where such a path ends.
+    // A stand-in core: the candidate binary itself, run through a link under a directory with a
+    // space, as a checkout under "Application Support" would be. The rendered `ps` line cannot
+    // say where such a path ends. (A system `sleep` cannot stand in: a multi-call coreutils
+    // binary dispatches on its own name, and exits when called `cbc-candidate`.) It samples a
+    // second root once an hour, so it stays up for the test.
     let bin = temp.path().join("with space/bin");
     fs::create_dir_all(&bin).unwrap();
-    symlink("/bin/sleep", bin.join("cbc-candidate")).unwrap();
-    let unique = (7000 + std::process::id() % 1000).to_string();
+    symlink(
+        env!("CARGO_BIN_EXE_cbc-candidate"),
+        bin.join("cbc-candidate"),
+    )
+    .unwrap();
+    let other = temp.path().join("other");
+    Sandbox::initialize(&other, 8993, &[temp.path().join("daily/state.db")]).unwrap();
     let core = Killed(
         Command::new(bin.join("cbc-candidate"))
-            .arg(&unique)
+            .arg("sample")
+            .arg("--root")
+            .arg(&other)
+            .arg("--protected-db")
+            .arg(temp.path().join("daily/state.db"))
+            .args(["--interval-s", "3600"])
             .stdout(Stdio::null())
             .spawn()
             .unwrap(),
@@ -117,8 +129,8 @@ async fn a_tick_lists_candidate_processes_by_label_and_the_disk_under_the_root()
             .map(|p| p.label.clone())
     };
     assert_eq!(
-        label_of(core.0.id()),
-        Some(format!("cbc-candidate {unique}"))
+        label_of(core.0.id()).as_deref(),
+        Some("cbc-candidate sample")
     );
     assert_eq!(
         label_of(router.0.id()).as_deref(),

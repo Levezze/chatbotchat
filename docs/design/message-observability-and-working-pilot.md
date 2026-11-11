@@ -783,9 +783,10 @@ at once would count every process twice.
     echoing a bad line, a tick round trip, the partial last line, CPU growth
     and PID reuse, shims summed per tick, and the whole Cost section byte for
     byte.
-  - `tests/sampler.rs`, over real processes: a symlink named `cbc-candidate`
-    to `sleep` and a Python script under `cbc-candidate/adapters/device/` are
-    both found by PID with their labels, the test process is not, and the
+  - `tests/sampler.rs`, over real processes: the candidate binary run through
+    a link, sampling a second root, and a Python script under
+    `cbc-candidate/adapters/device/`, both under a directory whose name has a
+    space, are found by PID with their labels, the test process is not, and the
     file has no path or command line, mode 0600 in a 0700 directory. The
     command run for one tick prints both status lines.
   - `tests/report.rs`: a sampler file with ticks before, inside and after the
