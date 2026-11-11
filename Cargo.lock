@@ -266,7 +266,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "axum",
  "clap",
+ "hyper",
+ "hyper-util",
  "libc",
  "rand 0.8.6",
  "serde",

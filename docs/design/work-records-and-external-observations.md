@@ -414,6 +414,100 @@ Mutation checks:
 - A page cap of 10 fails the full-page wire test.
 - Accepting unknown fields fails the wire-form unit test.
 
+### D1 as built: dashboard sign-in and the pending page
+
+D1 is the first slice of the dashboard skeleton (T-11, T-12). It serves a plain,
+read-only page from the core, reached only through a browser session that the
+user's own command starts. Answering from the page is D2; work items and the
+outbox timeline are D1b.
+
+- **Where it runs.** `cbc-candidate serve --dashboard` also listens on
+  `127.0.0.1` at the candidate port. The dashboard is opt-in, so a core started
+  without the flag opens no TCP port at all.
+  - The listener must be on the IPv4 loopback address; any other address is
+    refused before the core starts.
+  - The page reads through the same trusted owner reads as the owner route, on
+    the core's own `Store`, so no second process opens the database.
+- **Sign-in (T-12).**
+  - `cbc-candidate dashboard` asks the running core, over the owner route, for
+    a single-use 128-bit login code that lasts 30 seconds. It then opens
+    `http://127.0.0.1:<port>/login?code=…` in the default browser.
+  - If no browser opens, the command fails and does not print the link, since
+    anyone who reads the link can sign in as the user. The code then expires
+    unused.
+  - `/login` spends the code for a 256-bit session and answers with a redirect
+    to `/` that sets the cookie `HttpOnly; SameSite=Strict; Path=/`, so the
+    code leaves the address bar. A spent, expired or unknown code gets a 403.
+  - The cookie is named `cbc_dashboard_<port>`. Browsers scope cookies by
+    host, not port, so with one shared name two cores on one machine would
+    overwrite each other's session. A core accepts only the cookie for its own
+    port.
+  - Codes and sessions exist only in the core's memory, and only as SHA-256
+    digests. Nothing is written to SQLite or any file, and a restart signs
+    every browser out. A test signs in, then scans every file in the state
+    directory, database bytes included, for both secrets.
+  - Sessions last 12 hours. That is a proposed default awaiting the user's
+    review. At most 8 codes and 16 sessions are kept; when full, the one
+    nearest expiry makes room.
+  - The code does reach the browser through the opener's command line, which
+    another process of the same user could see for the moment it runs. That
+    user can already read the owner key, so this widens nothing.
+  - Only the user runs `dashboard`; an agent running it would be minting the
+    user's consent. It goes on the launch sheet, and its success path is never
+    run by a test, because it opens the user's real browser.
+- **Hostile text.** Every question, member ID and context ID is agent text.
+  - The page has no JavaScript, and every value goes through one escape
+    function for `& < > " '`.
+  - Every response carries `Content-Security-Policy: default-src 'none';
+    style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none';
+    base-uri 'none'`, plus `Referrer-Policy: no-referrer`,
+    `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. That
+    includes errors, redirects and the 404.
+  - Links carry IDs URL-encoded and then escaped.
+- **Host check.** A request whose `Host` is anything but `127.0.0.1:<port>` is
+  refused with 421 before any route runs, signed in or not, so a rebound DNS
+  name can't read the page. A request with two `Host` headers, or an
+  absolute-form target naming another authority, is refused the same way. The
+  `Origin` check for posted answers comes with D2.
+- **The page.** Each context gets a panel with one page of its waiting
+  requests: open or relayed, at most `MAX_REQUEST_PAGE`. A full page links to
+  the next one (`/?context=…&after=…`). A page lists at most 20 contexts, in
+  ID order; when more follow, it links to the next (`/?contexts_after=…`), so
+  no context is out of reach and no link leads to an empty page.
+- **Connections.** The dashboard runs its own accept loop rather than
+  `axum::serve`.
+  - Each connection is a task the loop owns. On shutdown the loop stops
+    accepting and aborts every connection, so a browser that stopped reading
+    can't hold the store open. The core stops the dashboard with its socket
+    listener and still allows 5 seconds as a backstop.
+  - At most 16 connections are open at once; past that a new one is closed
+    unanswered. A connection that doesn't finish its request headers within
+    10 seconds is closed.
+  - A transient accept failure backs off as the socket listener's does; any
+    other stops the dashboard.
+  - If the dashboard stops early, the core logs it at once and returns the
+    error when it exits.
+
+Mutation checks: each of the following fails at least one test.
+- Dropping the escape.
+- Dropping the CSP header or the `nosniff` header.
+- Skipping the Host check, the authority check, or the check for a second
+  `Host` header.
+- Letting a code be spent twice, or ignoring a code's or a session's expiry.
+- Dropping `HttpOnly`.
+- Treating every request as signed in, or deriving the session from the code.
+  The first run missed the latter, because the test only checked that the
+  two differed; it now checks that the session doesn't contain the code.
+- Dropping the next-page link or the more-contexts link.
+- Accepting the cookie of another port.
+- Waiting for connections at shutdown instead of aborting them.
+- Skipping the loopback check.
+- Ignoring `--dashboard` in `serve`.
+- Lifting the code cap.
+
+Not covered by a test: the 16-connection cap and the 10-second header
+timeout. Both are plain settings of the accept loop.
+
 ## Registration, controls and eligible merge
 
 A Chapter Master registers its work item (assignment summary, branch/worktree,
@@ -521,5 +615,7 @@ no model wake. Core due policy is shared with the bounded #113 recovery path;
 the connector does not maintain a competing business schedule.
 
 Implementation belongs to the subsequent work-map/dashboard stages after the
-working messaging trial. No dashboard, provider integration, skill or service is
-implemented or activated by this requirements update.
+working messaging trial. The trial's dashboard skeleton (T-11, T-12) is the
+exception, built from D1 onward (see "D1 as built" above). No provider
+integration, skill or service is implemented or activated by this
+requirements update.

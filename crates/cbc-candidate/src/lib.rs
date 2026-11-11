@@ -1,6 +1,7 @@
 //! Candidate-only runtime boundary. No legacy database connection or network client lives here.
 pub mod bindings;
 pub mod connector;
+pub mod dashboard;
 pub mod enrollment;
 pub mod facts;
 pub mod inbox;
