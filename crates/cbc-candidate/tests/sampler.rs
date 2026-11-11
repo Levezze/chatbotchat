@@ -22,11 +22,19 @@ fn plain_sample_name(name: &str) -> bool {
         .is_some_and(|ms| !ms.is_empty() && ms.bytes().all(|b| b.is_ascii_digit()))
 }
 
+const DEBUG: &str =
+    r#"{"schema":1,"defaults":{"retry_initial_ms":1000,"retry_max_ms":30000},"log_level":"debug"}"#;
+const NORMAL: &str = r#"{"schema":1,"defaults":{"retry_initial_ms":1000,"retry_max_ms":30000},"log_level":"normal"}"#;
+
 fn write_settings(root: &Path, text: &str) {
+    write_settings_file(root, "runtime-settings.json", text);
+}
+
+fn write_settings_file(root: &Path, name: &str, text: &str) {
     let temporary = root.join("settings.tmp");
     fs::write(&temporary, text).unwrap();
     fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600)).unwrap();
-    fs::rename(temporary, root.join("runtime-settings.json")).unwrap();
+    fs::rename(temporary, root.join(name)).unwrap();
 }
 
 struct Killed(std::process::Child);
@@ -203,8 +211,10 @@ async fn each_tick_is_labelled_with_the_live_log_level() {
     .unwrap();
     let root = sandbox.root().to_path_buf();
     let (found, path) = tokio::sync::oneshot::channel::<PathBuf>();
-    // Switches the level between ticks: debug after the first line, an invalid file after the
-    // second. The core keeps its last accepted settings on an invalid file, so the label does too.
+    // Switches the level between ticks: debug after the first line, then an invalid file. On an
+    // invalid file the core keeps its last accepted settings, so the label follows that
+    // checkpoint as it stands each tick: debug once the core accepted debug, normal when the
+    // checkpoint says normal, whatever the previous label was.
     let switcher = tokio::spawn(async move {
         let path = path.await.unwrap();
         let lines = |n: usize| {
@@ -221,19 +231,19 @@ async fn each_tick_is_labelled_with_the_live_log_level() {
             }
         };
         lines(1).await;
-        write_settings(
-            &root,
-            r#"{"schema":1,"defaults":{"retry_initial_ms":1000,"retry_max_ms":30000},"log_level":"debug"}"#,
-        );
+        write_settings(&root, DEBUG);
         lines(2).await;
+        write_settings_file(&root, "runtime-settings.last-good.json", DEBUG);
         write_settings(&root, "{");
+        lines(3).await;
+        write_settings_file(&root, "runtime-settings.last-good.json", NORMAL);
     });
     let mut file = None;
     sample(
         &sandbox,
         SampleArgs {
             interval: Duration::from_millis(400),
-            ticks: Some(3),
+            ticks: Some(4),
         },
         |p| {
             file = Some(p.to_path_buf());
@@ -249,5 +259,8 @@ async fn each_tick_is_labelled_with_the_live_log_level() {
         .lines()
         .map(|l| serde_json::from_str::<Tick>(l).unwrap().mode)
         .collect();
-    assert_eq!(modes, [Mode::Normal, Mode::Debug, Mode::Debug]);
+    assert_eq!(
+        modes,
+        [Mode::Normal, Mode::Debug, Mode::Debug, Mode::Normal]
+    );
 }

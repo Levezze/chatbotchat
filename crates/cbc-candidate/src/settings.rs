@@ -453,14 +453,14 @@ fn settings_lock(root: &Path) -> Result<fs::File> {
 
 /// The log level in the settings file as it stands, for an observer such as the sampler: no lock,
 /// no writes. None when the file is missing or invalid; the core then keeps its last accepted
-/// settings, and an observer should keep the level it last saw.
+/// settings, which `accepted_log_level` reads.
 pub fn observed_log_level(root: &Path) -> Option<crate::sampler::Mode> {
     read_settings(&root.join(SETTINGS))
         .ok()
         .map(|s| s.log_level)
 }
 
-/// The level in the last accepted settings, for an observer that has seen none yet.
+/// The level in the last accepted settings (the last-good checkpoint), as it stands.
 pub fn accepted_log_level(root: &Path) -> Option<crate::sampler::Mode> {
     read_settings(&root.join(LAST_GOOD))
         .ok()

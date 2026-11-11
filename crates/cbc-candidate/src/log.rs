@@ -129,16 +129,21 @@ impl LogFile {
         written.is_ok()
     }
 
+    /// Opens without following a link and without blocking (a FIFO with no reader would hang
+    /// the open), then keeps only a private regular file with no other name: a hardlink to a
+    /// file elsewhere is refused, so the log never writes outside its directory.
     fn reopen(&mut self) -> std::io::Result<()> {
         let file = fs::OpenOptions::new()
             .append(true)
             .create(true)
             .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(&self.path)?;
         let meta = file.metadata()?;
-        if !meta.is_file() || meta.mode() & 0o077 != 0 {
-            return Err(std::io::Error::other("the log file must be a private file"));
+        if !meta.is_file() || meta.mode() & 0o077 != 0 || meta.nlink() != 1 {
+            return Err(std::io::Error::other(
+                "the log file must be a private file with one name",
+            ));
         }
         self.size = meta.len();
         self.file = Some(file);
@@ -321,6 +326,18 @@ pub fn reply(context: &str, member: &str, reply: &serde_json::Value) {
     );
 }
 
+/// One debug line per rejected core request: its operation and identifiers, never the error's
+/// text, which can carry names a log must not hold.
+pub fn rejected(context: &str, member: &str, operation: &str) {
+    tracing::debug!(
+        event = "request",
+        context,
+        member,
+        kind = "error",
+        reason = operation
+    );
+}
+
 /// Installs the core's logger for `serve`: `<root>/logs/core.jsonl`, at the settings' level.
 pub fn init(root: &Path, run: Option<String>) -> Result<()> {
     let file = LogFile::open(&root.join(LOG_DIR), "core.jsonl", MAX_BYTES, KEEP)?;
@@ -466,6 +483,46 @@ mod tests {
         assert_eq!(got[0]["count"], 2);
         assert_eq!(got[0]["run"], serde_json::Value::Null);
         assert_eq!(got[1]["event"], "kept");
+    }
+
+    #[test]
+    fn a_hardlink_at_the_log_path_is_refused_and_its_target_never_written() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("logs");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let elsewhere = temp.path().join("elsewhere");
+        fs::write(&elsewhere, b"").unwrap();
+        fs::set_permissions(&elsewhere, fs::Permissions::from_mode(0o600)).unwrap();
+        let path = dir.join("core.jsonl");
+        fs::hard_link(&elsewhere, &path).unwrap();
+        let mut file = LogFile::open(&dir, "core.jsonl", MAX_BYTES, 2).unwrap();
+        assert!(!file.append(b"lost\n"));
+        assert_eq!(fs::read(&elsewhere).unwrap(), b"");
+        fs::remove_file(&path).unwrap();
+        assert!(file.append(b"kept\n"));
+        assert_eq!(fs::read(&path).unwrap(), b"kept\n");
+        assert_eq!(fs::read(&elsewhere).unwrap(), b"");
+    }
+
+    #[test]
+    fn a_fifo_at_the_log_path_is_refused_without_blocking() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("logs");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.join("core.jsonl");
+        let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut file = LogFile::open(&dir, "core.jsonl", MAX_BYTES, 2).unwrap();
+            let _ = done.send(file.append(b"lost\n"));
+        });
+        let appended = finished
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("opening a FIFO with no reader must not block the log");
+        assert!(!appended);
     }
 
     #[test]

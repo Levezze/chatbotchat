@@ -120,12 +120,15 @@ class EventLog:
             return False
 
     def _reopen(self):
+        """Never through a link and never blocking (a FIFO with no reader would hang the open);
+        only a private regular file with one name is kept, so a hardlink to a file elsewhere
+        is refused and the log never writes outside its directory."""
         fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
-                     | os.O_CLOEXEC, 0o600)
+                     | os.O_NONBLOCK | os.O_CLOEXEC, 0o600)
         try:
             st = os.fstat(fd)
-            if not stat.S_ISREG(st.st_mode) or st.st_mode & 0o077:
-                raise OSError("the log file must be a private file")
+            if not stat.S_ISREG(st.st_mode) or st.st_mode & 0o077 or st.st_nlink != 1:
+                raise OSError("the log file must be a private file with one name")
         except OSError:
             os.close(fd)
             raise

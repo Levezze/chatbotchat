@@ -105,6 +105,28 @@ class DeviceTests(unittest.TestCase):
         self.assertNotIn(grant["token"], path.read_text())
         self.assertNotIn("ref-secret-1", path.read_text())
 
+    def test_a_codex_queue_delivery_reaches_the_router_log_with_its_sequence(self):
+        # The real callback the router builds, writing through the router's own log: a field
+        # the log's allowlist does not know would be dropped silently.
+        args = self.args()
+        args.log_dir = str(self.root / "logs")
+        router = device.DeviceRouter(args)
+        self.addCleanup(self.cleanup_router, router)
+        exits = iter([0, 3])
+        callback = device.codex.QueueDelivery(
+            "/usr/local/bin/codex", SESSION, router.event,
+            runner=lambda *_args, **_kwargs: SimpleNamespace(returncode=next(exits)))
+        self.assertTrue(callback(HINT))
+        callback.accepted = None
+        self.assertFalse(callback(HINT))
+        path = self.root / "logs" / "router-events.jsonl"
+        lines = [json.loads(line) for line in path.read_text().splitlines()]
+        queued = [line for line in lines if line["event"].startswith("codex_queue")]
+        self.assertEqual([(q["event"], q.get("seq"), q.get("reason"), q.get("outcome"))
+                          for q in queued],
+                         [("codex_queued", 7, None, None),
+                          ("codex_queue_unavailable", None, "exit", "3")])
+
     def test_private_profile_maps_every_native_session_to_one_host(self):
         core, bindings, targets = device.load_targets(str(self.path))
         self.assertEqual(core, self.profile["core_socket"])
@@ -1282,7 +1304,7 @@ class CodexQueueTests(unittest.TestCase):
         self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
         self.assertEqual(kwargs["stderr"], subprocess.DEVNULL)
         self.assertNotIn("shell", kwargs)
-        self.assertEqual(events, [("codex_queued", {"sequence": 7})])
+        self.assertEqual(events, [("codex_queued", {"seq": 7})])
 
     def test_unavailable_command_is_failure_not_fake_delivery(self):
         for outcome in (OSError("sensitive path"), subprocess.TimeoutExpired("private", 1), 1):

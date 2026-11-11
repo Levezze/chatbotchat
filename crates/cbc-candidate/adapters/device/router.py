@@ -382,7 +382,7 @@ class DeviceRouter(claude.Router):
                 kind = reply.get("type")
                 self.event("hello", member=binding["member"],
                            pending=kind == "binding_status" and reply["first_unread_sequence"] is not None,
-                           reply=kind)
+                           outcome=kind)
                 if kind != "binding_status":
                     return {"error": str(reply.get("message", "core error"))}
                 return {"ok": True}

@@ -556,6 +556,9 @@ converts that log rather than adding a second one.
   `<log-dir>/router-events.jsonl`. Each is mode 0600, opened with
   `O_NOFOLLOW` in a 0700 directory, and a directory open to others is refused
   at start.
+  - The open is non-blocking, so a FIFO at the log's path cannot hang it. Only
+    a private regular file with exactly one link is kept: a hardlink to a file
+    elsewhere is refused, so the log never writes outside its directory.
   - Each file is opened when its log is created, so later descriptor pressure
     cannot cost it a line; if that first open fails, every write retries.
   - At 8 MiB the file rotates to `name.1`, keeping three older files.
@@ -583,34 +586,43 @@ converts that log rather than adding a second one.
   context and outcome, with the batch's tag as `reference`. A request is
   logged only when debug held at both its
   start and its end, so the request that reads a level change is never
-  logged. At any level: `accept_unavailable` and
+  logged. A rejected request gives a `request` line too, with `kind` `error`
+  and the operation's name as `reason`; the error's text is never logged,
+  since it can hold names. At any level: `accept_unavailable` and
   `dashboard_accept_unavailable` (warn, with the error kind) and
   `dashboard_stopped` (error, without its text, which may hold a path).
   - In the driver, every existing event, renamed onto the allowlist: `n` to
     `count`, `error` and the feed's `reply` to `reason`, a handled reply's
-    `reply` to `outcome`, `sequence` to `seq`, `retry_in` seconds to
-    `retry_ms`, and `listening` now gives a `count` of bindings rather than a
+    `reply` to `outcome` (in both routers' `hello`), `sequence` to `seq`
+    (including the Codex queue's `codex_queued`), a failed queue command's exit
+    `code` to `outcome`, `retry_in` seconds to `retry_ms`, and `listening` now gives a `count` of bindings rather than a
     PID and member list. At debug, one `core_call` line per core round trip:
     the operation as `kind`, the reply type as `outcome`, member, context, and
     the reply's seq, batch tag and item count where present.
 - **Not converted.** The Claude adapter's per-chat `adapter-*.jsonl` files and
   the Codex adapter keep their own formats. They are diagnostics for one
-  chat, not the run.
+  chat, not the run. The Codex queue delivery the device router runs is not
+  part of that adapter: it writes through the router's log.
 - **The sampler.** Each tick is labelled with the level in
   `runtime-settings.json` when the tick is taken, read without a lock or a
-  write. If the file is invalid the tick keeps the previous label, as the core
-  keeps its last accepted settings; before any valid read the label comes from
-  the last accepted settings, else `normal`. `sample --mode` is gone, and the
+  write. If the file is invalid the core keeps its last accepted settings, so
+  the tick reads the last-good checkpoint as it stands at that tick. Only if
+  neither file reads does the tick keep the previous label; before any read
+  the label comes from the last accepted settings, else `normal`. `sample --mode` is gone, and the
   file is `samples-<wall_ms>.jsonl`: one sampler can cover both levels.
 - **Tests.**
   - Core unit (`src/log.rs`): the header and allowlist, debug only while the
     level is debug, rotation keeping older files, a dropped line counted and
-    reported (a link at the log's path is refused, not followed), the request
-    line by identifiers only, and a private file in a refused shared directory.
+    reported (a link at the log's path is refused, not followed), a hardlink
+    at the log's path refused with its target left empty, a FIFO refused
+    within five seconds, the request line by identifiers only, and a private
+    file in a refused shared directory.
   - `tests/logs.rs`, a real `serve --run trial-1`: no request lines at normal;
     after switching to debug the switching request is not logged and the next
     ones are, with their kinds, member, count, run, instance and component;
-    switching back adds none; neither token nor any body is in the file.
+    a send to a missing room gives a `request` line with `kind` `error`,
+    `reason` `send` and the member; switching back adds none; neither token
+    nor any body is in the file.
   - `tests/settings.rs`: a file without `log_level` keeps its pinned revision
     and reads normal; the level changes live and an unknown value keeps the
     last good one.
@@ -618,21 +630,31 @@ converts that log rather than adding a second one.
     its `accept_unavailable` warning.
   - `adapters/shared/test_log.py`: the same header and allowlist, parity with
     the Rust list, debug filtering and an ignored unknown level, rotation, a
-    counted and reported drop, a write that never raises, private files and a
-    refused shared directory, and the run id rule.
+    counted and reported drop, a hardlink and a FIFO refused as in Rust, a
+    write that never raises, private files and a refused shared directory, the
+    run id rule, and a scan of every adapter source: each field passed to an
+    `event` call must be on the allowlist, since the log drops an unknown one
+    without an error.
   - `adapters/claude/test_router.py`: a real router at normal writes v1 lines
     and no `core_call`; restarted with `--run` against a core reporting debug,
     a send gives one `core_call` line with member, outcome and seq, a 0600
     file, no token and no body; a bad `--run` exits 2.
   - `adapters/device/test_router.py`: two status reads on the recovery path
     set debug then normal, giving exactly one `core_call` line, a debug event
-    after the switch back is not written, and no token is in the file.
-  - `tests/sampler.rs`: a sampler switched to debug after its first tick and
-    given an invalid file after its second labels its ticks normal, debug,
-    debug.
-- **Changed tests.** Four assertions changed with the contract they check, not
+    after the switch back is not written, and no token is in the file. A real
+    Codex queue callback writing through the router's log gives
+    `codex_queued` with `seq` 7, and a failed command gives
+    `codex_queue_unavailable` with `reason` `exit` and `outcome` `3`.
+  - `tests/sampler.rs`: a sampler switched to debug after its first tick,
+    then given an invalid file with a last-good checkpoint of debug, then that
+    checkpoint changed to normal, labels its four ticks normal, debug, debug,
+    normal.
+- **Changed tests.** Six assertions changed with the contract they check, not
   to make a test pass: the router's `hello` event names its reply `outcome`
-  rather than `reply`; `tests/logs.rs` requires the request line's
+  rather than `reply`; the Codex queue test's captured event carries `seq`
+  rather than `sequence`; the sampler test now expects the checkpoint's level
+  on an invalid file rather than the previous label, and gained a fourth tick
+  that tells the two apart; `tests/logs.rs` requires the request line's
   `reference` to be the batch tag, and the raw reference to be absent, where it
   had required any string; the sampler file name no longer carries a mode, and its
   ticks without a settings change read normal; the report's debug-missing
@@ -640,6 +662,16 @@ converts that log rather than adding a second one.
   never raises" unit test now builds the new log, removes its directory and
   writes, because the old one set an attribute that no longer exists and would
   have passed without writing anything.
+- **Review fixes.** Codex's review of the first B2 head (7825537) found five
+  defects. Each got a failing test before its fix:
+  - a hardlink at a log's path let the log append to the linked file;
+  - a FIFO at a log's path hung the open;
+  - a rejected core request was not logged at debug;
+  - on an invalid settings file, the sampler kept its previous label rather
+    than the level the core actually kept;
+  - the Codex queue's `codex_queued` named its field `sequence`, which the
+    allowlist dropped. The new scan found two more dropped fields: the device
+    router's `hello` `reply` and the queue's exit `code`.
 
 ### C: manifest, report, sampler
 

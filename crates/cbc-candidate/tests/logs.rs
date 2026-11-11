@@ -131,6 +131,16 @@ async fn a_served_core_logs_requests_only_while_debug_and_never_a_token_or_a_bod
         logged[1]["reference"],
         cbc_candidate::facts::batch_tag(batch.reference_for_adapter())
     );
+    // A rejected request is logged too, by its operation; the error's text is never logged.
+    assert!(a
+        .send("no-such-room", "k2c", "private body rejected")
+        .await
+        .is_err());
+    let logged = requests(&root);
+    let rejected = logged.last().unwrap();
+    assert_eq!(rejected["kind"], "error");
+    assert_eq!(rejected["reason"], "send");
+    assert_eq!(rejected["member"], "alice");
     for line in &logged {
         assert_eq!(line["v"], 1);
         assert_eq!(line["level"], "debug");

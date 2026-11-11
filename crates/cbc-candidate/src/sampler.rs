@@ -399,8 +399,9 @@ pub async fn sample(
 ) -> Result<u64> {
     ensure!(!args.interval.is_zero(), "interval must be positive");
     let (mut file, path) = create_sample_file(sandbox.root())?;
-    // The label follows the settings file, read each tick; an invalid file keeps the last level
-    // seen, as the core keeps its last accepted settings.
+    // The label follows the settings file, read each tick. On an invalid file the core keeps its
+    // last accepted settings, so the label follows that checkpoint as it stands at the tick; only
+    // when neither file reads does it keep the last level seen.
     let mut mode = crate::settings::accepted_log_level(sandbox.root()).unwrap_or_default();
     started(&path);
     let interval_ms = u64::try_from(args.interval.as_millis())?;
@@ -415,7 +416,8 @@ pub async fn sample(
         }
         let (root, database) = (sandbox.root().to_path_buf(), sandbox.database_path());
         let (processes, disk, level) = tokio::task::spawn_blocking(move || -> Result<_> {
-            let level = crate::settings::observed_log_level(&root);
+            let level = crate::settings::observed_log_level(&root)
+                .or_else(|| crate::settings::accepted_log_level(&root));
             Ok((read_processes(&root)?, disk(&root, &database)?, level))
         })
         .await??;

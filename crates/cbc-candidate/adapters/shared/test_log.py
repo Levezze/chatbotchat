@@ -1,4 +1,5 @@
 """The driver's structured log (B2): schema v1, shared with the core's log."""
+import ast
 import importlib.util
 import json
 import os
@@ -6,6 +7,7 @@ import pathlib
 import shutil
 import stat
 import tempfile
+import threading
 import unittest
 
 spec = importlib.util.spec_from_file_location("log", pathlib.Path(__file__).with_name("log.py"))
@@ -58,6 +60,22 @@ class EventLogTests(unittest.TestCase):
         rust = {name.strip().strip('"') for name in listed.split(",") if name.strip()}
         self.assertEqual(rust, set(log.FIELDS))
 
+    def test_every_field_an_adapter_logs_is_on_the_allowlist(self):
+        # The log drops a field it does not know, so a misnamed one vanishes without an error.
+        adapters = pathlib.Path(__file__).parents[1]
+        unknown = []
+        for source in sorted(adapters.rglob("*.py")):
+            if source.name.startswith("test_"):
+                continue
+            for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "event") or (
+                        isinstance(node, ast.Call) and getattr(node.func, "id", None) == "event"):
+                    unknown += [f"{source.relative_to(adapters)}:{node.lineno} {k.arg}"
+                                for k in node.keywords
+                                if k.arg and k.arg != "level" and k.arg not in log.FIELDS]
+        self.assertEqual(unknown, [])
+
     def test_debug_lines_are_written_only_while_the_level_is_debug(self):
         events = self.open()
         events.write("debug", "core_call", {"count": 1})
@@ -98,6 +116,31 @@ class EventLogTests(unittest.TestCase):
         self.assertEqual([l["event"] for l in got], ["log_dropped", "kept"])
         self.assertEqual((got[0]["level"], got[0]["count"]), ("warn", 2))
         self.assertIsNone(got[0]["run"])
+
+    def test_a_hardlink_at_the_log_path_is_refused_and_its_target_never_written(self):
+        os.mkdir(self.dir, 0o700)
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        fd = os.open(elsewhere, os.O_WRONLY | os.O_CREAT, 0o600)
+        os.close(fd)
+        os.link(elsewhere, self.path)
+        events = self.open()
+        events.write("info", "lost", {"seq": 1})
+        self.assertEqual(os.path.getsize(elsewhere), 0)
+        os.unlink(self.path)
+        events.write("info", "kept", {"seq": 2})
+        self.assertEqual(os.path.getsize(elsewhere), 0)
+        self.assertEqual([l["event"] for l in lines(self.path)], ["log_dropped", "kept"])
+
+    def test_a_fifo_at_the_log_path_is_refused_without_blocking(self):
+        os.mkdir(self.dir, 0o700)
+        os.mkfifo(self.path, 0o600)
+        done = threading.Event()
+
+        def run():
+            self.open().write("info", "lost", {"seq": 1})
+            done.set()
+        threading.Thread(target=run, daemon=True).start()
+        self.assertTrue(done.wait(5), "opening a FIFO with no reader must not block the log")
 
     def test_a_write_never_raises(self):
         events = self.open()
