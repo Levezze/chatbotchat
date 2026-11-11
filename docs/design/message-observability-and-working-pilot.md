@@ -270,8 +270,8 @@ The trial report template (section 8 of the
 [working trial protocol](working-trial-protocol.md)) decides what B and C must
 build. Each line of the template is listed here with the record that feeds it,
 whether that record exists, and what fills the gap. Anything with no record is
-built, marked `unknown`, or taken from the user's tally in the manifest. It is
-never estimated.
+built, marked `unknown`, or taken from the user's tally file. It is never
+estimated.
 
 | Report line | Source | Exists? | Gap and owner |
 |---|---|---|---|
@@ -280,14 +280,14 @@ never estimated.
 | Wake latency: commit to first activity | the member's first non-transport core operation after receipt | no | B1: activity facts |
 | Waits: user, Primarch, another Chapter Master | open requests by owner (R3) | yes | none |
 | Waits: delivery | committed but unreceipted items | yes | none |
-| Waits: ready but idle | receipt to first activity, per recipient | no | B1: activity facts |
+| Waits: ready but idle | receipt to first activity, per recipient | partial | B1 built the activity facts; holds (#114) would say whether something else blocked the member |
 | Waits: human review, CI | PR observations | no | `unknown` in trial 1; #115 builds the observer |
 | Waits: resource | holds (#114) | no | `unknown` in trial 1 |
-| Approval prompts | host events are not exposed to CBC | no | the user's tally, recorded in the manifest |
-| Autonomy: merges without a Primarch yes | work item revisions and requests | partial | C counts merges from work items; the rest are trial-manager findings |
+| Approval prompts | host events are not exposed to CBC | no | the user's tally, a file of its own given to the report |
+| Autonomy: merges without a Primarch yes | work events | partial | C2 counts merges from work events; whether each had a Primarch yes is a trial-manager finding |
 | Rooms and identity: duplicates, identity changes | peer room and identity records (R1) | yes | none |
 | Rooms and identity: legacy skills loaded | session transcripts | no | the trial manager's check, in the manifest |
-| Primarch: interventions, turns per hour | core operations by the Primarch | partial | C counts the Primarch's core operations; turns are not observable |
+| Primarch: interventions, turns per hour | items the Primarch sent | partial | C2 counts the CBC items each repo lead sent; turns and interventions are not observable |
 | Cost: CPU, RSS, disk, normal versus debug | process sampling | no | C: a sampler run beside the core and driver |
 | Manifest, sha256 | none | no | C: the manifest writer |
 
@@ -609,3 +609,77 @@ snapshot that the running core writes on the owner's request.
 - **Review fixes.** Codex's first review of #152 found three P2s, each fixed
   test-first: the root alias above, the build taken from the calling binary
   instead of the core, and the ambiguous tally keys.
+
+### C2 as built: the report
+
+`cbc-candidate report --root … --protected-db … --manifest M --snapshot END
+[--from MS] [--until MS] [--tally T]` prints the section 8 template to stdout.
+`cbc-candidate snapshot` takes END from the running core. C3 is now only the
+sampler and the Cost section it feeds.
+
+- **Inputs.** The manifest and tally are read with the same input checks as
+  other documents. The report refuses:
+  - a manifest whose baseline snapshot is not a candidate snapshot, or whose
+    bytes no longer match the manifest's sha256;
+  - an end snapshot taken before the baseline;
+  - a window ending after the end snapshot, which cannot show anything later;
+  - a tally naming a seat the end snapshot lacks, or an unknown kind.
+- **Window.** Defaults to the baseline snapshot's time through the end
+  snapshot's time, both from the records (the end time from the file name the
+  core gave it). Both ends are inclusive, in wall milliseconds.
+- **State at `until`.** Taken from each fact's own timestamp, never from a state
+  column, which shows the moment the snapshot was taken. A request closes at
+  its first answer on any channel (a relay ends the asker's wait, as in
+  `waits_now`) or at its withdrawal event's commit; a receipt or activity
+  after `until` counts as absent. A test cuts one end snapshot at three points
+  and gets three different reports.
+- **Waits.** Wall time, the one timeline every source shares, clipped to the
+  window; an interval still open at `until` is marked open. Per member and
+  cause: count, open, total, n/median/p90/max by nearest rank, and the share of
+  the window covered by the union of its intervals. Causes come from the
+  request's owner kind and the owner's role, delivery from commit to receipt,
+  and ready but idle from receipt to first activity. Then each partial or
+  unknown cause with what it lacks, and the ten longest waits, ordered by
+  duration, member and ID.
+- **Delivery.** Expected recipients of items committed in the window:
+  committed, receipted by `until`, and pending split into never offered and
+  offered but not receipted. Failed prints missing: no record says delivery
+  failed. Wake attempts reported in the window, by kind, accepted and failed
+  by class.
+- **Wake latency.** Per host profile, commit to wake accepted and commit to
+  first activity. Monotonic time when both stamps come from one core instance,
+  wall time otherwise, and the latter are counted as estimates.
+- **Approval prompts.** From the tally file,
+  `{"context":{"member":{"cbc":n,"native_setup":n,"native_refusal":n,"other":n}}}`,
+  nested because IDs may contain `/`. A kind absent from the file prints
+  missing. The file's sha256 goes in the header.
+- **Autonomy.** Merges are counted from work events whose revision moved the
+  item to `merged`, once per revision; an item with no report room is not
+  seen. Whether a merge had a Primarch yes, routine permission messages and
+  go-ahead requests print missing.
+- **Rooms and identity.** Duplicate peer rooms: per unordered pair, chain heads
+  (rooms that supersede none) introduced by `until`, beyond the first. Rebinds
+  in the window are listed; enrolments and retirements counted. Legacy skills
+  print missing.
+- **Primarch.** CBC items each repo lead sent in the window, as a proxy only;
+  interventions and turns print missing.
+- **Header.** Trial, build commit, window, and the manifest, baseline, end
+  snapshot and tally by file name and sha256. No absolute path or PID appears,
+  because the report goes into the public run log. Result, Phase 1, Outcome,
+  Findings and Changes print missing for the trial manager to write.
+- **Determinism.** No clock is read; every query has a total order; the text is
+  built by one pure function from loaded rows. Loading (`Facts::load`) is kept
+  apart from rendering so the render can be tested on hand-built rows. The
+  module follows that split: `src/report/facts.rs` loads, `render.rs` prints,
+  and `mod.rs` holds the window, the wait derivation, the tally and the
+  input checks.
+- **Tests.**
+  - Unit: nearest-rank percentiles, union of overlapping and touching
+    intervals, clipping at both edges, state at `until`, unclassified owners,
+    monotonic versus wall latency, the merge filter, the tally format, and the
+    whole template byte for byte from hand-built facts.
+  - `tests/report.rs`, over real snapshots: the three-cut test above, a
+    byte-identical repeat with no absolute path, the tally lines, and each
+    refusal. At the baseline cut, a wait that began before the window (the
+    lead's receipt of the room introduction during setup) is carried in,
+    clipped to the window and shown open, rather than dropped.

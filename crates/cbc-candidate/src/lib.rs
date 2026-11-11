@@ -8,6 +8,7 @@ pub mod facts;
 pub mod inbox;
 pub mod native_target;
 pub mod owner;
+pub mod report;
 pub mod requests;
 pub mod settings;
 pub mod store;

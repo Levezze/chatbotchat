@@ -52,13 +52,15 @@ fn each_cause_states_whether_the_records_carry_it() {
             WaitCause::User | WaitCause::ChapterMaster | WaitCause::Delivery => {
                 assert_eq!(derivation, Derivation::Known, "{cause:?}")
             }
-            WaitCause::HumanReview | WaitCause::Primarch => {
+            // C2: B1's activity facts give receipt-to-first-activity; whether anything else
+            // blocked the member still needs holds (#114).
+            WaitCause::HumanReview | WaitCause::Primarch | WaitCause::ReadyIdle => {
                 assert!(
                     matches!(derivation, Derivation::Partial { .. }),
                     "{cause:?}"
                 )
             }
-            WaitCause::Resource | WaitCause::Ci | WaitCause::ReadyIdle => {
+            WaitCause::Resource | WaitCause::Ci => {
                 assert!(
                     matches!(derivation, Derivation::Unknown { .. }),
                     "{cause:?}"

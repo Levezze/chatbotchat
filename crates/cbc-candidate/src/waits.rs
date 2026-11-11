@@ -75,8 +75,8 @@ impl WaitCause {
             Self::Ci => Derivation::Unknown {
                 needs: "PR observations with check state on the current head",
             },
-            Self::ReadyIdle => Derivation::Unknown {
-                needs: "acted-on facts (#113 PR-B)",
+            Self::ReadyIdle => Derivation::Partial {
+                missing: "holds (#114): receipt to first activity is derived, not whether anything else blocked the member",
             },
         }
     }
