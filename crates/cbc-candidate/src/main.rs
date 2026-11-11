@@ -88,6 +88,37 @@ enum Command {
         #[arg(long = "note", value_parser = key_value)]
         notes: Vec<(String, String)>,
     },
+    /// Trial record: the running core freezes its database into a new snapshot file, e.g. at
+    /// the end of a run for the report. Prints the file and its time.
+    Snapshot {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        protected_db: PathBuf,
+    },
+    /// Trial report (C2): prints protocol section 8 from a manifest and a later snapshot.
+    /// Deterministic: the same inputs give the same bytes. Reads no live state.
+    Report {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        protected_db: PathBuf,
+        /// The manifest written before the go.
+        #[arg(long)]
+        manifest: PathBuf,
+        /// A snapshot taken at or after the end of the window.
+        #[arg(long)]
+        snapshot: PathBuf,
+        /// Window start in wall ms; defaults to the manifest's snapshot time.
+        #[arg(long)]
+        from: Option<i64>,
+        /// Window end in wall ms; defaults to the end snapshot's time and may not pass it.
+        #[arg(long)]
+        until: Option<i64>,
+        /// The user's approval-prompt tally: {"context":{"member":{"cbc":n,...}}}.
+        #[arg(long)]
+        tally: Option<PathBuf>,
+    },
     /// Revoke only the expected current binding, leaving logical assignment records intact.
     Revoke {
         #[arg(long)]
@@ -161,6 +192,65 @@ async fn main() -> anyhow::Result<()> {
                 "{}",
                 serde_json::json!({"status":"recorded","manifest":out,"snapshot":snapshot.file})
             );
+            Ok(())
+        }
+        Command::Snapshot { root, protected_db } => {
+            protected_dbs.push(protected_db);
+            let sandbox = cbc_candidate::Sandbox::inspect(&root, &protected_dbs)?;
+            protect_port(sandbox.port())?;
+            let owner = owner_token(&sandbox)?;
+            let socket = sandbox.root().join("connector.sock");
+            let snapshot = cbc_candidate::connector::LocalOwnerClient::new(&socket, &owner)
+                .snapshot()
+                .await?;
+            println!(
+                "{}",
+                serde_json::json!({"status":"taken","snapshot":snapshot.file,"taken_wall_ms":snapshot.taken_wall_ms})
+            );
+            Ok(())
+        }
+        Command::Report {
+            root,
+            protected_db,
+            manifest,
+            snapshot,
+            from,
+            until,
+            tally,
+        } => {
+            protected_dbs.push(protected_db);
+            let sandbox = cbc_candidate::Sandbox::inspect(&root, &protected_dbs)?;
+            let manifest_bytes = read_input(&manifest, &sandbox, &protected_dbs, 1024 * 1024)?;
+            let tally_bytes = tally
+                .as_ref()
+                .map(|path| read_input(path, &sandbox, &protected_dbs, 64 * 1024))
+                .transpose()?;
+            let name = |path: &Path| {
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            };
+            // The snapshot directory as the sandbox spells it, whatever alias was typed. A bare
+            // name has an empty parent, so resolve against the working directory first.
+            let end = std::path::absolute(&snapshot)?
+                .parent()
+                .context("snapshot has no parent")?
+                .canonicalize()?
+                .join(snapshot.file_name().context("snapshot has no name")?);
+            let tally_name = tally.as_deref().map(name);
+            let text = cbc_candidate::report::report(
+                &sandbox,
+                cbc_candidate::report::ReportArgs {
+                    manifest_name: &name(&manifest),
+                    manifest: &manifest_bytes,
+                    end: &end,
+                    tally: tally_name.as_deref().zip(tally_bytes.as_deref()),
+                    from_ms: from,
+                    until_ms: until,
+                },
+            )
+            .await?;
+            print!("{text}");
             Ok(())
         }
         Command::Revoke {

@@ -308,9 +308,11 @@ reached only through the store.
   two can't drift apart. Each cause states how much the records carry:
   - known: waiting on the user, on another Chapter Master, on delivery;
   - partial: human review (the HITL flag exists, the PR observation doesn't);
-    the Primarch (open requests are derived, holds wait for #114);
-  - unknown: a resource (#114), CI (PR observations), ready but idle (acted-on
-    facts, #113 PR-B).
+    the Primarch (open requests are derived, holds wait for #114); ready but
+    idle (B1's activity facts give receipt to first activity, holds (#114)
+    would say whether anything else blocked the member; moved from unknown in
+    C2);
+  - unknown: a resource (#114), CI (PR observations).
 
   `waits_now` lists a member's current waits: each open request it asked,
   classified by its owner (the user; a repo lead is the Primarch; a feature

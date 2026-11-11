@@ -55,7 +55,9 @@ pub struct Snapshot {
 
 /// Owner operation, run inside the core: `VACUUM INTO` a file created here and now, so a
 /// snapshot can never replace an existing file, follow a link or be read by another user.
-pub(crate) async fn take_snapshot(store: &Store, root: &Path) -> Result<Snapshot> {
+/// Public for callers that already hold the [`Store`], and so its lease, such as tests; anyone
+/// else asks the running core through the owner client.
+pub async fn take_snapshot(store: &Store, root: &Path) -> Result<Snapshot> {
     let dir = root.join(SNAPSHOT_DIR);
     match fs::DirBuilder::new().mode(0o700).create(&dir) {
         Ok(()) => {}
@@ -194,6 +196,10 @@ impl Evidence {
             "snapshot schema {version} is not {SCHEMA_VERSION}"
         );
         Ok(())
+    }
+
+    pub(crate) fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 
     pub async fn close(self) {
