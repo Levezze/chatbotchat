@@ -14,19 +14,29 @@ use axum::{
     routing::get,
     Router,
 };
+use hyper_util::{
+    rt::{TokioIo, TokioTimer},
+    service::TowerToHyperService,
+};
 use session::Sessions;
-use std::{future::Future, net::Ipv4Addr, sync::Arc};
-use tokio::net::TcpListener;
+use std::{future::Future, net::Ipv4Addr, sync::Arc, time::Duration};
+use tokio::{net::TcpListener, sync::Semaphore, task::JoinSet};
 
-pub const COOKIE: &str = "cbc_dashboard";
+/// The session cookie is `cbc_dashboard_<port>`: browsers scope cookies by host, not port,
+/// so a shared name would let two local cores sign each other out.
+pub const COOKIE_PREFIX: &str = "cbc_dashboard_";
 /// How many contexts the first page lists, each with one page of its requests.
 pub const MAX_CONTEXTS: u32 = 20;
+/// Open browser connections at once; past this a new one is closed unanswered.
+const MAX_CONNECTIONS: usize = 16;
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
 
 struct Dashboard {
     store: Arc<Store>,
     sessions: Arc<Sessions>,
     host: String,
+    cookie: String,
 }
 
 /// Only the IPv4 loopback address, so the Host check has one right answer.
@@ -49,6 +59,7 @@ pub async fn serve(
         store,
         sessions,
         host: format!("127.0.0.1:{}", listener.local_addr()?.port()),
+        cookie: format!("{COOKIE_PREFIX}{}", listener.local_addr()?.port()),
     });
     let app = Router::new()
         .route("/", get(home))
@@ -56,9 +67,42 @@ pub async fn serve(
         .fallback(|| async { (StatusCode::NOT_FOUND, plain("Not found.")) })
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .with_state(state);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await?;
+    // Each connection is a task this loop owns, so shutdown can close it even while a browser
+    // has stopped reading, and nothing outlives the loop holding the store.
+    let slots = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let mut connections = JoinSet::new();
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            _ = connections.join_next(), if !connections.is_empty() => {}
+            accepted = listener.accept() => {
+                let stream = match accepted {
+                    Ok((stream, _)) => stream,
+                    Err(error) => {
+                        eprintln!("dashboard accept failed: {}", error.kind());
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                };
+                let Ok(permit) = slots.clone().try_acquire_owned() else {
+                    continue;
+                };
+                let service = TowerToHyperService::new(app.clone());
+                connections.spawn(async move {
+                    let _permit = permit;
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .timer(TokioTimer::new())
+                        .header_read_timeout(HEADER_READ_TIMEOUT)
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        }
+    }
+    drop(listener);
+    connections.abort_all();
+    while connections.join_next().await.is_some() {}
     Ok(())
 }
 
@@ -109,7 +153,7 @@ async fn login(State(d): State<Arc<Dashboard>>, RawQuery(query): RawQuery) -> Re
         )
             .into_response();
     };
-    let cookie = format!("{COOKIE}={session}; HttpOnly; SameSite=Strict; Path=/");
+    let cookie = format!("{}={session}; HttpOnly; SameSite=Strict; Path=/", d.cookie);
     (
         StatusCode::SEE_OTHER,
         [
@@ -126,7 +170,11 @@ fn signed_in(d: &Dashboard, request: &axum::http::HeaderMap) -> bool {
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(';'))
-        .filter_map(|pair| pair.trim().strip_prefix(COOKIE)?.strip_prefix('='))
+        .filter_map(|pair| {
+            pair.trim()
+                .strip_prefix(d.cookie.as_str())?
+                .strip_prefix('=')
+        })
         .any(|token| d.sessions.valid(token))
 }
 
@@ -142,23 +190,43 @@ async fn home(
         )
             .into_response();
     }
-    match panels(&d.store, param(&query, "context"), param(&query, "after")).await {
-        Ok(panels) => axum::response::Html(render::home(&panels)).into_response(),
+    let page = panels(
+        &d.store,
+        param(&query, "context"),
+        param(&query, "after"),
+        param(&query, "contexts_after"),
+    )
+    .await;
+    match page {
+        Ok((panels, more)) => {
+            axum::response::Html(render::home(&panels, more.as_deref())).into_response()
+        }
         Err(_) => (StatusCode::NOT_FOUND, plain("Not found.")).into_response(),
     }
 }
 
+/// One context's page, or a page of contexts with the first page of each; plus, when the
+/// page of contexts is full, the last one shown, for a link to the next page.
 async fn panels(
     store: &Store,
     context: Option<String>,
     after: Option<String>,
-) -> Result<Vec<render::Panel>> {
-    let contexts = match context {
+    contexts_after: Option<String>,
+) -> Result<(Vec<render::Panel>, Option<String>)> {
+    let (contexts, more) = match context {
         Some(context) => {
             ensure!(store.context_exists(&context).await?, "unknown context");
-            vec![context]
+            (vec![context], None)
         }
-        None => store.contexts("", MAX_CONTEXTS).await?,
+        None => {
+            let contexts = store
+                .contexts(contexts_after.as_deref().unwrap_or(""), MAX_CONTEXTS)
+                .await?;
+            let more = (contexts.len() == MAX_CONTEXTS as usize)
+                .then(|| contexts.last().cloned())
+                .flatten();
+            (contexts, more)
+        }
     };
     let after = after.unwrap_or_default();
     let mut panels = Vec::with_capacity(contexts.len());
@@ -168,5 +236,5 @@ async fn panels(
             .await?;
         panels.push(render::Panel { context, requests });
     }
-    Ok(panels)
+    Ok((panels, more))
 }

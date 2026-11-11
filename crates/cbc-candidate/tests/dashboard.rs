@@ -42,11 +42,19 @@ impl Running {
         let code = self.owner().dashboard_login_code().await.unwrap();
         let response = self.get(&format!("/login?code={code}"), None).await;
         assert_eq!(response.status, 303);
+        assert!(response
+            .header("set-cookie")
+            .unwrap()
+            .starts_with(&format!("cbc_dashboard_{}=", self.addr.port())));
         session_cookie(&response).expect("a session cookie")
     }
 }
 
 async fn running(with_dashboard: bool) -> Running {
+    running_with(with_dashboard, &[]).await
+}
+
+async fn running_with(with_dashboard: bool, extra_contexts: &[&str]) -> Running {
     let temp = tempfile::Builder::new()
         .prefix("cbc-dash-")
         .tempdir_in("/tmp")
@@ -59,6 +67,9 @@ async fn running(with_dashboard: bool) -> Running {
     .unwrap();
     let store = Store::open(&sandbox).await.unwrap();
     store.create_context("project").await.unwrap();
+    for context in extra_contexts {
+        store.create_context(context).await.unwrap();
+    }
     store
         .register_member("project", "worker", Role::FeatureLead)
         .await
@@ -124,7 +135,7 @@ async fn http(
 ) -> Response {
     let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let cookie = cookie
-        .map(|c| format!("Cookie: cbc_dashboard={c}\r\n"))
+        .map(|c| format!("Cookie: cbc_dashboard_{}={c}\r\n", addr.port()))
         .unwrap_or_default();
     stream
         .write_all(
@@ -161,9 +172,14 @@ async fn http(
     }
 }
 
+/// The session cookie is named for the port, so two cores in one browser profile don't sign
+/// each other out: cookies are scoped by host, not port.
 fn session_cookie(response: &Response) -> Option<String> {
     let set = response.header("set-cookie")?;
-    let value = set.strip_prefix("cbc_dashboard=")?.split(';').next()?;
+    let (name, rest) = set.split_once('=')?;
+    let port = name.strip_prefix("cbc_dashboard_")?;
+    assert!(port.parse::<u16>().is_ok(), "cookie name {name}");
+    let value = rest.split(';').next()?;
     Some(value.to_string())
 }
 
@@ -402,4 +418,82 @@ async fn a_dashboard_listener_off_loopback_is_refused() {
     let connector = LocalConnector::bind(&sandbox, store).unwrap();
     let wide = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
     assert!(connector.with_dashboard(wide).is_err());
+}
+
+/// A cookie for another core's port is not this core's session.
+#[tokio::test]
+async fn a_cookie_named_for_another_port_is_not_a_session() {
+    let case = running(true).await;
+    let cookie = case.login().await;
+    let wrong = format!(
+        "GET / HTTP/1.1\r\nHost: {}\r\nCookie: cbc_dashboard_{}={cookie}; cbc_dashboard={cookie}\r\nConnection: close\r\n\r\n",
+        case.host(),
+        case.addr.port().wrapping_add(1)
+    );
+    let mut stream = tokio::net::TcpStream::connect(case.addr).await.unwrap();
+    stream.write_all(wrong.as_bytes()).await.unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).await.unwrap();
+    assert!(raw.starts_with("HTTP/1.1 401"), "{raw}");
+    stop(case).await;
+}
+
+/// Past the first page of contexts, a link leads on, so every context's requests are reachable.
+#[tokio::test]
+async fn contexts_come_in_pages() {
+    let extra: Vec<String> = (0..cbc_candidate::dashboard::MAX_CONTEXTS)
+        .map(|n| format!("ctx-{n:02}"))
+        .collect();
+    let extra: Vec<&str> = extra.iter().map(String::as_str).collect();
+    let case = running_with(true, &extra).await;
+    let cookie = case.login().await;
+    case.worker()
+        .open_request(&RequestOwner::User, None, "In project?", "k-1")
+        .await
+        .unwrap();
+    let first = case.get("/", Some(&cookie)).await;
+    assert_eq!(first.status, 200);
+    assert!(first.body.contains("ctx-00"));
+    assert!(
+        !first.body.contains("In project?"),
+        "\"project\" sorts after the first page"
+    );
+    let last = format!("ctx-{:02}", cbc_candidate::dashboard::MAX_CONTEXTS - 1);
+    let link = format!("/?contexts_after={last}");
+    assert!(first.body.contains(&link), "a link to more contexts");
+    let second = case.get(&link, Some(&cookie)).await;
+    assert_eq!(second.status, 200);
+    assert!(second.body.contains("In project?"));
+    assert!(!second.body.contains("ctx-00"));
+    stop(case).await;
+}
+
+/// A browser that stops reading can't keep the core from releasing its store on shutdown.
+#[tokio::test]
+async fn shutdown_closes_a_connection_that_stopped_reading() {
+    let case = running(true).await;
+    let cookie = case.login().await;
+    let largest = "\u{1F600}".repeat(4000);
+    for n in 0..MAX_REQUEST_PAGE {
+        case.worker()
+            .open_request(&RequestOwner::User, None, &largest, &format!("k-{n}"))
+            .await
+            .unwrap();
+    }
+    // Pipeline far more page bytes than the socket buffers hold, and never read any of them.
+    let mut stalled = tokio::net::TcpStream::connect(case.addr).await.unwrap();
+    let one = format!(
+        "GET / HTTP/1.1\r\nHost: {}\r\nCookie: cbc_dashboard_{}={cookie}\r\n\r\n",
+        case.host(),
+        case.addr.port()
+    );
+    stalled.write_all(one.repeat(200).as_bytes()).await.unwrap();
+    // A second connection that sent half its headers.
+    let mut half = tokio::net::TcpStream::connect(case.addr).await.unwrap();
+    half.write_all(b"GET / HTTP/1.1\r\nHost: ").await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(3), stop(case))
+        .await
+        .expect("shutdown finishes promptly and releases the store");
+    drop((stalled, half));
 }

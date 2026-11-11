@@ -33,7 +33,8 @@ pub fn page(title: &str, body: &str) -> String {
     )
 }
 
-pub fn home(panels: &[Panel]) -> String {
+/// `more` is the last context shown when there may be more after it.
+pub fn home(panels: &[Panel], more: Option<&str>) -> String {
     let mut body = String::from("<h1>CBC dashboard</h1><h2>Pending requests</h2>");
     if panels.is_empty() {
         body.push_str("<p class=\"quiet\">No contexts yet.</p>");
@@ -72,6 +73,13 @@ pub fn home(panels: &[Panel]) -> String {
             body.push_str(&format!("<p><a href=\"{}\">Next page</a></p>", esc(&href)));
         }
         body.push_str("</section>");
+    }
+    if let Some(last) = more {
+        let href = format!("/?contexts_after={}", query(last));
+        body.push_str(&format!(
+            "<p><a href=\"{}\">More contexts</a></p>",
+            esc(&href)
+        ));
     }
     page("CBC dashboard", &body)
 }

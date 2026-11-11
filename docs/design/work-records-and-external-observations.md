@@ -438,6 +438,10 @@ outbox timeline are D1b.
   - `/login` spends the code for a 256-bit session and answers with a redirect
     to `/` that sets the cookie `HttpOnly; SameSite=Strict; Path=/`, so the
     code leaves the address bar. A spent, expired or unknown code gets a 403.
+  - The cookie is named `cbc_dashboard_<port>`. Browsers scope cookies by
+    host, not port, so with one shared name two cores on one machine would
+    overwrite each other's session. A core accepts only the cookie for its own
+    port.
   - Codes and sessions exist only in the core's memory, and only as SHA-256
     digests. Nothing is written to SQLite or any file, and a restart signs
     every browser out. A test signs in, then scans every file in the state
@@ -467,10 +471,20 @@ outbox timeline are D1b.
   `Origin` check for posted answers comes with D2.
 - **The page.** Each context gets a panel with one page of its waiting
   requests: open or relayed, at most `MAX_REQUEST_PAGE`. A full page links to
-  the next one (`/?context=…&after=…`). The first page lists at most 20
-  contexts.
-- **Shutdown.** The core stops the dashboard with its socket listener and
-  waits up to 5 seconds for open connections before releasing the store.
+  the next one (`/?context=…&after=…`). A page lists at most 20 contexts, in
+  ID order; a full one links to the next (`/?contexts_after=…`), so no context
+  is out of reach.
+- **Connections.** The dashboard runs its own accept loop rather than
+  `axum::serve`.
+  - Each connection is a task the loop owns. On shutdown the loop stops
+    accepting and aborts every connection, so a browser that stopped reading
+    can't hold the store open. The core stops the dashboard with its socket
+    listener and still allows 5 seconds as a backstop.
+  - At most 16 connections are open at once; past that a new one is closed
+    unanswered. A connection that doesn't finish its request headers within
+    10 seconds is closed.
+  - If the dashboard stops early, the core logs it at once and returns the
+    error when it exits.
 
 Mutation checks: each of the following fails at least one test.
 - Dropping the escape.
@@ -482,10 +496,15 @@ Mutation checks: each of the following fails at least one test.
 - Treating every request as signed in, or deriving the session from the code.
   The first run missed the latter, because the test only checked that the
   two differed; it now checks that the session doesn't contain the code.
-- Dropping the next-page link.
+- Dropping the next-page link or the more-contexts link.
+- Accepting the cookie of another port.
+- Waiting for connections at shutdown instead of aborting them.
 - Skipping the loopback check.
 - Ignoring `--dashboard` in `serve`.
 - Lifting the code cap.
+
+Not covered by a test: the 16-connection cap and the 10-second header
+timeout. Both are plain settings of the accept loop.
 
 ## Registration, controls and eligible merge
 

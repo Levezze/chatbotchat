@@ -103,14 +103,18 @@ impl LocalConnector {
         let (sessions, dashboard) = match dashboard {
             Some((listener, sessions)) => {
                 let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-                let task = tokio::spawn(crate::dashboard::serve(
-                    listener,
-                    store.clone(),
-                    sessions.clone(),
-                    async {
+                let serve =
+                    crate::dashboard::serve(listener, store.clone(), sessions.clone(), async {
                         let _ = stopped.await;
-                    },
-                ));
+                    });
+                // Say so at once if the dashboard stops early; the error is also returned at exit.
+                let task = tokio::spawn(async move {
+                    let outcome = serve.await;
+                    if let Err(error) = &outcome {
+                        eprintln!("dashboard stopped: {error:#}");
+                    }
+                    outcome
+                });
                 (Some(sessions), Some((stop, task)))
             }
             None => (None, None),
