@@ -10,6 +10,7 @@ pub mod native_target;
 pub mod owner;
 pub mod report;
 pub mod requests;
+pub mod sampler;
 pub mod settings;
 pub mod store;
 pub mod waits;

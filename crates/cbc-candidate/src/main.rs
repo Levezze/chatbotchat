@@ -118,6 +118,26 @@ enum Command {
         /// The user's approval-prompt tally: {"context":{"member":{"cbc":n,...}}}.
         #[arg(long)]
         tally: Option<PathBuf>,
+        /// A sampler file for the Cost section; repeat it for each run (normal, then debug).
+        #[arg(long)]
+        samples: Vec<PathBuf>,
+    },
+    /// Trial record (C3): samples the candidate's processes and disk every interval into a new
+    /// file under the root's samples directory, until stopped. Stores no command line.
+    Sample {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        protected_db: PathBuf,
+        /// Seconds between ticks.
+        #[arg(long = "interval-s", default_value_t = 10)]
+        interval_s: u64,
+        /// The logging mode the candidate runs in: normal or debug.
+        #[arg(long, default_value = "normal")]
+        mode: cbc_candidate::sampler::Mode,
+        /// Stop after this many ticks instead of on a signal.
+        #[arg(long)]
+        ticks: Option<u64>,
     },
     /// Revoke only the expected current binding, leaving logical assignment records intact.
     Revoke {
@@ -217,6 +237,7 @@ async fn main() -> anyhow::Result<()> {
             from,
             until,
             tally,
+            samples,
         } => {
             protected_dbs.push(protected_db);
             let sandbox = cbc_candidate::Sandbox::inspect(&root, &protected_dbs)?;
@@ -225,6 +246,10 @@ async fn main() -> anyhow::Result<()> {
                 .as_ref()
                 .map(|path| read_input(path, &sandbox, &protected_dbs, 64 * 1024))
                 .transpose()?;
+            let samples_bytes = samples
+                .iter()
+                .map(|path| read_input(path, &sandbox, &protected_dbs, 64 * 1024 * 1024))
+                .collect::<anyhow::Result<Vec<_>>>()?;
             let name = |path: &Path| {
                 path.file_name()
                     .map(|n| n.to_string_lossy().into_owned())
@@ -238,6 +263,12 @@ async fn main() -> anyhow::Result<()> {
                 .canonicalize()?
                 .join(snapshot.file_name().context("snapshot has no name")?);
             let tally_name = tally.as_deref().map(name);
+            let samples_names: Vec<String> = samples.iter().map(|p| name(p)).collect();
+            let samples_input: Vec<(&str, &[u8])> = samples_names
+                .iter()
+                .map(String::as_str)
+                .zip(samples_bytes.iter().map(Vec::as_slice))
+                .collect();
             let text = cbc_candidate::report::report(
                 &sandbox,
                 cbc_candidate::report::ReportArgs {
@@ -245,12 +276,45 @@ async fn main() -> anyhow::Result<()> {
                     manifest: &manifest_bytes,
                     end: &end,
                     tally: tally_name.as_deref().zip(tally_bytes.as_deref()),
+                    samples: &samples_input,
                     from_ms: from,
                     until_ms: until,
                 },
             )
             .await?;
             print!("{text}");
+            Ok(())
+        }
+        Command::Sample {
+            root,
+            protected_db,
+            interval_s,
+            mode,
+            ticks,
+        } => {
+            protected_dbs.push(protected_db);
+            let sandbox = cbc_candidate::Sandbox::inspect(&root, &protected_dbs)?;
+            let mut terminate =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+            let written = cbc_candidate::sampler::sample(
+                &sandbox,
+                cbc_candidate::sampler::SampleArgs {
+                    interval: std::time::Duration::from_secs(interval_s),
+                    mode,
+                    ticks,
+                },
+                |file| {
+                    println!("{}", serde_json::json!({"status":"sampling","file":file}));
+                },
+                async {
+                    tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+                },
+            )
+            .await?;
+            println!(
+                "{}",
+                serde_json::json!({"status":"stopped","ticks":written})
+            );
             Ok(())
         }
         Command::Revoke {

@@ -302,7 +302,7 @@ fn the_report_is_the_section_8_template_in_order() {
         from_ms: 100,
         until_ms: 200,
     };
-    let text = render(&header(), &facts, Some(&tally), window);
+    let text = render(&header(), &facts, Some(&tally), &[], window);
     let expected = format!(
         "Trial 1 — build abc — result: missing (recorded by the trial manager)
 Window: 100 .. 200 wall ms (100 ms)
@@ -310,6 +310,7 @@ Manifest: trial-1.json, sha256 m
 Baseline snapshot: snapshot-100-x.sqlite3, sha256 b (verified against the manifest)
 End snapshot: snapshot-200-y.sqlite3, sha256 e
 Tally: tally.json, sha256 {tally_sha}
+Samples: missing (no sampler file given)
 
 Phase 1: missing (judged by the trial manager against protocol section 4)
 
@@ -362,7 +363,7 @@ Primarch
   turns per hour: missing (the core sees CBC items, not turns)
   t/lead: 1 CBC items sent in 0.000 h
 
-Cost: missing (no sampler file; the sampler lands in C3)
+Cost: missing (no sampler file given)
 
 Outcome: missing (written by the trial manager)
 
@@ -373,7 +374,7 @@ Changes for the next trial: missing (written by the trial manager)
         tally_sha = tally.sha256
     );
     assert_eq!(text, expected);
-    assert_eq!(render(&header(), &facts, Some(&tally), window), text);
+    assert_eq!(render(&header(), &facts, Some(&tally), &[], window), text);
 }
 
 #[test]

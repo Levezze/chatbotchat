@@ -22,6 +22,7 @@ pub(crate) fn render(
     header: &Header,
     facts: &Facts,
     tally: Option<&Tally>,
+    samples: &[Samples],
     window: Window,
 ) -> String {
     let mut out = String::new();
@@ -62,6 +63,12 @@ pub(crate) fn render(
         None => {
             let _ = writeln!(o, "Tally: {}", missing("no tally file given"));
         }
+    }
+    if samples.is_empty() {
+        let _ = writeln!(o, "Samples: {}", missing("no sampler file given"));
+    }
+    for s in samples {
+        let _ = writeln!(o, "Samples: {}, sha256 {}", s.name, s.sha256);
     }
     let _ = writeln!(
         o,
@@ -122,11 +129,7 @@ pub(crate) fn render(
         );
     }
 
-    let _ = writeln!(
-        o,
-        "\nCost: {}",
-        missing("no sampler file; the sampler lands in C3")
-    );
+    cost::render_cost(o, samples, facts, window);
     for section in ["Outcome", "Findings", "Changes for the next trial"] {
         let _ = writeln!(
             o,

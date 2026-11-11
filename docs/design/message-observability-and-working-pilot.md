@@ -288,7 +288,7 @@ estimated.
 | Rooms and identity: duplicates, identity changes | peer room and identity records (R1) | yes | none |
 | Rooms and identity: legacy skills loaded | session transcripts | no | the trial manager's check, in the manifest |
 | Primarch: interventions, turns per hour | items the Primarch sent | partial | C2 counts the CBC items each repo lead sent; turns and interventions are not observable |
-| Cost: CPU, RSS, disk, normal versus debug | process sampling | no | C: a sampler run beside the core and driver |
+| Cost: CPU, RSS, disk, normal versus debug | process sampling | partial | C3: `cbc-candidate sample` beside the core and driver; the Claude mod runs inside the host app and is not sampled; debug ticks wait for B2 |
 | Manifest, sha256 | none | no | C: the manifest writer |
 
 ### B1: wake facts, activity facts, recovery
@@ -723,3 +723,68 @@ sampler and the Cost section it feeds.
     re-offered after a rebind and then joined by a newer one stays pending,
     until a further rebind drops it unreceipted and it counts as superseded at
     an unknown time, yet a cut before the newer notice still shows it pending.
+
+### C3 as built: the sampler
+
+`cbc-candidate sample --root … --protected-db … [--interval-s 10]
+[--mode normal|debug] [--ticks N]` samples until SIGINT or SIGTERM, or for N
+ticks. It prints `{"status":"sampling","file":…}` when the file exists and
+`{"status":"stopped","ticks":n}` at the end. `report --samples FILE` feeds the
+Cost section, repeated once per sampler run (a normal run and a debug run each
+write their own file); each file's name and sha256 go in the header. The files
+are read in time order, and two that overlap are refused: two samplers running
+at once would count every process twice.
+
+- **What a tick holds.** One JSON line, version 1: wall time, mode, interval,
+  the candidate processes and the disk. Unknown fields are refused on read.
+  - Processes come from `ps -ww -U <uid of the root's owner> -o
+    pid=,rss=,time=,args=`. Each keeps a label, PID, RSS in KiB and cumulative
+    CPU in milliseconds. The command line is used to classify and then
+    dropped: no argument, path or unmatched line is stored or printed, and a
+    malformed `ps` line is reported by number only.
+  - A process counts only when it runs the code: the `cbc-candidate`
+    executable itself, labelled by subcommand (`cbc-candidate serve`), or a
+    Python interpreter whose script is `cbc-candidate/adapters/<dir>/<file>.py`
+    (`adapters/device/router.py`). A shell, `rtk` or an editor that merely names
+    the candidate is not counted, nor is the sampler itself.
+  - Disk is allocated bytes (blocks × 512, as `du` counts) under the root,
+    without following links, in three parts: the database with its WAL and
+    shared-memory files, `snapshots/`, and everything else.
+  - `ps` sees every candidate process the user runs, not only this root's.
+    One candidate runs during a trial; a second one would be summed in.
+- **The file.** `<root>/samples/samples-<wall_ms>-<mode>.jsonl`, created new
+  with mode 0600 and `O_NOFOLLOW` in a 0700 directory, flushed per tick. A
+  sampler killed mid-write leaves a partial last line; the report ignores it
+  and names the file. Any other bad line, an unknown version or ticks out of order
+  are refused, naming the line number.
+- **The Cost section.** Ticks are cut on the window by wall time. Per mode:
+  tick count, interval and the span covered. Per label: the most processes
+  seen in one tick against the expected count, RSS as n/median/p90/max of the
+  per-tick sum, and CPU as a share of one core.
+  - CPU is each process's growth in cumulative CPU time between consecutive
+    ticks of one mode, over the wall time those ticks span. A PID whose time
+    goes down, or whose label changed, was reused and adds nothing.
+  - Expected counts come from the end snapshot's active seats: one core, one
+    device router, and one shim per seat of each host (the Claude adapter per
+    chat, the Codex adapter per session). An expected label with no match
+    prints missing, so an absent component never passes for free. A label not
+    expected is still listed.
+  - The Claude mod runs inside the host app and prints missing. Debug-mode
+    ticks print missing until B2 adds debug logging.
+  - Disk: start, end and maximum of each part.
+- **Tests.**
+  - Unit: `ps` time formats (macOS `M:SS.ss`, procps `[dd-]hh:mm:ss`), the
+    classifier's accepted and refused command lines, `ps` parsing without
+    echoing a bad line, a tick round trip, the partial last line, CPU growth
+    and PID reuse, shims summed per tick, and the whole Cost section byte for
+    byte.
+  - `tests/sampler.rs`, over real processes: a symlink named `cbc-candidate`
+    to `sleep` and a Python script under `cbc-candidate/adapters/device/` are
+    both found by PID with their labels, the test process is not, and the
+    file has no path or command line, mode 0600 in a 0700 directory. The
+    command run for one tick prints both status lines.
+  - `tests/report.rs`: a sampler file with ticks before, inside and after the
+    window gives two ticks and only the CPU growth inside it; a file that is
+    not sampler output is refused without echoing its content; a normal file
+    and a debug file, given in either order, are both named and both measured,
+    and two files that overlap in time are refused.
