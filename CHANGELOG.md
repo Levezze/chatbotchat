@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.0](https://github.com/Levezze/chatbotchat/compare/v0.19.0...v0.20.0) (2026-11-11)
+
+
+### Features
+
+* **candidate:** work-item connector routes ([#113](https://github.com/Levezze/chatbotchat/issues/113) R2b) ([#135](https://github.com/Levezze/chatbotchat/issues/135)) ([fbb1799](https://github.com/Levezze/chatbotchat/commit/fbb1799269b98db80c8aa8a47f2f011da735c8bf))
+
 ## [0.19.0](https://github.com/Levezze/chatbotchat/compare/v0.18.0...v0.19.0) (2026-11-11)
 
 
