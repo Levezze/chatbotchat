@@ -656,10 +656,12 @@ sampler and the Cost section it feeds.
   by class.
 - **Wake latency.** Per host and profile (for example `claude/desktop`), commit
   to wake accepted and commit to first activity. Each delivery belongs to the
-  binding in force when its item was committed: the native target whose epoch's
-  enrolment or rebind is the latest at or before the commit. A seat that has
-  since been rebound to another host keeps its earlier deliveries under the
-  earlier host. A delivery with no binding by then is `unknown`. Monotonic time when both stamps come from one core instance,
+  binding in force when its item was committed: the epoch whose enrolment or
+  rebind is the latest at or before the commit, with that epoch's native
+  target. A seat that has since been rebound to another host keeps its earlier
+  deliveries under the earlier host. An epoch enrolled without a target still
+  ends the one before it: its host comes from the invite and its profile is
+  `unknown` (`codex/unknown`). A delivery with no binding by then is `unknown`. Monotonic time when both stamps come from one core instance,
   wall time otherwise, and the latter are counted as estimates.
 - **Seat names.** Seats are grouped by (context, member), never by a joined
   string, and print as `context/member`, both parts quoted when either

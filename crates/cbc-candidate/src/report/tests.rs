@@ -26,7 +26,7 @@ fn binding(member: &str, epoch: i64, host: &str, profile: &str, from: i64) -> Bi
         context: "t".into(),
         member: member.into(),
         epoch,
-        host: host.into(),
+        host: Some(host.into()),
         profile: Some(profile.into()),
         from_wall_ms: from,
     }
@@ -406,13 +406,21 @@ fn latency_groups_by_the_binding_in_force_at_commit() {
     before.woken = Some(at("a", 125));
     let mut after = delivery("feature", 6, 160);
     after.woken = Some(at("a", 162));
+    let late = delivery("feature", 8, 180);
     let facts = Facts {
         seats: vec![seat("feature", "feature_lead", "codex")],
         bindings: vec![
             binding("feature", 1, "claude", "desktop", i64::MIN),
             binding("feature", 2, "codex", "cli", 150),
+            // Rebound without a target at 165: the cli target no longer holds.
+            BindingFact {
+                profile: None,
+                epoch: 3,
+                from_wall_ms: 165,
+                ..binding("feature", 3, "codex", "", 0)
+            },
         ],
-        deliveries: vec![before, after, delivery("ghost", 7, 170)],
+        deliveries: vec![before, after, late, delivery("ghost", 7, 170)],
         ..Facts::default()
     };
     let mut o = String::new();
@@ -432,6 +440,8 @@ Wake latency (monotonic within a core instance; across instances wall time, coun
   claude/desktop commit to first activity: n=0 missing=1 estimates=0
   codex/cli commit to wake accepted: n=1 median=2 p90=2 max=2 missing=0 estimates=0
   codex/cli commit to first activity: n=0 missing=1 estimates=0
+  codex/unknown commit to wake accepted: n=0 missing=1 estimates=0
+  codex/unknown commit to first activity: n=0 missing=1 estimates=0
   unknown commit to wake accepted: n=0 missing=1 estimates=0
   unknown commit to first activity: n=0 missing=1 estimates=0
 "
@@ -507,8 +517,9 @@ fn a_withdrawal_with_no_recorded_time_is_counted_not_guessed() {
     );
 }
 
-/// Bindings come from the native targets, dated by the identity event of the same epoch, with
-/// the profile the target recorded.
+/// Bindings come from enrolments and rebinds, dated by their identity event, with the host and
+/// profile of the epoch's native target. A rebind without a target ends the earlier target: its
+/// host comes from the invite and its profile is unknown.
 #[tokio::test]
 async fn bindings_load_with_their_profile_and_the_time_they_took_effect() {
     let temp = tempfile::tempdir().unwrap();
@@ -539,6 +550,23 @@ async fn bindings_load_with_their_profile_and_the_time_they_took_effect() {
     .unwrap();
     let before = crate::facts::wall_ms();
     owner.provision(&store, spec).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let rebound_after = crate::facts::wall_ms();
+    let proof = crate::enrollment::SessionEvidence::from_trusted_adapter(
+        crate::enrollment::NativeHost::Codex,
+        "laptop",
+        "codex-native-2",
+        "read-3",
+    )
+    .unwrap();
+    let invite = store
+        .issue_enrollment_invite("demo", "client", &proof, 60)
+        .await
+        .unwrap();
+    store
+        .consume_enrollment_invite(invite.expose_token_for_adapter(), &proof)
+        .await
+        .unwrap();
     let snapshot = crate::evidence::take_snapshot(&store, sandbox.root())
         .await
         .unwrap();
@@ -552,7 +580,7 @@ async fn bindings_load_with_their_profile_and_the_time_they_took_effect() {
             (
                 b.member.as_str(),
                 b.epoch,
-                b.host.as_str(),
+                b.host.as_deref(),
                 b.profile.as_deref(),
             )
         })
@@ -560,12 +588,14 @@ async fn bindings_load_with_their_profile_and_the_time_they_took_effect() {
     assert_eq!(
         got,
         vec![
-            ("api", 1, "codex", Some("unknown")),
-            ("client", 1, "claude", Some("unknown")),
+            ("api", 1, Some("codex"), Some("unknown")),
+            ("client", 1, Some("claude"), Some("unknown")),
+            ("client", 2, Some("codex"), None),
         ]
     );
     assert!(facts
         .bindings
         .iter()
         .all(|b| (before..=snapshot.taken_wall_ms).contains(&b.from_wall_ms)));
+    assert!(facts.bindings[2].from_wall_ms >= rebound_after);
 }

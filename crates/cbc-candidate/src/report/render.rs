@@ -298,10 +298,10 @@ pub(super) fn render_latency(o: &mut String, facts: &Facts, window: Window) {
             .filter(|b| b.context == delivery.context && b.member == delivery.member)
             .filter(|b| b.from_wall_ms <= delivery.committed.wall_ms)
             .max_by_key(|b| (b.from_wall_ms, b.epoch));
-        let profile = binding.map_or_else(
-            || "unknown".to_owned(),
-            |b| format!("{}/{}", b.host, b.profile.as_deref().unwrap_or("unknown")),
-        );
+        let profile = match binding.and_then(|b| b.host.as_deref().map(|h| (h, b))) {
+            Some((host, b)) => format!("{host}/{}", b.profile.as_deref().unwrap_or("unknown")),
+            None => "unknown".to_owned(),
+        };
         profiles.entry(profile).or_default().push(delivery);
     }
     let _ = writeln!(

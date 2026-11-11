@@ -54,7 +54,9 @@ pub(crate) struct BindingFact {
     pub context: String,
     pub member: String,
     pub epoch: i64,
-    pub host: String,
+    /// From the epoch's native target, else the invite it was enrolled with.
+    pub host: Option<String>,
+    /// None for an epoch with no native target.
     pub profile: Option<String>,
     /// `i64::MIN` when no identity event dates it: in force from the start.
     pub from_wall_ms: i64,
@@ -191,14 +193,30 @@ impl Facts {
             });
         }
         for row in sqlx::query(
-            "SELECT t.context_id, t.member_id, t.epoch, t.host,
-                    json_extract(t.target_json, '$.profile') AS profile,
-                    (SELECT min(e.at_wall_ms) FROM candidate_identity_events e
-                      WHERE e.context_id = t.context_id AND e.member_id = t.member_id
-                        AND e.epoch = t.epoch AND e.kind IN ('enrolled','rebound'))
-                      AS from_wall_ms
-             FROM candidate_native_targets t
-             ORDER BY t.context_id, t.member_id, t.epoch",
+            // Every enrolled or rebound epoch, plus target epochs no identity event dates. A
+            // targetless epoch still ends the one before it: its host comes from the invite.
+            "WITH epochs AS (
+                 SELECT context_id, member_id, epoch, min(at_wall_ms) AS from_wall_ms
+                 FROM candidate_identity_events WHERE kind IN ('enrolled','rebound')
+                 GROUP BY context_id, member_id, epoch
+                 UNION ALL
+                 SELECT t.context_id, t.member_id, t.epoch, NULL
+                 FROM candidate_native_targets t
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM candidate_identity_events e
+                     WHERE e.context_id = t.context_id AND e.member_id = t.member_id
+                       AND e.epoch = t.epoch AND e.kind IN ('enrolled','rebound'))
+             )
+             SELECT p.context_id, p.member_id, p.epoch, p.from_wall_ms,
+                    coalesce(t.host,
+                      (SELECT min(i.host) FROM candidate_enrollment_invites i
+                        WHERE i.context_id = p.context_id AND i.member_id = p.member_id
+                          AND i.consumed_epoch = p.epoch)) AS host,
+                    json_extract(t.target_json, '$.profile') AS profile
+             FROM epochs p
+             LEFT JOIN candidate_native_targets t
+               ON t.context_id = p.context_id AND t.member_id = p.member_id AND t.epoch = p.epoch
+             ORDER BY p.context_id, p.member_id, p.epoch",
         )
         .fetch_all(pool)
         .await?
