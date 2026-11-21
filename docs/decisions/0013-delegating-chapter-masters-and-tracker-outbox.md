@@ -42,10 +42,10 @@ Three things came out of daily use and a requester handoff from a product team u
    repository or subfolder level. The nearest one replaces the outer ones completely. A missing
    extension costs nothing, and installation writes a minimal default. Tracker setup is one use
    of an extension, not a built-in subsystem. (I-16, I-17)
-3. **Tracker updates go through the outbox.** A Chapter Master or Primarch records a tracker
-   update as a templated event in CBC's existing outbox, the same delivery path as work-item
-   revisions. It never calls tracker tools itself. A pending or failed update is visible and
-   never blocks implementation. Proposed, not yet confirmed by the user: CBC owns only the
+3. **Tracker updates are CBC events.** A Chapter Master or Primarch never calls tracker tools
+   itself; a tracker update becomes a templated event in CBC. A pending or failed update is
+   visible and never blocks implementation. Proposed, not yet confirmed by the user: the events
+   reuse the existing outbox (the delivery path of work-item revisions), and CBC owns only the
    envelope, meaning a stable ID, an idempotency key, a state (pending, done or failed) and the
    external record reference written back after the update. (I-18, open question 9)
 4. **An optional tracker agent carries out the updates.** It is a CBC member like any other, woken

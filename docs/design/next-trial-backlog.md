@@ -41,7 +41,7 @@ yet. Results are published by the trial report once the run ends (T-22), not her
 |---|---|---|
 | Chapter Masters delegate and stay free | I-15 | The Chapter Master spends its time briefing, answering and reviewing, and takes a second task while helpers run. Memory per helper is measured. |
 | Start sequence: extension, rename, register | I-16, I-17 | Every new agent reads its extension, renames its chat and registers before other work, and the Primarch learns of it with no user relay. |
-| Tracker events in the outbox | I-18, I-20 | One task per event, no duplicates on retry or restart, and pending or failed updates visible on the dashboard. |
+| Tracker events in the outbox | I-18, I-20 | Each event has its configured effect once (create, link or update, which may hit the same tracker record), no duplicate on retry, replay or restart, and pending or failed updates visible on the dashboard. |
 | Tracker agent | I-19, I-21, I-23 | It updates the user's real tracker, keeps human edits, asks the Primarch before the user, and no implementing agent touches tracker tools. |
 | Fixes from section 2 | — | No empty wakes, an idle driver, and the closer told about the replacement. |
 
@@ -98,8 +98,9 @@ Questions to settle before the trial is designed:
 1. Main host or second host. Moving the host and the ADR-0013 role changes in the same trial
    changes two variables at once; phase 2 (T-30) is the baseline that makes the comparison
    possible.
-2. Inside T3, do helpers report to their Chapter Master through T3's own delegation, with CBC
-   only between leads and across hosts, or through CBC rooms as today?
+2. Do T3's child threads satisfy I-15 (helpers on the host's native mechanism, the Chapter
+   Master free while they run, the user able to talk to a helper directly)? CBC stays between
+   leads and across hosts either way.
 3. Does a T3 Codex thread see the user's connectors? Checked by asking one to list its tools.
 4. Mid-turn delivery: a signed-in MCP client, queue only, or the upstream request.
 5. A short peer smoke on T3 (like phase 1) before any hierarchy runs on it.

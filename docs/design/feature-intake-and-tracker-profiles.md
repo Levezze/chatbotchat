@@ -57,7 +57,7 @@ and after Chapter Masters in daily use kept implementing instead of managing.
 |---|---|---|---|
 | I-15 | A Chapter Master delegates implementation. It manages one feature end to end, across several PRs and parallel tasks: it discusses details with the user, briefs native sub-agents, checks their work and owns the integrated result. It writes code itself only when the user explicitly asks. Helpers coordinate with it through the host's native mechanisms, not CBC, and the user can talk to a helper directly. | A Chapter Master that is coding can't take the next task, answer a question or run work in parallel. Both host apps are built around spawning sub-agents and reading their results; CBC should use that, not fight it. | "You may code directly" (the current role skill). A CBC room per helper. |
 | I-16 | Skills are never edited per user. Each role can have an **extension file**: instructions every agent in that role must read at start, if the file exists. Extensions are committed in the user's own project at one of four levels: user, organisation or project, repository, or subfolder. The nearest extension replaces the outer ones completely. A missing extension costs nothing. Installation writes a minimal default. | CBC is a framework and every team works differently. The same user runs different setups in different projects, so one configuration per installation is wrong. Extensions are small, so reading them at every start is cheap. | Editing the skills per user. One profile per installation (I-09). Merging extensions from several levels. |
-| I-17 | A new agent's start sequence: read the role skill, read the applicable extension, rename the chat for its task, then register. Registration creates the report room in the core, and the Primarch is told by a push, with no room ID passed by the user and no polling. | Chapter Masters skip the rename today. Likely cause, not verified: the current skill puts it last, next to "preserve existing user titles", and host apps give every new chat an automatic title, so the agent finds a title and keeps it. | A rename step left at the end of the skill text. |
+| I-17 | A new agent's start sequence: read the role skill, read the applicable extension, rename the chat for its task, then register. Registration creates the report room in the core, and the Primarch is told by a push, with no room ID passed by the user and no polling. | Chapter Masters skip the rename today. Cause not known: the skill in this repository already puts the rename first and preserves only an explicit user title, so either the installed copy differed or the agent mistakes the host's automatic title for a user title. To be checked against the installed revision. | Relying on the skill text alone for the rename. |
 | I-18 | Tracker updates are outbox events. A Chapter Master or Primarch records the update in a fixed template and never calls tracker tools itself. Pending and failed updates show on the dashboard and never block implementation. *Proposed by the implementing agent, not yet confirmed by the user (open question 9): the events use the existing outbox with no second delivery path, and CBC owns only the envelope, meaning a stable ID, an idempotency key, a state (pending, done or failed) and the external record reference written back afterwards.* | The implementing agent stops spending tokens and attention on tracker tools. A retry can't create a second task. A missed update is visible without anyone checking (I-13). | The Chapter Master writing with its own tools (I-11). A separate tracker queue beside the outbox. |
 | I-19 | An optional **tracker agent** carries out tracker events. It is a CBC member woken by the outbox, and it is shown on the dashboard alongside the Emperor. Its extension file says which tool the team uses and how. It reads what is already in the tracker, keeps human edits, and consults the Primarch about scope. It asks the user only when the answer is still unclear. A team may use another executor (a script, or the tracker's own AI) if it reports results back the same way. | A tracker is a tool people edit by hand, so writing to it needs judgement about what is already there. Only one agent needs the tracker's details, and nobody else carries them. | A deterministic sync with no model involved. Every agent knowing the tracker. |
 | I-20 | CBC defines default event names, not workflows: task created, task changed, PR linked, blocked or resumed, done, dropped or superseded, and feature created or linked. The mapping to a tool's fields, task granularity and progress calculation belong to the user's extension. Trackers get only these major events; the dashboard gets the detailed updates. | A tool-specific rule in CBC (I-10's one task per PRD, slice-count progress) is right for one team and wrong for the next. | Provider adapters or a fixed schema inside CBC. |
@@ -177,6 +177,9 @@ Opened 2026-11-18:
    levels itself, or registration returns the resolved extension path and
    the chat name to use. The second can be checked; the first depends on each
    host's file tools. Proposal: the second.
+   *Review of PR #169:* the second conflicts with I-17, which reads the
+   extension and renames before registering. Either a lookup step before
+   registration, or a changed start order. Undecided.
 5. **One Chapter Master per feature, so what is a task?** The requester
    handoff maps one Chapter Master assignment to one task. Under I-15 a Chapter
    Master holds a whole feature, so the natural task is the unit it hands to a
@@ -198,6 +201,22 @@ Opened 2026-11-18:
    existing outbox are the implementing agent's proposal. The requester
    handoff asks for idempotent delivery and a stable external identity, which
    this meets. To be confirmed by the user.
+
+Opened 2026-11-21, from the review of PR #169:
+
+10. **Who creates the tracker event.** In section 3a the agent records it. If the
+    work transition commits and the agent stops before recording the event,
+    nothing shows as pending, which breaks I-13. Alternative: the core creates
+    the event in the same transaction as the work transition. Undecided.
+11. **Retry across the external write.** If the tracker creates a record and the
+    executor stops before writing the reference back, a retry creates a second
+    record. CBC's idempotency key alone can't prevent that; the executor needs
+    the provider's idempotency key or a stable ID stored on the external record.
+    The next trial should exercise that crash point.
+12. **Pending with no executor.** The current outbox delivers to open report
+    rooms only; a revision with no room has an empty delivery list and is
+    pending nowhere. A tracker event needs a durable record that doesn't depend
+    on a room, and a way for a newly configured executor to claim it.
 
 ## 5. Later: talking to a Chapter Master from the dashboard
 

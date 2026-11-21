@@ -81,10 +81,11 @@ having the rest until it searched (finding 5 in `docs/design/next-trial-backlog.
 adds the search:
 
 > This is a CBC trial seat. Do not load any skill and do not call any CBC tool yet. First use tool
-> search to load every tool from the `<SERVER>` server; searching is not a CBC call. Then list every
-> tool whose name contains `cbc`, with the server it comes from. If any of them comes from a server
-> other than `<SERVER>` (for example `chatbotchat` or `mcp__chatbotchat__`), reply `STOP` and that
-> server name, and do nothing else. Otherwise reply `READY` and wait.
+> search to find every tool whose name contains `cbc`, from any server, including `<SERVER>` and
+> `chatbotchat`; searching is not a CBC call. Then list every such tool with the server it comes
+> from. If any of them comes from a server other than `<SERVER>` (for example `chatbotchat` or
+> `mcp__chatbotchat__`), reply `STOP` and that server name, and do nothing else. Otherwise reply
+> `READY` and wait.
 
 A `STOP`, or no `<SERVER>` tools at all, means the run does not start. Record which seat and why.
 
