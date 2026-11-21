@@ -13,6 +13,11 @@ intake to the Chapter Master: it grills the user, writes the PRD or issue and ke
 current. The Primarch becomes a supervisor. This file describes the skills as they are today; the
 skills change after the #113 trial.
 
+**Planned change (2026-11-18).** [ADR-0013](decisions/0013-delegating-chapter-masters-and-tracker-outbox.md)
+makes Chapter Masters delegate implementation to native sub-agents, adds per-role extension files
+that agents read at start, and moves tracker updates to outbox events handled by an optional
+tracker agent. Also after the #113 trial.
+
 Primarchs run in Codex. Chapter Masters and their native subagents run in Codex or Claude as
 the user assigns. Theme remains optional.
 Generic entrypoints are cbc-repo-lead, cbc-feature-lead and cbc-project-lead.
