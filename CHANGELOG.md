@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.33.1](https://github.com/Levezze/chatbotchat/compare/v0.33.0...v0.33.1) (2026-11-22)
+
+
+### Bug Fixes
+
+* **test:** find chatbotchat-server next to the cbc binary ([#170](https://github.com/Levezze/chatbotchat/issues/170)) ([cf7c9fe](https://github.com/Levezze/chatbotchat/commit/cf7c9fef43805ba3b32fedda86dfd672d056adfe))
+
 ## [0.33.0](https://github.com/Levezze/chatbotchat/compare/v0.32.0...v0.33.0) (2026-11-11)
 
 
