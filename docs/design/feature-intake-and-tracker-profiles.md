@@ -13,7 +13,9 @@ Architecture changes are summarised in
 replace the tracker profile in I-09 to I-12. Chapter Masters now delegate
 implementation, skills are extended by scoped files, and tracker updates go
 through the outbox to an optional tracker agent. Superseded rows and section 3
-stay below as history, each marked.
+stay below as history, each marked. **Updated 2026-11-21:** I-24 to I-27
+(section 2b) settle who creates tracker events, retries, pending events and
+the start order.
 
 ## 1. Why
 
@@ -57,13 +59,25 @@ and after Chapter Masters in daily use kept implementing instead of managing.
 |---|---|---|---|
 | I-15 | A Chapter Master delegates implementation. It manages one feature end to end, across several PRs and parallel tasks: it discusses details with the user, briefs native sub-agents, checks their work and owns the integrated result. It writes code itself only when the user explicitly asks. Helpers coordinate with it through the host's native mechanisms, not CBC, and the user can talk to a helper directly. | A Chapter Master that is coding can't take the next task, answer a question or run work in parallel. Both host apps are built around spawning sub-agents and reading their results; CBC should use that, not fight it. | "You may code directly" (the current role skill). A CBC room per helper. |
 | I-16 | Skills are never edited per user. Each role can have an **extension file**: instructions every agent in that role must read at start, if the file exists. Extensions are committed in the user's own project at one of four levels: user, organisation or project, repository, or subfolder. The nearest extension replaces the outer ones completely. A missing extension costs nothing. Installation writes a minimal default. | CBC is a framework and every team works differently. The same user runs different setups in different projects, so one configuration per installation is wrong. Extensions are small, so reading them at every start is cheap. | Editing the skills per user. One profile per installation (I-09). Merging extensions from several levels. |
-| I-17 | A new agent's start sequence: read the role skill, read the applicable extension, rename the chat for its task, then register. Registration creates the report room in the core, and the Primarch is told by a push, with no room ID passed by the user and no polling. | Chapter Masters skip the rename today. Cause not known: the skill in this repository already puts the rename first and preserves only an explicit user title, so either the installed copy differed or the agent mistakes the host's automatic title for a user title. To be checked against the installed revision. | Relying on the skill text alone for the rename. |
-| I-18 | Tracker updates are outbox events. A Chapter Master or Primarch records the update in a fixed template and never calls tracker tools itself. Pending and failed updates show on the dashboard and never block implementation. *Proposed by the implementing agent, not yet confirmed by the user (open question 9): the events use the existing outbox with no second delivery path, and CBC owns only the envelope, meaning a stable ID, an idempotency key, a state (pending, done or failed) and the external record reference written back afterwards.* | The implementing agent stops spending tokens and attention on tracker tools. A retry can't create a second task. A missed update is visible without anyone checking (I-13). | The Chapter Master writing with its own tools (I-11). A separate tracker queue beside the outbox. |
+| I-17 | *Order superseded by I-27.* A new agent's start sequence: read the role skill, read the applicable extension, rename the chat for its task, then register. Registration creates the report room in the core, and the Primarch is told by a push, with no room ID passed by the user and no polling. | Chapter Masters skip the rename today. Cause not known: the skill in this repository already puts the rename first and preserves only an explicit user title, so either the installed copy differed or the agent mistakes the host's automatic title for a user title. To be checked against the installed revision. | Relying on the skill text alone for the rename. |
+| I-18 | *Who records the event: superseded by I-24. Envelope and storage: settled by I-25 and I-26.* Tracker updates are outbox events. A Chapter Master or Primarch records the update in a fixed template and never calls tracker tools itself. Pending and failed updates show on the dashboard and never block implementation. *Proposed by the implementing agent, not yet confirmed by the user (open question 9): the events use the existing outbox with no second delivery path, and CBC owns only the envelope, meaning a stable ID, an idempotency key, a state (pending, done or failed) and the external record reference written back afterwards.* | The implementing agent stops spending tokens and attention on tracker tools. A retry can't create a second task. A missed update is visible without anyone checking (I-13). | The Chapter Master writing with its own tools (I-11). A separate tracker queue beside the outbox. |
 | I-19 | An optional **tracker agent** carries out tracker events. It is a CBC member woken by the outbox, and it is shown on the dashboard alongside the Emperor. Its extension file says which tool the team uses and how. It reads what is already in the tracker, keeps human edits, and consults the Primarch about scope. It asks the user only when the answer is still unclear. A team may use another executor (a script, or the tracker's own AI) if it reports results back the same way. | A tracker is a tool people edit by hand, so writing to it needs judgement about what is already there. Only one agent needs the tracker's details, and nobody else carries them. | A deterministic sync with no model involved. Every agent knowing the tracker. |
 | I-20 | CBC defines default event names, not workflows: task created, task changed, PR linked, blocked or resumed, done, dropped or superseded, and feature created or linked. The mapping to a tool's fields, task granularity and progress calculation belong to the user's extension. Trackers get only these major events; the dashboard gets the detailed updates. | A tool-specific rule in CBC (I-10's one task per PRD, slice-count progress) is right for one team and wrong for the next. | Provider adapters or a fixed schema inside CBC. |
 | I-21 | Feature association needs no question when the user or the assignment already states it. Otherwise the tracker agent asks the Primarch, and asks the user only if the Primarch can't settle it. | Asking the user about something already decided is the old approval tax. | Always asking the user. The agent guessing silently. |
 | I-22 | Trial 1 runs unchanged. I-15 to I-21 are exercised in the next trial, on a small real feature in a user's product repository, with no production promotion unless the result is good. This changes T-01 for that trial only. | A mid-run change makes trial measurements incomparable (T-15). A structured real product shows whether the tracker flow helps, which a CBC feature can't. | Changing trial 1 mid-run. Testing the tracker flow on CBC itself. |
 | I-23 | The Primarch answers scope and context questions from Chapter Masters and the tracker agent. This restates I-02 and I-03 and adds the tracker agent as a consulter. It does not make the Primarch an orchestrator. | The Primarch is no longer occupied with PRs and reviews, and it is the agent that holds the whole repository's context. | Routing tracker questions to the user first. |
+
+## 2b. Decision record, 2026-11-21
+
+Taken with the user after the review of PR #169 found four gaps in the tracker
+design (open questions 4 and 10 to 12).
+
+| ID | Decision | Why | Rejected |
+|---|---|---|---|
+| I-24 | The core creates tracker events, in the same transaction as the work-item revision that causes them, and only for projects with a tracker extension. The extension maps each event to its effect in the tool. An agent records an event only for a lifecycle point the core can't observe. | If the agent records the event after the transition, a crash between the two leaves nothing pending, and a missed update is invisible, which is what I-13 forbids. The core already records transitions as atomic revisions. | The agent recording events (I-18 as first written). A periodic reconcile to catch missed ones. |
+| I-25 | The executor writes the CBC event's stable ID onto the external record (a property or a hidden marker, as its extension says) and searches for that ID before creating anything. It marks the event `in_progress` before the external write; an event found `in_progress` after a crash is checked against the tracker before any retry. | A crash after the tracker creates the record but before the reference is written back would otherwise duplicate the record on retry. Most trackers offer no idempotency key of their own, but nearly all can store a field. | Relying on the tracker's own idempotency key. CBC's idempotency key alone. |
+| I-26 | Tracker events have their own table and state (`pending`, `in_progress`, `done`, `failed`), independent of rooms and room delivery. An executor drains the pending events when woken; an executor configured later claims the backlog, within an age limit the extension may set. This answers open question 9: the envelope fields stand, but the events are not delivered through room inboxes. | The existing outbox delivers only to open report rooms, so with no room an event would be pending nowhere and nothing would be left for a later executor to collect. | Reusing room delivery for tracker events. |
+| I-27 | A new agent's start order is: register; read the extension whose path registration returns; rename the chat to the name the core chose; report the rename's result. The core resolves the extension from the member's working directory and chooses the name. | The core becomes the single source of the extension path and the name, and every step leaves a record the trial can check, including the rename agents skip today. The Primarch hears of the member before the chat is renamed, which doesn't matter because its map uses the core's name. | I-17's order (extension and rename before registering). A separate read-only lookup call before registration. The agent searching the four levels itself. |
 
 ## 3. Tracker profile (superseded 2026-11-18, kept as history)
 
@@ -127,14 +141,19 @@ question 4.
 
 ### Tracker update flow
 
-1. A Chapter Master or Primarch reaches a lifecycle point that its extension
-   marks as a tracker event, and records one templated event. A role with no
-   tracker extension records none.
-2. The core stores the event with its envelope (I-18) and delivers it through
-   the inbox to the tracker executor, which is woken like any member.
-3. The executor reads its own extension, looks at the current tracker contents,
-   applies the update, and writes back the external record reference with
-   `done`, or `failed` with the reason.
+*Updated 2026-11-21 by I-24 to I-26.*
+
+1. A work-item revision commits. In the same transaction, the core creates the
+   tracker events that revision causes, if the project has a tracker
+   extension (I-24). An agent records an event only for a lifecycle point the
+   core can't observe.
+2. The events are stored in their own table with their envelope and state
+   `pending` (I-26). The tracker executor is woken like any member and drains
+   them; one configured later claims the backlog.
+3. The executor marks an event `in_progress`, reads its own extension, searches
+   the tracker for the event's stable ID, and creates or updates the record,
+   storing that ID on it (I-25). It then writes back the external record
+   reference with `done`, or `failed` with the reason.
 4. Anything pending past its due time, or failed, shows on the dashboard for
    that work item. Implementation never waits for it.
 
@@ -178,8 +197,8 @@ Opened 2026-11-18:
    the chat name to use. The second can be checked; the first depends on each
    host's file tools. Proposal: the second.
    *Review of PR #169:* the second conflicts with I-17, which reads the
-   extension and renames before registering. Either a lookup step before
-   registration, or a changed start order. Undecided.
+   extension and renames before registering. **Resolved 2026-11-21 by I-27:**
+   registration comes first and returns the path and the name.
 5. **One Chapter Master per feature, so what is a task?** The requester
    handoff maps one Chapter Master assignment to one task. Under I-15 a Chapter
    Master holds a whole feature, so the natural task is the unit it hands to a
@@ -200,23 +219,25 @@ Opened 2026-11-18:
 9. **The outbox envelope.** I-18's envelope fields and the reuse of the
    existing outbox are the implementing agent's proposal. The requester
    handoff asks for idempotent delivery and a stable external identity, which
-   this meets. To be confirmed by the user.
+   this meets. **Resolved 2026-11-21 by I-26:** the envelope stands; tracker
+   events get their own table rather than room delivery.
 
 Opened 2026-11-21, from the review of PR #169:
 
 10. **Who creates the tracker event.** In section 3a the agent records it. If the
     work transition commits and the agent stops before recording the event,
     nothing shows as pending, which breaks I-13. Alternative: the core creates
-    the event in the same transaction as the work transition. Undecided.
+    the event in the same transaction as the work transition. **Resolved by I-24.**
 11. **Retry across the external write.** If the tracker creates a record and the
     executor stops before writing the reference back, a retry creates a second
     record. CBC's idempotency key alone can't prevent that; the executor needs
     the provider's idempotency key or a stable ID stored on the external record.
-    The next trial should exercise that crash point.
+    The next trial should exercise that crash point. **Resolved by I-25.**
 12. **Pending with no executor.** The current outbox delivers to open report
     rooms only; a revision with no room has an empty delivery list and is
     pending nowhere. A tracker event needs a durable record that doesn't depend
     on a room, and a way for a newly configured executor to claim it.
+    **Resolved by I-26.**
 
 ## 5. Later: talking to a Chapter Master from the dashboard
 

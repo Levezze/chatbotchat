@@ -2,7 +2,7 @@
 
 What the next working trial changes, and why. It collects findings from trial 1 as they come in,
 and the design decisions taken since trial 1 started
-([ADR-0013](../decisions/0013-delegating-chapter-masters-and-tracker-outbox.md), I-15 to I-23 in
+([ADR-0013](../decisions/0013-delegating-chapter-masters-and-tracker-outbox.md), I-15 to I-27 in
 [feature intake and tracker profiles](feature-intake-and-tracker-profiles.md)).
 
 Trial 1 is not changed mid-run (T-15, I-22). Nothing here is built. Raw evidence stays in the
