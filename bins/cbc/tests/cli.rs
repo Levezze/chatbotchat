@@ -706,6 +706,29 @@ fn wait_until_connectable(addr: SocketAddr, timeout: Duration) {
     }
 }
 
+/// Path to the `chatbotchat-server` binary built from the sibling workspace package.
+///
+/// Cargo sets `CARGO_BIN_EXE_<name>` only for the binaries of the package under
+/// test, so the server binary can't be found that way. `assert_cmd`'s fallback
+/// looks next to the test executable, which stopped working once Cargo began
+/// keeping test executables in a separate build directory. Final binaries are
+/// still uplifted into one directory, so the server binary sits next to `cbc`.
+/// `cargo test --workspace` builds it, because the server package has
+/// integration tests of its own.
+fn server_binary() -> std::path::PathBuf {
+    let bin = std::path::Path::new(env!("CARGO_BIN_EXE_cbc")).with_file_name(format!(
+        "chatbotchat-server{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    assert!(
+        bin.exists(),
+        "chatbotchat-server binary not found at {}; build the workspace first \
+         (`cargo build --workspace`) or run `cargo test --workspace`",
+        bin.display()
+    );
+    bin
+}
+
 /// Spawn the real `chatbotchat-server` *binary* on an explicit `--port`. Unlike
 /// `spawn_daemon` (which runs the server in-process on an ephemeral port), this
 /// exercises the daemon's `--port` flag and returns a child the caller must reap.
@@ -714,7 +737,7 @@ fn spawn_daemon_binary_on_port() -> (String, u16, Child, tempfile::TempDir) {
     let port = free_port();
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("state.db");
-    let bin = assert_cmd::cargo::cargo_bin("chatbotchat-server");
+    let bin = server_binary();
     let child = StdCommand::new(bin)
         .args(["--port", &port.to_string(), "--db", db.to_str().unwrap()])
         .stdout(Stdio::null())
