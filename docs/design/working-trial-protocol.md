@@ -48,7 +48,7 @@ later trials append new decisions rather than editing these.
 
 | ID | Decision | Why | Rejected alternatives |
 |---|---|---|---|
-| T-01 | Trial 1 builds real chatbotchat features with brand-new agents. | We know exactly what we want built here, so results can be judged against clear requirements. Stakes are real but contained to this repo. | An aevark product repo (real risk to product work). A throwaway repo (proves little). |
+| T-01 | Trial 1 builds real chatbotchat features with brand-new agents. *The next trial uses a product repository instead (I-22).* | We know exactly what we want built here, so results can be judged against clear requirements. Stakes are real but contained to this repo. | An aevark product repo (real risk to product work). A throwaway repo (proves little). |
 | T-02 | Two phases. Phase 1 is a messaging smoke test between two peers. Phase 2 is the implementation test with the full hierarchy. | Phase 1 isolates transport, identity and room defects so they don't contaminate the hierarchy measurement. | Hierarchy from the first minute. |
 | T-03 | A Primarch takes part in phase 2. | Intervention by exception is half of the design. A trial without a Primarch can't show whether it stays out of the way. | Add the Primarch in a later trial. |
 | T-04 | No polling fallback by default. A native scheduled task, at roughly 5 minutes, is an explicit per-session opt-in with token and idle limits. | Per-chat polling is what we are removing. Scheduled tasks rerun model prompts, so they cost tokens on every tick. | A default fallback. Per-chat polls. |
@@ -82,6 +82,8 @@ later trials append new decisions rather than editing these.
 |---|---|---|---|
 | T-28 | T-24 is applied as: a Claude seat allows only `mcp__cbc-trial__*` and denies `mcp__chatbotchat__*`; a Codex seat pre-approves the `cbc-trial` server and disables `chatbotchat`. No CLI binary is allowed to any seat. | The candidate transport reaches agents only through the adapter's tools. The `cbc-candidate` CLI is the operator's (init, serve, provision, revoke, retire), so allowing it to an agent would hand it enrollment powers. | Allowing the `cbc-candidate` binary, as T-24's wording first suggested. |
 | T-29 | Phase 1 seats: `peer-a` in Claude Code and `peer-b` in Codex, with a `peer` grant scoped `smoke`. | Phase 2 exercises Codex's wake path only through the Primarch (T-13). One peer per app tests both native wake paths before the hierarchy runs. | Two Claude peers. |
+| T-30 | Added 2026-11-21. Phase 2 runs as planned once all six phase 1 checks (section 4) pass, including step 4: desktop apps, current role skills, no ADR-0013 changes. It is the baseline for the next trial. Two changes go in between the phases: the Codex Primarch's Stage A loads its tools through tool search before listing them, and the trial manager records the busy-request reading (T-31). Neither touches the pinned core (T-15) or the role skills (I-22). | Changing the host or the skills now would change two variables at once, with no adapter built for a new host. | Moving phase 2 to another host; folding in ADR-0013; replacing phase 2 with the next trial. |
+| T-31 | Added 2026-11-21. For the "request sent while its owner is busy" scenario, record from transcripts the time from send to the owner's fetch. Also record which of the owner's turns was running at the send time, and whether the fetch fell in that same turn or a later one. | Phase 1's busy test was one 90-second tool call, so it could not tell delivery at the end of the turn from delivery at the next tool call. | Relying on wake latency alone. |
 
 ## 3. What is built before the trial
 
@@ -357,7 +359,7 @@ Changes for the next trial
 
 | Trial | Date | Build | Result | Report |
 |---|---|---|---|---|
-| 1 | not started | to be pinned | waiting on the pre-trial build (section 3) and the user's go | none yet |
+| 1 | phase 1 started 2026-11-15 | to be pinned | phase 1 steps 1 to 3 passed; step 4 and phase 2 pending (T-30) | none yet |
 
 ## 10. Improving future trials
 

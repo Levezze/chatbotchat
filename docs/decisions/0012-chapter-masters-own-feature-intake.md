@@ -1,6 +1,7 @@
 # ADR-0012 — Chapter Masters own feature intake; tracker sync is an optional profile
 
-- **Status:** Accepted (design only; nothing built)
+- **Status:** Accepted (design only; nothing built). Decision 5 and the tracker part of
+  decision 1 superseded by [ADR-0013](0013-delegating-chapter-masters-and-tracker-outbox.md).
 - **Date:** 2026-11-11
 - **Related:** [feature intake and tracker profiles](../design/feature-intake-and-tracker-profiles.md)
   (decisions I-01 to I-14), [ADR-0011](0011-trial-1-decisions.md), PRD #112,
