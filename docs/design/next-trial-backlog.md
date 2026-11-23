@@ -47,9 +47,10 @@ published once the trial ends (T-22).
 8. **Codex re-checks after its own sends**, following the adapter's "check until the inbox is
    empty" instruction. Bounded by the inbox, so it is not polling, but the report must not count
    it as such.
-9. **The driver retries a dead core forever.** Every 30 seconds, logging each attempt: about 17,000
-   events and 3 MB over the 3.4-day outage. Fix: exponential backoff with a cap, and a log of the
-   first failure plus a periodic summary.
+9. **The driver retries a dead core forever.** It already backs off (1, 2, 4, 8 and 16 seconds),
+   but caps at 30 seconds and logs every attempt: about 17,000 events and 3 MB over the 3.4-day
+   outage. Fix: a much slower retry once an outage has lasted a while, and a log of the first
+   failure plus a periodic summary.
 10. **A stale socket blocks restart.** A killed core leaves its connector socket behind and refuses
     to start until it is removed by hand. Fix: on start, remove a socket nothing is listening on,
     as the driver already does.
@@ -65,10 +66,12 @@ published once the trial ends (T-22).
     building a pin.
 15. **The tally carried only `cbc`**, so the other three prompt kinds read as missing. Now: the sheet
     tallies all four kinds, zeros included.
-16. **The sampler is not scoped by case root.** It counts every matching process of the user by
-    executable and script name, so a second stack, or a local test run of the candidate that starts
-    its own `serve`, is counted as this run's cost. Until fixed, no other candidate process runs on
-    the machine while a measured run samples, and any span where one did is marked contaminated.
+16. **The sampler is not scoped by case root.** It counts every candidate process of the user by
+    executable and script name, so a second stack, or a test run of the candidate that starts its
+    own `serve`, is counted as this run's cost. Phase 2's Chapter Masters work on the candidate
+    itself and run its tests, so this happens in every phase 2 run. Now: the phase 2 sheet labels
+    the raw cost and derives the stack-only cost afterwards from the PIDs each tick stores. Later:
+    scope the sampler to the case root.
 17. **The report cannot measure what the next trial changes**: autonomy, Primarch interventions, CI
     waits and turns per hour all read as missing. Now: phase 2 counts them by hand from a fixed
     list in the sheet. Later: decide which become core records.
@@ -97,7 +100,7 @@ Not every fix is needed before the next trial runs unattended.
   - log polish.
 - **Proposed as refinements, under review:**
   - the split Codex error (13);
-  - a root-scoped sampler (16), not needed while measured runs stay apart;
+  - a root-scoped sampler (16), worked around by deriving the stack-only cost from PIDs;
   - Codex tools not deferred (5), worked around by the setup step's tool search.
 
 ## 3. What the next trial adds

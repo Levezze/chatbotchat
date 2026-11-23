@@ -147,13 +147,16 @@ Start the cost sampler in terminal 4 and leave it running. It prints the file it
 path as ACTUAL_SAMPLES_FILE. A restarted sampler writes a new file: from then on the health check
 uses the newest file, every file is kept, and the report gets one `--samples` per file.
 
-The sampler counts every matching candidate process of this user, whatever its case. While it runs,
-no other `cbc-candidate` process runs on this machine: no second stack, and no local test run of
-the candidate, whose tests start their own `serve`. If one did run, record its start and end times
-in wall milliseconds (`date +%s000`). The report counts every tick it is given, so a contaminated span is kept out
-of the cost figures by reporting the clean windows on either side of it separately, with `--from`
-and `--until`. If no usable clean window remains, the baseline cost is unavailable. The raw files
-are kept either way.
+The sampler counts every candidate process of this user, whatever its case (finding 16): the
+`cbc-candidate` binary by name, and the Python adapters by path. The Chapter Masters build and test
+the candidate in their own clones, and those tests start their own `serve`, so the raw cost figure
+includes them. Do not stop or restrict the seats' tests: that would change the workflow being
+measured. The cost is accounted for afterwards instead. Each tick stores its processes' PIDs, so the
+trial manager takes the stack's PIDs from the last tick before the go, and again after any restart
+of the core, the driver or a seat. From those PIDs the stack-only cost is derived from the raw
+files. For a span where the stack's PIDs are not known, the stack-only cost is unavailable. The
+report's own cost figure is labelled as including the seats' test processes. The PIDs stay in the
+private evidence. No second stack runs on this machine while the sampler runs.
 
 ```sh
 <BINARY> sample --root <CORE> --protected-db ~/.chatbotchat/state.db
@@ -171,9 +174,11 @@ the end of run (step 8). Record the time and each result in `<CASE>/evidence.md`
 3. **The driver is running and attached.** Positive evidence, not just the absence of errors: the
    newest line of the newest samples file lists an `adapters/device/router.py` process, terminal 2 has
    not returned to the shell prompt, and the driver is reaching the core now. If terminal 2 or the
-   driver's log in `<CORE>/device-log` shows a failure to reach the core since the last check, the
-   driver passes only when a later entry shows it reaching the core again, such as a delivered wake.
-   The earlier outage is then recorded separately, with its span.
+   driver's log in `<CORE>/device-log` shows a failure to reach the core since the last check, look
+   at the last `feed_failed` entry. The driver logs one for every failed attempt, with the delay
+   before the next one as `retry_ms`. If no new `feed_failed` entry has appeared for more than twice
+   that delay, the next attempt reached the core, and the driver passes. The earlier outage is then
+   recorded separately, with its span.
 
 Checks 2 and 3 are observed by the operator; no command tests those paths. Before the go, all three
 must pass: resolve any failure before sending the role messages. After the go, a failed core
@@ -197,6 +202,8 @@ span.
    span unavailable. Nobody patches the pinned build.
 4. Phase 1 recorded one unexplained core exit. If the same thing happens again with the stack in a
    standalone terminal, stop the measured baseline and diagnose before any retry. Do not restart.
+   A stopped run is not the baseline and produces no report. Keep `<CORE>` whole for the diagnosis;
+   the rerun uses a new case.
 5. **Restarting.** The pinned core refuses to start while `<CORE>/connector.sock` exists (finding
    10). Before removing it, confirm that no core answers on it: the `settings` command from the
    health check must fail to connect, and terminal 1 must be back at the shell prompt. Confirm the
@@ -333,9 +340,10 @@ transcripts and the database, the same way in the next trial:
   departure from the mandate. Count answers to Chapter Masters' requests separately too.
 - For each Chapter Master: time waiting on CI, on the Primarch and on the user, and time working.
   A CI wait needs pending checks on the PR's current head (protocol section 6), which the pinned
-  core does not record. After the run, read each PR's commits and each workflow run's head commit,
-  start and end times from GitHub. A CI wait is a span where the Chapter Master was blocked while a
-  run on the current head was pending. Where those facts are missing, the wait is unknown, never
+  core does not record. After the run, read from GitHub each PR's head commits and the checks on
+  each head. A check counts as pending on the current head from when it was created, queued time
+  included, until it completed. A CI wait is a span where the Chapter Master was blocked while a
+  check on the current head was pending. Where those facts are missing, the wait is unknown, never
   guessed from the transcript.
 - Go-ahead and routine-permission messages to the Primarch, and to the user.
 - Routine permission or acknowledgement messages between agents, the Chapter Masters' peer room
