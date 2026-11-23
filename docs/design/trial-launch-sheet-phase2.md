@@ -149,8 +149,11 @@ uses the newest file, every file is kept, and the report gets one `--samples` pe
 
 The sampler counts every matching candidate process of this user, whatever its case. While it runs,
 no other `cbc-candidate` process runs on this machine: no second stack, and no local test run of
-the candidate, whose tests start their own `serve`. If one did run, record the span and mark those
-samples contaminated.
+the candidate, whose tests start their own `serve`. If one did run, record its start and end times
+in wall milliseconds (`date +%s000`). The report counts every tick it is given, so a contaminated span is kept out
+of the cost figures by reporting the clean windows on either side of it separately, with `--from`
+and `--until`. If no usable clean window remains, the baseline cost is unavailable. The raw files
+are kept either way.
 
 ```sh
 <BINARY> sample --root <CORE> --protected-db ~/.chatbotchat/state.db
@@ -167,15 +170,20 @@ the end of run (step 8). Record the time and each result in `<CASE>/evidence.md`
 2. **The sampler is writing.** The newest samples file has grown since the last check.
 3. **The driver is running and attached.** Positive evidence, not just the absence of errors: the
    newest line of the newest samples file lists an `adapters/device/router.py` process, terminal 2 has
-   not returned to the shell prompt, and neither terminal 2 nor the driver's log in
-   `<CORE>/device-log` shows a failure to reach the core since the last check.
+   not returned to the shell prompt, and the driver is reaching the core now. If terminal 2 or the
+   driver's log in `<CORE>/device-log` shows a failure to reach the core since the last check, the
+   driver passes only when a later entry shows it reaching the core again, such as a delivered wake.
+   The earlier outage is then recorded separately, with its span.
 
 Checks 2 and 3 are observed by the operator; no command tests those paths. Before the go, all three
 must pass: resolve any failure before sending the role messages. After the go, a failed core
 check means "If the core exits" below. A dead driver or sampler is recorded in `<CASE>/evidence.md`
 with its time and scrollback, then restarted with the same command; the span it was down is marked
 unavailable in the report's reading. The pinned report counts a sampler gap in its CPU
-denominator, so a cost window with a gap is reported separately. If the driver was down, delivery was blocked for that span.
+denominator, so a cost window with a gap is reported separately. A driver outage is not a total
+delivery outage: Claude delivery and native wakes stop, but a Codex seat still fetches and receipts
+from the core directly. Record which paths were unavailable, and keep any Codex receipts from the
+span.
 
 ### If the core exits
 
@@ -187,14 +195,15 @@ denominator, so a cost window with a gap is reported separately. If the driver w
    logged and the run continues. An exit with an outside cause, such as an app quitting or a
    terminal closing, is not a bug: restart the core in the same case, record the gap, and mark the
    span unavailable. Nobody patches the pinned build.
-4. **Restarting.** The pinned core refuses to start while `<CORE>/connector.sock` exists (finding
-   10). Before removing it, confirm that `lsof <CORE>/connector.sock` prints nothing, so no process
-   is listening, and that the path is this case's socket. Then remove it and run `serve` again.
-5. After a restart, the user reruns the `dashboard` command and checks that the dashboard answers,
+4. Phase 1 recorded one unexplained core exit. If the same thing happens again with the stack in a
+   standalone terminal, stop the measured baseline and diagnose before any retry. Do not restart.
+5. **Restarting.** The pinned core refuses to start while `<CORE>/connector.sock` exists (finding
+   10). Before removing it, confirm that no core answers on it: the `settings` command from the
+   health check must fail to connect, and terminal 1 must be back at the shell prompt. Confirm the
+   path is this case's socket. Then remove it and run `serve` again in terminal 1.
+6. After a restart, the user reruns the `dashboard` command and checks that the dashboard answers,
    because dashboard sessions live only in the core's memory. Do this before resuming the
    dashboard-answer scenario.
-6. Phase 1 recorded one unexplained core exit. If the same thing happens again with the stack in a
-   standalone terminal, stop the measured baseline and diagnose before any retry.
 
 ## 7. Stage B: the role messages (the go)
 
@@ -323,11 +332,17 @@ transcripts and the database, the same way in the next trial:
   hold, stop, note, priority change, HITL flag. Count any review or merge approval separately, as a
   departure from the mandate. Count answers to Chapter Masters' requests separately too.
 - For each Chapter Master: time waiting on CI, on the Primarch and on the user, and time working.
+  A CI wait needs pending checks on the PR's current head (protocol section 6), which the pinned
+  core does not record. After the run, read each PR's commits and each workflow run's head commit,
+  start and end times from GitHub. A CI wait is a span where the Chapter Master was blocked while a
+  run on the current head was pending. Where those facts are missing, the wait is unknown, never
+  guessed from the transcript.
 - Go-ahead and routine-permission messages to the Primarch, and to the user.
 - Routine permission or acknowledgement messages between agents, the Chapter Masters' peer room
   included, counted apart from useful coordination (protocol section 6, autonomy; target zero).
 - Merges, and whether each had an explicit Primarch yes.
-- Empty wakes: a wake that led to a check that found nothing.
+- Empty wakes: a wake whose first fetch found nothing. A Codex seat checks again until its inbox is
+  empty (finding 8), so a follow-up check after a fetch that found items is not an empty wake.
 - Approval prompts in the four kinds, per seat.
 
 Read waits and CPU with any paused or unavailable span marked separately. In phase 1, one 7-day
