@@ -124,8 +124,9 @@ Then, step by step, as the operator:
 4. **Identity.** Compact each session, then restart each app, and ask each peer to `cbc_send` once:
    its identity is unchanged. Fork one session: the fork has no binding.
 5. **Prompts.** Count the CBC-related approval prompts per seat. The target is zero.
-6. **Receipts.** At the end, every committed item has a receipt or an explicit failure in the core's
-   log and in the report.
+6. **Receipts.** At the end, every committed item has a receipt or an explicit failure in the report,
+   which reads the end snapshot. At this pin the core does not log receipts at the normal level
+   (finding 4 in `docs/design/next-trial-backlog.md`).
 
 A failure is fixed before phase 2 starts (protocol section 4).
 

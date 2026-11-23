@@ -8,10 +8,20 @@ and the design decisions taken since trial 1 started
 Trial 1 is not changed mid-run (T-15, I-22). Nothing here is built. Raw evidence stays in the
 local trial case directory (T-22); this file carries only summaries.
 
-## 1. Trial 1 status (2026-11-18)
+## 1. Trial 1 status (2026-11-23)
 
-Phase 1 steps 1 to 3 passed. Step 4 (identity across compaction, restart and fork) has not run
-yet. Results are published by the trial report once the run ends (T-22), not here.
+Phase 1 passed all six checks on the pinned build 40e1f4d (0.33.0). Step 4 passed on its second
+attempt: the first was invalid because the stack ran inside an app's terminal and died when the app
+quit. Every committed item reached a receipt.
+
+What phase 1 shows: delivery and receipts on two desktop hosts, and identity surviving compaction,
+an app restart and a core outage, with state persisting and the room resuming afterwards. What it
+does not show: automatic recovery from an outage (the core stayed down for 3.4 days until it was
+restarted by hand), continuous availability, mid-turn delivery, or more than two seats. The core
+exited once with no crash report and no log line; the cause is unknown.
+
+Phase 2 runs next on the same pin, as the baseline for the next trial (T-30). The full report is
+published once the trial ends (T-22).
 
 ## 2. Trial 1 findings to fix
 
@@ -22,9 +32,11 @@ yet. Results are published by the trial report once the run ends (T-22), not her
    Find what it wakes for and remove the timer if it isn't needed.
 3. **The close doesn't tell the closer about the replacement.** Only the reconnecting side learns
    the new room ID.
-4. **Logs to check before the report.** The core's own log was empty after the messaging, and
-   phase 1 step 6 expects receipts there. The driver's log recorded only the Claude seat's sends, not
-   the Codex seat's. Either may be by design; neither is explained yet.
+4. **Logs to check before the report** (explained). At this pin the core does not log receipts at
+   the normal level, so phase 1 step 6 could never find them there; the report reads them from
+   the end snapshot instead, and the sheets now say so. The driver's log sees only Claude-side
+   events, because the Codex adapter talks to the core directly. Fix: log receipts at info, and
+   document which log sees which seat.
 5. **Codex defers MCP tools.** A Codex seat sees only the tool namespace until it searches, so
    its first "list your CBC tools" answer showed 3 tools and it then denied having the others.
    The setup step for a Codex seat must load the namespace before listing.
@@ -34,6 +46,56 @@ yet. Results are published by the trial report once the run ends (T-22), not her
 8. **Codex re-checks after its own sends**, following the adapter's "check until the inbox is
    empty" instruction. Bounded by the inbox, so it is not polling, but the report must not count
    it as such.
+9. **The driver retries a dead core forever.** Every 30 seconds, logging each attempt: about 17,000
+   events and 3 MB over the 3.4-day outage. Fix: exponential backoff with a cap, and a log of the
+   first failure plus a periodic summary.
+10. **A stale socket blocks restart.** A killed core leaves its connector socket behind and refuses
+    to start until it is removed by hand. Fix: on start, remove a socket nothing is listening on,
+    as the driver already does.
+11. **No supervision.** A dead core went unnoticed for days. Now: a health check in the sheet before
+    each stage. Later: a supervisor.
+12. **The stack dies with its host app** when started from that app's terminal. Now: the sheets
+    require a standalone terminal app.
+13. **One Codex adapter error covers two causes** ("core unavailable or native target authority
+    does not match"). Fix: two errors.
+14. **The report cannot name the build.** The manifest has no build field, so the report says
+    "build unknown". Now: the sheet records the pinned commit next to the report. Later: a build
+    field.
+15. **The tally carried only `cbc`**, so the other three prompt kinds read as missing. Now: the sheet
+    tallies all four kinds, zeros included.
+16. **The sampler is not scoped by case root.** It picks processes by executable and script name, so
+    a second stack on the same machine would be counted as this one's cost. Until fixed, no two
+    measured runs share a machine.
+17. **The report cannot measure what the next trial changes**: autonomy, Primarch interventions, CI
+    waits and turns per hour all read as missing. Now: phase 2 counts them by hand from a fixed
+    list in the sheet. Later: decide which become core records.
+18. **The legacy poll's hourly give-up.** Outside the trial, while a peer stayed silent for hours,
+    the legacy `cbc poll` gave up every hour and woke its model with nothing new, needing a manual
+    relaunch each time. The candidate removes this: in phase 1's quiet stretch of about a week,
+    every wake followed a send. This belongs in the comparison, not in a fix.
+
+### What blocks the next trial
+
+Not every fix is needed before the next trial runs unattended.
+
+- **Blocks:**
+  - health and exit visibility (11);
+  - bounded backoff against a dead core (9);
+  - restart with stale-socket recovery (10);
+  - unread items reconciled durably with no duplicate delivery, on every wake path;
+  - wakes suppressed when nothing is unread at dispatch, with the race tested (1);
+  - the build and receipts reportable, from snapshots if the evidence is unambiguous;
+  - the closer told about its replacement (3), if the workflow relies on one side closing and
+    reconnecting; otherwise recorded as a known limitation.
+- **Refinements, not gating:**
+  - receipts logged at info (4);
+  - a build field in the manifest (14);
+  - zero idle CPU (2);
+  - log polish.
+- **Proposed as refinements, under review:**
+  - the split Codex error (13);
+  - a root-scoped sampler (16), not needed while measured runs stay apart;
+  - Codex tools not deferred (5), worked around by the setup step's tool search.
 
 ## 3. What the next trial adds
 
@@ -43,7 +105,7 @@ yet. Results are published by the trial report once the run ends (T-22), not her
 | Start sequence: extension, rename, register | I-16, I-17 | Every new agent reads its extension, renames its chat and registers before other work, and the Primarch learns of it with no user relay. |
 | Tracker events in the outbox | I-18, I-20 | Each event has its configured effect once (create, link or update, which may hit the same tracker record), no duplicate on retry, replay or restart, and pending or failed updates visible on the dashboard. |
 | Tracker agent | I-19, I-21, I-23 | It updates the user's real tracker, keeps human edits, asks the Primarch before the user, and no implementing agent touches tracker tools. |
-| Fixes from section 2 | — | No empty wakes, an idle driver, and the closer told about the replacement. |
+| Fixes from section 2 | — | The blockers listed under "What blocks the next trial". Refinements are welcome but not required. |
 
 Setting: a small real feature in a user's product repository (I-22), not CBC itself, with
 promotion to production only if the result is good.
@@ -93,11 +155,22 @@ What its source shows (read at commit `fcf50973`, not tried live):
 - **Worth borrowing regardless:** T3 registers its MCP server for Codex so that the tools are not
   deferred behind tool search, which may fix finding 5.
 
-Questions to settle before the trial is designed:
+Decided (2026-11-23):
 
-1. Main host or second host. Moving the host and the ADR-0013 role changes in the same trial
-   changes two variables at once; phase 2 (T-30) is the baseline that makes the comparison
-   possible.
+- **Second host first.** T3 is qualified on its own before the next trial depends on it: a short
+  pinned smoke on the phase 1 script, then a cross-host room, then child threads. The smoke pin is
+  the phase 1 pin plus a T3 delivery adapter and nothing else, so its result compares the host
+  alone. Whether T3 becomes the main host is decided after that.
+- **In the next trial, one Chapter Master on T3.** The Primarch and the other Chapter Master stay on
+  the desktop apps, since the Primarch's turns and interventions are the main comparison with phase
+  2.
+- **Order.** Phase 2 first, then the T3 smoke. T3 setup and preparation may overlap phase 2. Measured
+  runs may not share a machine (finding 16): the T3 smoke runs outside phase 2's measurement windows
+  or on another machine.
+
+Questions still open:
+
+1. ~~Main host or second host.~~ Decided above.
 2. Do T3's child threads satisfy I-15 (helpers on the host's native mechanism, the Chapter
    Master free while they run, the user able to talk to a helper directly)? CBC stays between
    leads and across hosts either way.
