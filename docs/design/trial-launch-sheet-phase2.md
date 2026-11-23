@@ -47,6 +47,10 @@ keeps this terminal. Do not print `<CORE>/owner.key` or the generated profile.
 
 ## 2. Host preparation (user steps)
 
+From this step on, count every approval prompt per seat in all four kinds: CBC-related, native
+setup consent, genuine native refusal, and other (protocol section 6). Native setup consent is
+expected here; the zero target for CBC-related prompts applies after setup.
+
 - **Codex, primarch.** Open `<PRIMARCH_WORKTREE>` in Codex. Trust the project when Codex asks; project
   configuration is ignored until then.
 - **Claude, cm-a and cm-b, Desktop.** In each Claude worktree, run once:
@@ -154,14 +158,15 @@ the end of run (step 8). Record the time and each result in `<CASE>/evidence.md`
 1. **The core answers.** `<BINARY> settings --root <CORE> --protected-db ~/.chatbotchat/state.db`
    prints the settings. This is a request and a response over the core's connector socket, so it
    fails if `serve` is down. A running process or an existing socket file is not enough.
-2. **The driver is attached.** Neither terminal 2 nor the driver's log in `<CORE>/device-log` shows
-   a new failure to reach the core since the last check. Operator-observed: no command tests this
-   path.
-3. **The sampler is writing.** ACTUAL_SAMPLES_FILE has grown since the last check.
-   Operator-observed.
+2. **The sampler is writing.** ACTUAL_SAMPLES_FILE has grown since the last check.
+3. **The driver is running and attached.** Positive evidence, not just the absence of errors: the
+   newest line of ACTUAL_SAMPLES_FILE lists an `adapters/device/router.py` process, terminal 2 has
+   not returned to the shell prompt, and neither terminal 2 nor the driver's log in
+   `<CORE>/device-log` shows a failure to reach the core since the last check.
 
-If check 1 fails before the go, do not start. If anything fails after the go, follow "If the core
-exits" below.
+Checks 2 and 3 are observed by the operator; no command tests those paths. Before the go, all three
+must pass: resolve any failure before sending the role messages. If anything fails after the go,
+follow "If the core exits" below.
 
 ### If the core exits
 
@@ -178,8 +183,8 @@ Before the go, the user confirms once that observer access works: the configured
 and checks can be read with the access cm-a will use. Record the result. Do not tell the seats about
 the scenarios in section 9; a seat that knows them in advance is no longer a baseline.
 
-Then send each seat its message. From here, count every CBC-related approval prompt per seat (T-27), for
-the report's tally file.
+Then send each seat its message. The approval-prompt counters started at step 2 (see below); from
+here, the target for CBC-related prompts is zero (T-27).
 
 ### Stage B message, primarch (Codex)
 
@@ -268,8 +273,12 @@ The protocol's phase 2 scenarios (section 4), with what each must leave as evide
 not told about them in advance.
 
 - **A request sent while its owner is busy.** Seed one request to a member that is in a turn made of
-  several short tool calls. Record which of the owner's turns was running at send time, and whether
-  the receipt landed in that turn or a later one (T-31).
+  several short tool calls. From the transcripts, record the send time and the owner's actual fetch
+  time, which of the owner's turns was running at send time, and whether the fetch fell in that
+  turn or a later one (T-31). The receipt alone is not enough.
+- **A ready request addressed to the busy Primarch.** Record separately the receipt, the Primarch's
+  decision on it, and the work that follows. Record how long it waited, without reading that as
+  transport loss.
 - **A Primarch hold on one operation**, such as an exclusive test port. Name the one operation it
   blocks, and show the other Chapter Master's unrelated work continuing. At this pin a hold is a
   message, not a record (#114), so the hold steps are observed by the operator. Do not present a
@@ -281,16 +290,18 @@ not told about them in advance.
   check state with its freshness; cm-b shows the view rendering real facts and the empty and stale
   states.
 
-If the two merges are not done by the five-hour checkpoint (T-21), stop there and record how much of
-the hierarchy workflow was observed.
+At the five-hour checkpoint (T-21), the trial manager writes an interim report from the
+deterministic data, and the user and the trial manager decide together whether to extend or stop.
+If the run stops with merges outstanding, record how much of the hierarchy workflow was observed.
 
 ## 10. What the trial manager counts by hand
 
 The report cannot yet measure what the next trial changes (finding 17). Count these from the
 transcripts and the database, the same way in the next trial:
 
-- Primarch turns per hour, and interventions by kind: answer, redirect, unblock, review, merge
-  approval.
+- Primarch turns per hour, and interventions by the kinds in its mandate (the role table, protocol section 4):
+  hold, stop, note, priority change, HITL flag. Count any review or merge approval separately, as a
+  departure from the mandate. Count answers to Chapter Masters' requests separately too.
 - For each Chapter Master: time waiting on CI, on the Primarch and on the user, and time working.
 - Go-ahead and routine-permission messages to the Primarch, and to the user.
 - Merges, and whether each had an explicit Primarch yes.

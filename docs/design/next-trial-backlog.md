@@ -34,9 +34,10 @@ published once the trial ends (T-22).
    the new room ID.
 4. **Logs to check before the report** (explained). At this pin the core does not log receipts at
    the normal level, so phase 1 step 6 could never find them there; the report reads them from
-   the end snapshot instead, and the sheets now say so. The driver's log sees only Claude-side
-   events, because the Codex adapter talks to the core directly. Fix: log receipts at info, and
-   document which log sees which seat.
+   the end snapshot instead, and the sheets now say so. The driver's log does not see Codex
+   sends or other Codex tool calls, because the Codex adapter talks to the core directly. It does
+   log Codex wake attempts and their outcomes, so it is still the place to look for a missed Codex
+   wake. Fix: log receipts at info, and document which log sees what.
 5. **Codex defers MCP tools.** A Codex seat sees only the tool namespace until it searches, so
    its first "list your CBC tools" answer showed 3 tools and it then denied having the others.
    The setup step for a Codex seat must load the namespace before listing.
@@ -54,13 +55,14 @@ published once the trial ends (T-22).
     as the driver already does.
 11. **No supervision.** A dead core went unnoticed for days. Now: a health check in the sheet before
     each stage. Later: a supervisor.
-12. **The stack dies with its host app** when started from that app's terminal. Now: the sheets
-    require a standalone terminal app.
+12. **The stack dies with its host app** when started from that app's terminal. Now: both launch
+    sheets require a standalone terminal app.
 13. **One Codex adapter error covers two causes** ("core unavailable or native target authority
     does not match"). Fix: two errors.
-14. **The report cannot name the build.** The manifest has no build field, so the report says
-    "build unknown". Now: the sheet records the pinned commit next to the report. Later: a build
-    field.
+14. **The report cannot name the build.** The manifest already has a build field, but its commit
+    reads "unknown" because the pinned binary was compiled without `CBC_BUILD_COMMIT` set. Now: the
+    sheet records the pinned commit next to the report. Later: set `CBC_BUILD_COMMIT` when
+    building a pin.
 15. **The tally carried only `cbc`**, so the other three prompt kinds read as missing. Now: the sheet
     tallies all four kinds, zeros included.
 16. **The sampler is not scoped by case root.** It picks processes by executable and script name, so
@@ -89,7 +91,7 @@ Not every fix is needed before the next trial runs unattended.
     reconnecting; otherwise recorded as a known limitation.
 - **Refinements, not gating:**
   - receipts logged at info (4);
-  - a build field in the manifest (14);
+  - the build commit set at compile time (14);
   - zero idle CPU (2);
   - log polish.
 - **Proposed as refinements, under review:**
