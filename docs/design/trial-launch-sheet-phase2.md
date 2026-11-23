@@ -154,8 +154,9 @@ the end of run (step 8). Record the time and each result in `<CASE>/evidence.md`
 1. **The core answers.** `<BINARY> settings --root <CORE> --protected-db ~/.chatbotchat/state.db`
    prints the settings. This is a request and a response over the core's connector socket, so it
    fails if `serve` is down. A running process or an existing socket file is not enough.
-2. **The driver is attached.** Terminal 2 shows no "core unavailable" lines since the last check.
-   Operator-observed: no command tests this path.
+2. **The driver is attached.** Neither terminal 2 nor the driver's log in `<CORE>/device-log` shows
+   a new failure to reach the core since the last check. Operator-observed: no command tests this
+   path.
 3. **The sampler is writing.** ACTUAL_SAMPLES_FILE has grown since the last check.
    Operator-observed.
 
@@ -173,12 +174,12 @@ exits" below.
 
 ## 7. Stage B: the role messages (the go)
 
-Send each seat its message. From here, count every CBC-related approval prompt per seat (T-27), for
-the report's tally file.
-
 Before the go, the user confirms once that observer access works: the configured repository's PRs
 and checks can be read with the access cm-a will use. Record the result. Do not tell the seats about
-the scenarios in step 9; a seat that knows them in advance is no longer a baseline.
+the scenarios in section 9; a seat that knows them in advance is no longer a baseline.
+
+Then send each seat its message. From here, count every CBC-related approval prompt per seat (T-27), for
+the report's tally file.
 
 ### Stage B message, primarch (Codex)
 
