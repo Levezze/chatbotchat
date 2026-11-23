@@ -165,15 +165,21 @@ the end of run (step 8). Record the time and each result in `<CASE>/evidence.md`
    `<CORE>/device-log` shows a failure to reach the core since the last check.
 
 Checks 2 and 3 are observed by the operator; no command tests those paths. Before the go, all three
-must pass: resolve any failure before sending the role messages. If anything fails after the go,
-follow "If the core exits" below.
+must pass: resolve any failure before sending the role messages. After the go, a failed core
+check means "If the core exits" below. A dead driver or sampler is recorded in `<CASE>/evidence.md`
+with its time and scrollback, then restarted with the same command; the span it was down is marked
+unavailable in the report's reading. If the driver was down, delivery was blocked for that span.
 
 ### If the core exits
 
 1. Touch nothing yet. Save the scrollback of terminals 1 and 2, the last lines of
    ACTUAL_SAMPLES_FILE, and whether `<CORE>/connector.sock` still exists, into `<CASE>/evidence.md`.
 2. Note whether any app quit or restarted around that time.
-3. If delivery is blocked, apply T-16: the run stops and the restart is a new run.
+3. Apply T-16. A core bug that blocks delivery aborts the run: it is recorded, fixed through a
+   normal PR, and phase 2 reruns from the start in a new case. A bug that does not block delivery is
+   logged and the run continues. An exit with an outside cause, such as an app quitting or a
+   terminal closing, is not a bug: restart the core in the same case, record the gap, and mark the
+   span unavailable. Nobody patches the pinned build.
 4. Phase 1 recorded one unexplained core exit. If the same thing happens again with the stack in a
    standalone terminal, stop the measured baseline and diagnose before any retry.
 
@@ -183,7 +189,7 @@ Before the go, the user confirms once that observer access works: the configured
 and checks can be read with the access cm-a will use. Record the result. Do not tell the seats about
 the scenarios in section 9; a seat that knows them in advance is no longer a baseline.
 
-Then send each seat its message. The approval-prompt counters started at step 2 (see below); from
+Then send each seat its message. The approval-prompt counters started at step 2; from
 here, the target for CBC-related prompts is zero (T-27).
 
 ### Stage B message, primarch (Codex)

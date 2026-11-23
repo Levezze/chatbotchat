@@ -163,9 +163,9 @@ Decided (2026-11-23):
   pinned smoke on the phase 1 script, then a cross-host room, then child threads. The smoke pin is
   the phase 1 pin plus a T3 delivery adapter and nothing else, so its result compares the host
   alone. Whether T3 becomes the main host is decided after that.
-- **In the next trial, one Chapter Master on T3.** The Primarch and the other Chapter Master stay on
-  the desktop apps, since the Primarch's turns and interventions are the main comparison with phase
-  2.
+- **In the next trial, planned: one Chapter Master on T3**, confirmed after the smoke. The
+  Primarch and the other Chapter Master stay on the desktop apps, since the Primarch's turns and
+  interventions are the main comparison with phase 2.
 - **Order.** Phase 2 first, then the T3 smoke. T3 setup and preparation may overlap phase 2. Measured
   runs may not share a machine (finding 16): the T3 smoke runs outside phase 2's measurement windows
   or on another machine.
@@ -178,7 +178,7 @@ Questions still open:
    leads and across hosts either way.
 3. Does a T3 Codex thread see the user's connectors? Checked by asking one to list its tools.
 4. Mid-turn delivery: a signed-in MCP client, queue only, or the upstream request.
-5. A short peer smoke on T3 (like phase 1) before any hierarchy runs on it.
+5. ~~A short peer smoke on T3 before any hierarchy runs on it.~~ Decided above.
 
 Not for the next trial: a plugin or native integration in T3. T3 has no plugin system today;
 its supported route for outside tools is the MCP server.
