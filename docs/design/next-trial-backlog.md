@@ -65,9 +65,10 @@ published once the trial ends (T-22).
     building a pin.
 15. **The tally carried only `cbc`**, so the other three prompt kinds read as missing. Now: the sheet
     tallies all four kinds, zeros included.
-16. **The sampler is not scoped by case root.** It picks processes by executable and script name, so
-    a second stack on the same machine would be counted as this one's cost. Until fixed, no two
-    measured runs share a machine.
+16. **The sampler is not scoped by case root.** It counts every matching process of the user by
+    executable and script name, so a second stack, or a local test run of the candidate that starts
+    its own `serve`, is counted as this run's cost. Until fixed, no other candidate process runs on
+    the machine while a measured run samples, and any span where one did is marked contaminated.
 17. **The report cannot measure what the next trial changes**: autonomy, Primarch interventions, CI
     waits and turns per hour all read as missing. Now: phase 2 counts them by hand from a fixed
     list in the sheet. Later: decide which become core records.

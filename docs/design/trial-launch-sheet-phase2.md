@@ -144,7 +144,13 @@ dashboard yourself with `<BINARY> dashboard --root <CORE> --protected-db ~/.chat
 Only the user runs that command.
 
 Start the cost sampler in terminal 4 and leave it running. It prints the file it writes; record that
-path as ACTUAL_SAMPLES_FILE.
+path as ACTUAL_SAMPLES_FILE. A restarted sampler writes a new file: from then on the health check
+uses the newest file, every file is kept, and the report gets one `--samples` per file.
+
+The sampler counts every matching candidate process of this user, whatever its case. While it runs,
+no other `cbc-candidate` process runs on this machine: no second stack, and no local test run of
+the candidate, whose tests start their own `serve`. If one did run, record the span and mark those
+samples contaminated.
 
 ```sh
 <BINARY> sample --root <CORE> --protected-db ~/.chatbotchat/state.db
@@ -158,9 +164,9 @@ the end of run (step 8). Record the time and each result in `<CASE>/evidence.md`
 1. **The core answers.** `<BINARY> settings --root <CORE> --protected-db ~/.chatbotchat/state.db`
    prints the settings. This is a request and a response over the core's connector socket, so it
    fails if `serve` is down. A running process or an existing socket file is not enough.
-2. **The sampler is writing.** ACTUAL_SAMPLES_FILE has grown since the last check.
+2. **The sampler is writing.** The newest samples file has grown since the last check.
 3. **The driver is running and attached.** Positive evidence, not just the absence of errors: the
-   newest line of ACTUAL_SAMPLES_FILE lists an `adapters/device/router.py` process, terminal 2 has
+   newest line of the newest samples file lists an `adapters/device/router.py` process, terminal 2 has
    not returned to the shell prompt, and neither terminal 2 nor the driver's log in
    `<CORE>/device-log` shows a failure to reach the core since the last check.
 
@@ -168,19 +174,26 @@ Checks 2 and 3 are observed by the operator; no command tests those paths. Befor
 must pass: resolve any failure before sending the role messages. After the go, a failed core
 check means "If the core exits" below. A dead driver or sampler is recorded in `<CASE>/evidence.md`
 with its time and scrollback, then restarted with the same command; the span it was down is marked
-unavailable in the report's reading. If the driver was down, delivery was blocked for that span.
+unavailable in the report's reading. The pinned report counts a sampler gap in its CPU
+denominator, so a cost window with a gap is reported separately. If the driver was down, delivery was blocked for that span.
 
 ### If the core exits
 
 1. Touch nothing yet. Save the scrollback of terminals 1 and 2, the last lines of
-   ACTUAL_SAMPLES_FILE, and whether `<CORE>/connector.sock` still exists, into `<CASE>/evidence.md`.
+   the newest samples file, and whether `<CORE>/connector.sock` still exists, into `<CASE>/evidence.md`.
 2. Note whether any app quit or restarted around that time.
 3. Apply T-16. A core bug that blocks delivery aborts the run: it is recorded, fixed through a
    normal PR, and phase 2 reruns from the start in a new case. A bug that does not block delivery is
    logged and the run continues. An exit with an outside cause, such as an app quitting or a
    terminal closing, is not a bug: restart the core in the same case, record the gap, and mark the
    span unavailable. Nobody patches the pinned build.
-4. Phase 1 recorded one unexplained core exit. If the same thing happens again with the stack in a
+4. **Restarting.** The pinned core refuses to start while `<CORE>/connector.sock` exists (finding
+   10). Before removing it, confirm that `lsof <CORE>/connector.sock` prints nothing, so no process
+   is listening, and that the path is this case's socket. Then remove it and run `serve` again.
+5. After a restart, the user reruns the `dashboard` command and checks that the dashboard answers,
+   because dashboard sessions live only in the core's memory. Do this before resuming the
+   dashboard-answer scenario.
+6. Phase 1 recorded one unexplained core exit. If the same thing happens again with the stack in a
    standalone terminal, stop the measured baseline and diagnose before any retry.
 
 ## 7. Stage B: the role messages (the go)
@@ -250,7 +263,8 @@ Run the health check first.
    none reads as missing: `{"<CONTEXT>":{"cm-a":{"cbc":0,"native_setup":0,"native_refusal":0,"other":0},...}}`.
    Receipts come from the report, which reads the end snapshot. At this pin the core does not log
    receipts at the normal level (finding 4).
-4. `<BINARY> report --root <CORE> --protected-db ~/.chatbotchat/state.db --manifest <CORE>/snapshots/manifest-run1.json --snapshot ACTUAL_END_SNAPSHOT --tally <CORE>/tally.json --samples ACTUAL_SAMPLES_FILE`
+4. `<BINARY> report --root <CORE> --protected-db ~/.chatbotchat/state.db --manifest <CORE>/snapshots/manifest-run1.json --snapshot ACTUAL_END_SNAPSHOT --tally <CORE>/tally.json --samples ACTUAL_SAMPLES_FILE`, with
+   one more `--samples` for each file a restarted sampler wrote.
 5. Retire each member. Retiring ends the binding, closes the member's rooms and withdraws its requests.
 
    ```sh
@@ -310,6 +324,8 @@ transcripts and the database, the same way in the next trial:
   departure from the mandate. Count answers to Chapter Masters' requests separately too.
 - For each Chapter Master: time waiting on CI, on the Primarch and on the user, and time working.
 - Go-ahead and routine-permission messages to the Primarch, and to the user.
+- Routine permission or acknowledgement messages between agents, the Chapter Masters' peer room
+  included, counted apart from useful coordination (protocol section 6, autonomy; target zero).
 - Merges, and whether each had an explicit Primarch yes.
 - Empty wakes: a wake that led to a check that found nothing.
 - Approval prompts in the four kinds, per seat.

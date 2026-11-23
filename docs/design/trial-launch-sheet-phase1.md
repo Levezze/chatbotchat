@@ -131,8 +131,10 @@ Then, step by step, as the operator:
 6. **Receipts.** At the end, every committed item has a receipt or an explicit failure. Receipts come
    from the report, which reads the end snapshot; at this pin the core does not log receipts at the
    normal level (finding 4 in `docs/design/next-trial-backlog.md`). The pinned report has no
-   delivery-failure record and always prints `failed=missing`, so an unreceipted item counts as an
-   explicit failure only with separate local evidence, such as the driver's log.
+   delivery-failure record and always prints `failed=missing`. An unreceipted item counts as an
+   explicit failure only with item-specific evidence of a terminal failure. A driver `target_failed`
+   entry is a failed attempt with a retry scheduled, not a terminal outcome; without such
+   evidence the item stays unresolved and the check does not pass.
 
 A failure is fixed before phase 2 starts (protocol section 4).
 
