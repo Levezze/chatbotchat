@@ -28,6 +28,10 @@ no assignment. The operator is the user.
 
 ## 1. Start the core (terminal 1)
 
+Terminals 1 to 4 are windows of a standalone terminal app, never the built-in terminal of Codex,
+Claude or another agent app. In phase 1 a stack started inside an app's terminal died when the
+app quit (finding 12 in `docs/design/next-trial-backlog.md`).
+
 ```sh
 <BINARY> init --root <CORE> --port 18485 --protected-db ~/.chatbotchat/state.db
 <BINARY> serve --root <CORE> --protected-db ~/.chatbotchat/state.db --run <CONTEXT>-run1
@@ -124,8 +128,13 @@ Then, step by step, as the operator:
 4. **Identity.** Compact each session, then restart each app, and ask each peer to `cbc_send` once:
    its identity is unchanged. Fork one session: the fork has no binding.
 5. **Prompts.** Count the CBC-related approval prompts per seat. The target is zero.
-6. **Receipts.** At the end, every committed item has a receipt or an explicit failure in the core's
-   log and in the report.
+6. **Receipts.** At the end, every committed item has a receipt or an explicit failure. Receipts come
+   from the report, which reads the end snapshot; at this pin the core does not log receipts at the
+   normal level (finding 4 in `docs/design/next-trial-backlog.md`). The pinned report has no
+   delivery-failure record and always prints `failed=missing`. An unreceipted item counts as an
+   explicit failure only with item-specific evidence of a terminal failure. A driver `target_failed`
+   entry is a failed attempt with a retry scheduled, not a terminal outcome; without such
+   evidence the item stays unresolved and the check does not pass.
 
 A failure is fixed before phase 2 starts (protocol section 4).
 
