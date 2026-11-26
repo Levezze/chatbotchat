@@ -264,25 +264,38 @@ pub fn run(port: u16, plist_dir_override: Option<PathBuf>) -> anyhow::Result<()>
     Ok(())
 }
 
-/// Install the bundled CBC Claude Code skills as part of setup. Unlike
-/// `allow-tools` (a standing security approval that earns its interactive prompt),
-/// a skill file is benign guidance text, so this runs automatically and without a
-/// prompt. It is idempotent and symlink-safe: a devkit-managed symlink is left in
-/// place (reported, not clobbered). Never aborts the install — a skills dir we
-/// cannot write to degrades to a printed hint.
+/// Install the bundled CBC skills into every harness present on this machine, as part of
+/// setup. Unlike `allow-tools` (a standing security approval that earns its interactive
+/// prompt), a skill file is benign guidance text, so this runs automatically and without a
+/// prompt. It is idempotent and symlink-safe: a devkit-managed symlink is left in place
+/// (reported, not clobbered). Never aborts the install, and each harness degrades on its
+/// own — an unwritable Codex skills dir must not cost Claude Code its skills.
 fn install_bundled_skill() {
-    println!();
-    match crate::skill::skills_dir()
-        .and_then(|dir| crate::skill::install_all(&dir, false).map(|outcomes| (dir, outcomes)))
-    {
-        Ok((dir, outcomes)) => {
-            for (name, outcome) in &outcomes {
-                crate::skill::print_outcome(&dir, name, outcome);
-            }
+    for harness in crate::skill::HARNESSES.iter().copied() {
+        // A harness whose home is absent simply isn't installed here; say nothing.
+        if !harness.home().map(|p| p.is_dir()).unwrap_or(false) {
+            continue;
         }
-        Err(e) => {
-            eprintln!("Could not install the cbc skills automatically: {e:#}");
-            eprintln!("Run `cbc install-skill` yourself once it's resolved.");
+        println!();
+        match harness
+            .skills_dir()
+            .and_then(|dir| crate::skill::install_all(harness, &dir, false).map(|o| (dir, o)))
+        {
+            Ok((dir, outcomes)) => {
+                for (name, outcome) in &outcomes {
+                    crate::skill::print_outcome(harness, &dir, name, outcome);
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "Could not install the cbc skills for {} automatically: {e:#}",
+                    harness.label()
+                );
+                eprintln!(
+                    "Run `cbc install-skill --harness {}` yourself once it's resolved.",
+                    harness.flag()
+                );
+            }
         }
     }
 }

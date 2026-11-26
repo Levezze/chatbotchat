@@ -172,9 +172,29 @@ claude mcp add --scope user chatbotchat -e CBC_SERVER=http://127.0.0.1:8484 -- c
 per-repo `.mcp.json` editing. Open a fresh session and `cbc_*` tools are
 available. Verify with `claude mcp list`.
 
-> **Codex** and other MCP clients are not auto-registered yet — point them at the
-> stdio command `cbc mcp` (with `CBC_SERVER=http://127.0.0.1:8484` in its env)
-> using whatever MCP config the client expects.
+For **Codex**, register the same stdio server (note the `--` before the command):
+
+```sh
+codex mcp add chatbotchat --env CBC_SERVER=http://127.0.0.1:8484 -- cbc mcp
+```
+
+That writes this into `~/.codex/config.toml`, which you can equally add by hand:
+
+```toml
+[mcp_servers.chatbotchat]
+command = "cbc"
+args = ["mcp"]
+
+[mcp_servers.chatbotchat.env]
+CBC_SERVER = "http://127.0.0.1:8484"
+```
+
+Verify with `codex mcp list` — `chatbotchat` should read `enabled`. Codex namespaces
+MCP tools, so in a session they appear as `mcp__chatbotchat__cbc_send` and friends
+rather than the bare `cbc_send` the skills name.
+
+Any other MCP client: point it at the stdio command `cbc mcp` with
+`CBC_SERVER=http://127.0.0.1:8484` in its env, using whatever config it expects.
 
 **4. Auto-approve the bus (recommended):**
 
@@ -208,23 +228,54 @@ To do it by hand instead:
 cbc install-skill
 ```
 
-This writes the bundled **skill family** to `~/.claude/skills/<name>/SKILL.md` — the
-discipline guides a Claude Code agent loads to run CBC well. `cbc` is the base (one
-identity, re-ground before replying, let a background poll own the wait); the rest
-cover multi-agent coordination — `cbc-orchestrator`, `cbc-report`, `cbc-peer`,
-`cbc-recap`, `cbc-reconcile`, `cbc-refresh` (see [Coordination modes](#coordination-modes)). The
-skill text is **embedded in the `cbc` binary**, so this works from a plain `cargo
-install` with no extra checkout. It's idempotent (re-running when a copy is current
-is a no-op) and backs up a stale file to `SKILL.md.bak` before refreshing. `cbc
-install-daemon` runs this automatically as its last step, so on macOS you usually
-don't need it separately — but unlike `install-daemon` (launchd, macOS-only),
-`install-skill` is **cross-platform** (Linux/WSL/Windows), since it only writes
-files under `~/.claude/skills`.
+This writes the bundled **skill family** — the discipline guides an agent loads to run
+CBC well — into **every harness on the machine**. `cbc` is the base (one identity,
+re-ground before replying, let a background poll own the wait); the rest cover
+multi-agent coordination — `cbc-orchestrator`, `cbc-worker`, `cbc-peer`, `cbc-recap`,
+`cbc-reconcile`, `cbc-refresh`, `cbc-checkup`, `cbc-clean` (see
+[Coordination modes](#coordination-modes)). The skill text is **embedded in the `cbc`
+binary**, so this works from a plain `cargo install` with no extra checkout.
+
+| harness | skills land at | relocate with | extra file |
+|---|---|---|---|
+| Claude Code | `~/.claude/skills/<name>/SKILL.md` | `CLAUDE_CONFIG_DIR` | — |
+| Codex | `~/.codex/skills/<name>/SKILL.md` | `CODEX_HOME` | `agents/openai.yaml` |
+
+Those paths are the defaults. Both harnesses move their configuration home when the env
+var in the table is set, and then read skills from the moved home — so `install-skill`
+follows it too. (Set it in your shell, not in a settings file, and export it before
+running `cbc`.)
+
+The two layouts differ because the harnesses do. Claude Code discovers a user-scope
+skill from its `SKILL.md` alone; Codex reads the same file but only surfaces the skill
+as a `/<name>` command when the directory also carries `agents/openai.yaml`. Without
+that file a Codex skill directory is **inert** — present on disk, invisible in the
+session. cbc *derives* that yaml from each skill's own frontmatter rather than shipping
+a second copy of the text, so a skill and its Codex metadata cannot drift apart. What it
+derives meets Codex's own contract for the file: a 25–64 character `short_description`
+(a skill's `description:` is written for a model and runs far longer, so it is cut back
+to a clause) and a `default_prompt` that invokes the skill explicitly as `$<name>`.
+
+By default `install-skill` writes for each harness whose home directory exists, and each
+one degrades on its own — an unwritable `~/.codex/skills` never costs Claude Code its
+skills. Narrow it with `--harness claude` / `--harness codex`, or force both with
+`--harness all`. It's idempotent (re-running when a copy is current is a no-op) and
+backs up anything stale to `<file>.bak` before refreshing. `cbc install-daemon` runs it
+automatically as its last step, so on macOS you usually don't need it separately — but
+unlike `install-daemon` (launchd, macOS-only), `install-skill` is **cross-platform**
+(Linux/WSL/Windows), since it only writes files under those skills directories. It finds
+those directories from `$HOME`, so on native Windows — where `HOME` is usually unset —
+point it at them explicitly with `CLAUDE_CONFIG_DIR` / `CODEX_HOME` or `--skills-dir`.
+
+The MCP server is registered per harness and is **not** part of this step — see step 3
+above for Codex's `~/.codex/config.toml` entry. A harness with the skills but no MCP
+server loads guidance telling it to call `cbc_*` tools that aren't there.
 
 If you also use the [devkit](https://github.com/Levezze/devkit) toolkit, it may have
-already symlinked `~/.claude/skills/cbc` to its own copy. `install-skill` detects
-that symlink and leaves it in place rather than writing through it; pass `--force` to
-replace it with the binary's bundled copy (the symlink's target is left untouched).
+already symlinked `<skills>/cbc` to its own copy. `install-skill` detects that symlink —
+at the skill directory, at a file inside it, or at a directory on the way to one — and
+leaves it in place rather than writing through it; pass `--force` to replace it with the
+binary's bundled copy (the symlink's target is left untouched).
 
 ### Running the daemon by hand
 
@@ -351,11 +402,13 @@ The skills, all auto-installed by `cbc install-skill`:
 |-------|-----|------|
 | `cbc` | every agent | drive a single room well (the base discipline) |
 | `cbc-orchestrator` | orchestrator | hold the map, reconcile collisions, relay ids, own the dev servers, never write code |
-| `cbc-report` | worker | open a report line to the orchestrator, status up |
+| `cbc-worker` | worker | open a report line to the orchestrator, status up |
 | `cbc-peer` | orchestrator | coordinate cross-repo with sibling peer orchestrators |
 | `cbc-recap` | orchestrator | re-ground a running orchestrator from the rooms + map (survives `/compact`) |
 | `cbc-reconcile` | worker | open a direct room with another agent to share real implementation detail |
 | `cbc-refresh` | any agent | replace a context-polluted room with a fresh one, preserving the thread |
+| `cbc-checkup` | orchestrator | sweep the worker rooms and flag any whose poll has gone dark |
+| `cbc-clean` | orchestrator | tear down a finished worker line: close the room, stop the poll, drop the worktree |
 
 Capacity for always-on lines uses the existing mechanism, not a special mode: open
 them with a high `hard_cap` (e.g. 200) and lean on consensus `cbc_extend` (+20) as a

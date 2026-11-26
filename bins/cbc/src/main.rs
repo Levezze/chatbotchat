@@ -15,6 +15,60 @@ mod wait_status;
 use wait_status::WaitGuidance;
 
 /// Output format for `cbc show`.
+/// Which harness `install-skill` writes for. `Installed` — the default — is the honest
+/// answer for a machine that may have either, both, or a new harness added later: it looks
+/// for each harness's home directory and writes only for the ones actually there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum HarnessArg {
+    /// Every harness whose home directory exists on this machine.
+    Installed,
+    /// Claude Code only (~/.claude/skills).
+    Claude,
+    /// Codex only (~/.codex/skills).
+    Codex,
+    /// Every harness cbc knows about, present or not.
+    All,
+}
+
+impl HarnessArg {
+    /// Expand the selection into concrete harnesses. `installed` reports what is actually
+    /// on the machine, so an explicit `--harness installed` means the same thing whether or
+    /// not `--skills-dir` came with it — the caller applies the one-directory rule afterwards
+    /// against the RESOLVED list, which on a Codex-only machine is Codex, not Claude Code.
+    fn resolve(self) -> anyhow::Result<Vec<skill::Harness>> {
+        Ok(match self {
+            HarnessArg::Claude => vec![skill::Harness::ClaudeCode],
+            HarnessArg::Codex => vec![skill::Harness::Codex],
+            HarnessArg::All => skill::HARNESSES.to_vec(),
+            HarnessArg::Installed => {
+                let present: Vec<_> = skill::HARNESSES
+                    .iter()
+                    .copied()
+                    .filter(|h| h.home().map(|p| p.is_dir()).unwrap_or(false))
+                    .collect();
+                if present.is_empty() {
+                    // Name the directories actually checked, not the defaults: under
+                    // CLAUDE_CONFIG_DIR / CODEX_HOME they are somewhere else entirely,
+                    // and this is the message a user reads when nothing installed.
+                    let looked: Vec<String> = skill::HARNESSES
+                        .iter()
+                        .map(|h| match h.home() {
+                            Ok(path) => path.display().to_string(),
+                            Err(_) => format!("<{}'s home>", h.label()),
+                        })
+                        .collect();
+                    anyhow::bail!(
+                        "found no AI coding harness on this machine (looked for {}); pass \
+                         --harness claude or --harness codex to install for one anyway",
+                        looked.join(" and ")
+                    );
+                }
+                present
+            }
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ShowFormat {
     /// Human-readable markdown transcript (default).
@@ -301,17 +355,31 @@ enum Command {
     /// user settings (~/.claude/settings.json), so the bus stops stalling for
     /// per-call approval. Idempotent; backs up the file before editing.
     AllowTools,
-    /// Install the bundled CBC skills (`cbc`, `cbc-orchestrator`, `cbc-worker`,
-    /// `cbc-peer`, `cbc-recap`, `cbc-reconcile`, `cbc-refresh`) into ~/.claude/skills/<name>/ so
-    /// Claude Code gets CBC's agent guidance with no external devkit checkout. Idempotent; backs
-    /// up a stale copy. Skips a devkit-managed symlink unless --force. Cross-platform
-    /// (unlike install-daemon).
+    /// Install the bundled CBC skills (`cbc`, `cbc-orchestrator`, `cbc-worker`, `cbc-peer`,
+    /// `cbc-recap`, `cbc-reconcile`, `cbc-refresh`, `cbc-checkup`, `cbc-clean`) into every AI
+    /// coding harness on this machine — `~/.claude/skills/<name>/` for Claude Code and
+    /// `~/.codex/skills/<name>/` for Codex — so each gets CBC's agent guidance with no external
+    /// devkit checkout. A Codex skill also gets the `agents/openai.yaml` that makes it
+    /// slash-invocable, generated from the skill's own frontmatter. Idempotent; backs up a stale
+    /// copy. Skips a devkit-managed symlink unless --force. Cross-platform (unlike
+    /// install-daemon).
     InstallSkill {
         /// Replace an existing devkit symlink with cbc's bundled copy (the
         /// symlink's target is left untouched).
         #[arg(long)]
         force: bool,
-        /// Skills directory to write into. Defaults to ~/.claude/skills.
+        /// Which harness to install for. Defaults to every harness whose home
+        /// directory exists on this machine.
+        //
+        // Deliberately an Option with no clap default: the handler has to tell an
+        // explicit `--harness installed` from the absence of the flag, because
+        // `--skills-dir` alone still means Claude Code for backwards compatibility
+        // while `--harness installed --skills-dir` must resolve for real.
+        #[arg(long, value_enum)]
+        harness: Option<HarnessArg>,
+        /// Skills directory to write into, overriding the harness's own default.
+        /// Needs the selection to name exactly one harness; with no --harness it
+        /// means Claude Code.
         #[arg(long)]
         skills_dir: Option<std::path::PathBuf>,
     },
@@ -706,15 +774,59 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        Command::InstallSkill { force, skills_dir } => {
-            let dir = match skills_dir {
-                Some(d) => d,
-                None => skill::skills_dir()?,
+        Command::InstallSkill {
+            force,
+            harness,
+            skills_dir,
+        } => {
+            let targets = match harness {
+                Some(explicit) => explicit.resolve()?,
+                // No --harness at all: --skills-dir on its own has always meant Claude
+                // Code, and a bare `install-skill` fans out to whatever is installed.
+                None if skills_dir.is_some() => vec![skill::Harness::ClaudeCode],
+                None => HarnessArg::Installed.resolve()?,
             };
-            let outcomes = skill::install_all(&dir, force)
-                .with_context(|| format!("installing the cbc skills into {}", dir.display()))?;
-            for (name, outcome) in &outcomes {
-                skill::print_outcome(&dir, name, outcome);
+            if targets.len() > 1 && skills_dir.is_some() {
+                anyhow::bail!(
+                    "--skills-dir writes one directory, but {} harnesses are selected; \
+                     name one with --harness claude or --harness codex",
+                    targets.len()
+                );
+            }
+            let mut installed = 0usize;
+            for target in targets {
+                // Resolving the dir can fail (no HOME); degrade like a failed write
+                // rather than denying the remaining harnesses their skills.
+                let dir = match &skills_dir {
+                    Some(d) => d.clone(),
+                    None => match target.skills_dir() {
+                        Ok(d) => d,
+                        Err(e) => {
+                            eprintln!(
+                                "Could not locate the skills directory for {}: {e:#}",
+                                target.label()
+                            );
+                            continue;
+                        }
+                    },
+                };
+                match skill::install_all(target, &dir, force) {
+                    Ok(outcomes) => {
+                        installed += 1;
+                        for (name, outcome) in &outcomes {
+                            skill::print_outcome(target, &dir, name, outcome);
+                        }
+                    }
+                    // One unwritable harness must not deny the others their skills.
+                    Err(e) => eprintln!(
+                        "Could not install the cbc skills for {} into {}: {e:#}",
+                        target.label(),
+                        dir.display()
+                    ),
+                }
+            }
+            if installed == 0 {
+                anyhow::bail!("could not install the cbc skills for any harness");
             }
         }
         Command::InstallHooks => {
@@ -1449,6 +1561,28 @@ fn print_backoff(retry_after: Option<u32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn naming_a_harness_selects_exactly_that_one() {
+        assert_eq!(
+            HarnessArg::Codex.resolve().unwrap(),
+            vec![skill::Harness::Codex]
+        );
+        assert_eq!(
+            HarnessArg::Claude.resolve().unwrap(),
+            vec![skill::Harness::ClaudeCode]
+        );
+    }
+
+    /// `all` is the escape hatch for installing ahead of a harness — writing Codex's
+    /// skills before Codex itself is installed — so it must NOT filter by what exists.
+    #[test]
+    fn all_covers_every_harness_whether_installed_or_not() {
+        assert_eq!(
+            HarnessArg::All.resolve().unwrap(),
+            skill::HARNESSES.to_vec()
+        );
+    }
 
     #[test]
     fn join_wait_is_clamped_to_a_sane_upper_bound() {
